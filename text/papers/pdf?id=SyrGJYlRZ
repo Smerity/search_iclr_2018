@@ -1,0 +1,1702 @@
+Under review as a conference paper at ICLR 2018
+
+YELLOWFIN AND THE ART OF MOMENTUM TUNING
+Anonymous authors Paper under double-blind review
+
+ABSTRACT
+Hyperparameter tuning is one of the most time-consuming workloads in deep learning. State-of-the-art optimizers, such as AdaGrad, RMSProp and Adam, reduce this labor by adaptively tuning an individual learning rate for each variable. Recently researchers have shown renewed interest in simpler methods like momentum SGD as they may yield better results. Motivated by this trend, we ask: can simple adaptive methods, based on SGD perform as well or better? We revisit the momentum SGD algorithm and show that hand-tuning a single learning rate and momentum makes it competitive with Adam. We then analyze its robustness to learning rate misspecification and objective curvature variation. Based on these insights, we design YELLOWFIN, an automatic tuner for momentum and learning rate in SGD. YELLOWFIN optionally uses a negative-feedback loop to compensate for the momentum dynamics in asynchronous settings on the fly. We empirically show YELLOWFIN can converge in fewer iterations than Adam on ResNets and LSTMs for image recognition, language modeling and constituency parsing, with a speedup of up to 3.28x in synchronous and up to 2.69x in asynchronous settings.
+
+1 INTRODUCTION
+
+Accelerated forms of stochastic gradient descent (SGD), pioneered by Polyak (1964) and Nesterov (1983), are the de-facto training algorithms for deep learning. Their use requires a sane choice for their hyperparameters: typically a learning rate and momentum parameter (Sutskever et al., 2013). However, tuning hyperparameters is arguably the most time-consuming part of deep learning, with many papers outlining best tuning practices written (Bengio, 2012; Orr and Müller, 2003; Bengio et al., 2012; Bottou, 2012). Deep learning researchers have proposed a number of methods to deal with hyperparameter optimization, ranging from grid-search and smart black-box methods (Bergstra and Bengio, 2012; Snoek et al., 2012) to adaptive optimizers. Adaptive optimizers aim to eliminate hyperparameter search by tuning on the fly for a single training run: algorithms like AdaGrad (Duchi et al., 2011), RMSProp (Tieleman and Hinton, 2012) and Adam (Kingma and Ba, 2014) use the magnitude of gradient elements to tune learning rates individually for each variable and have been largely successful in relieving practitioners of tuning the learning rate.
+
+Recently some researchers have started favoring simple momentum SGD over the previously mentioned adaptive methods (Chen et al., 2016; Gehring et al., 2017), often reporting better test scores (Wil-
+
+101 Synchronous training
+Adam YellowFin
+
+101
+
+Asynchronous training
+Adam
+
+YellowFin
+
+Closed-loop YellowFin
+
+Training loss
+
+son et al., 2017). Motivated by this trend, we ask the
+
+question: can simpler adaptive methods, based on 100 momentum SGD perform as well or better? We em-
+
+100
+
+pirically show that, with hand-tuned learning rate, Polyak's momentum SGD achieves faster conver-
+
+0k 30k 60k 90k 120k 0k 30k 60k 90k 120k
+
+Iterations
+
+Iterations
+
+gence than Adam for a large class of models. We then formulate the optimization update as a dynamical system and study certain robustness properties
+
+Figure 1: YELLOWFIN in comparison to Adam on a ResNet (CIFAR100, cf. Section 5).
+
+of the momentum operator. Building on our analysis, we design YELLOWFIN, an automatic hy-
+
+perparameter tuner for momentum SGD. YELLOWFIN simultaneously tunes the learning rate and
+
+momentum on the fly, and can handle the complex dynamics of asynchronous execution. Specifically:
+
+· In Section 2, we show that momentum presents convergence robust to learning rate misspecification and curvature variation in a class of non-convex objectives; this robustness is desirable for
+
+1
+
+Under review as a conference paper at ICLR 2018
+
+deep learning. They stem from a known but obscure fact: the momentum operator's spectral radius is constant in a large subset of the hyperparameter space.
+· In Section 3, we use these robustness insights and a simple quadratic model analysis to design YELLOWFIN, an automatic tuner for momentum SGD. YELLOWFIN uses on-the-fly measurements from the gradients to tune both a single learning rate and momentum.
+· In Section 3.3, we discuss common stability concerns related to the phenomenon of exploding gradients (Pascanu et al., 2013). We present a natural extension to our basic tuner, using adaptive gradient clipping, to stabilize training for objectives with exploding gradients.
+· In Section 4 we present closed-loop YELLOWFIN, suited for asynchronous training. It uses a novel component for measuring the total momentum in a running system, including any asynchrony-induced momentum, a phenomenon described in Mitliagkas et al. (2016). This measurement is used in a negative feedback loop to control the value of algorithmic momentum.
+We provide a thorough evaluation of the performance and stability of our tuner. In Section 5, we demonstrate empirically that on ResNets and LSTMs YELLOWFIN can converge in fewer iterations compared to: (i) hand-tuned momentum SGD (up to 1.75x speedup); and (ii) default Adam (up to 3.28x speedup). Under asynchrony, the closed-loop control architecture speeds up YELLOWFIN, making it up to 2.69x faster than Adam. Our experiments include runs on 7 different models, randomized over at least 5 different random seeds. YELLOWFIN is stable and achieves consistent performance: the normalized sample standard deviation of test metrics varies from 0.05% to 0.6%. We released PyTorch and TensorFlow implementations, that can be used as drop-in replacements for any optimizer. YELLOWFIN has also been implemented in other various packages. Its large-scale deployment in industry has taught us important lessons about stability; we discuss those challenges and our solution in Section 3.3. We conclude with related work and discussion in Section 6 and 7.
+
+2 THE MOMENTUM OPERATOR
+
+In this section we identify the main technical insights guiding the design of YELLOWFIN. We show that momentum presents convergence robust to learning rate misspecification and curvature variation for a class of non-convex objectives; these robustness properties are desirable for deep learning.
+
+2.1 PRELIMINARIES
+
+We aim to minimize some objective f (x). In machine learning, x is referred to as the model and
+
+the objective is some loss function. A low loss implies a well-fit model. Gradient descent-based procedures use the gradient of the objective function, f (x), to update the model iteratively. Polyak's
+
+momentum gradient descent update (Polyak, 1964) is given by
+
+xt+1 = xt - f (xt) + µ(xt - xt-1),
+
+(1)
+
+where  denotes the learning rate and µ the value of momentum used. Momentum's main appeal
+
+is its established ability to accelerate convergence (Polyak, 1964). On a strongly convex smooth
+
+function with condition number , the optimal convergence rate of gradient descent (µ = 0) is
+
+O(
+
+-1 +1
+
+)
+
+(Nesterov,
+
+2013).
+
+On
+
+the
+
+other
+
+hand,
+
+for
+
+certain
+
+classes
+
+of
+
+strongly
+
+convex
+
+and
+
+smooth
+
+functions, like quadratics, the optimal momentum value,
+
+µ =
+
+ 
+
+- +
+
+1 1
+
+2
+,
+
+(2)
+
+yields the optimal accelerated rate O( -+11 ). 1 This is the smallest value of momentum that ensures
+
+the same rate of convergence along all directions. This fact is often hidden away in proofs. We
+
+shed light on some of its previously unknown implications in Section 2.2.
+
+2.2 ROBUSTNESS PROPERTIES OF THE MOMENTUM OPERATOR
+In this section we analyze the dynamics of momentum on a simple class of one dimensional, nonconvex objectives. We first introduce the notion of generalized curvature and use it to describe the momentum operator. Then we discuss some properties of the momentum operator.
+1This guarantee does not generalize to arbitrary strongly convex functions (Lessard et al., 2016). Nonetheless, acceleration is often observed in practice (cf. Section 2.2).
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Definition 1 (Generalized curvature). The derivative of f (x) : R  R, can be written as
+
+f (x) = h(x)(x - x)
+
+(3)
+
+for some h(x)  R, where x is the global minimum of f (x). We call h(x) the generalized curvature.
+
+The generalized curvature describes, in some sense, curvature with respect to the optimum, x. For
+
+quadratic objectives, it coincides with the standard definition of curvature, and is the sole quantity
+
+related to the objective that influences the dynamics of gradient descent. For example, the contraction of a gradient descent step is 1 - h(xt). Let At denote the momentum operator at time t. Using a state-space augmentation, we can express the momentum update as
+
+xt+1 - x xt - x
+
+=
+
+1 - h(xt) + µ 1
+
+-µ 0
+
+xt - x xt-1 - x
+
+At
+
+xt - x xt-1 - x
+
+.
+
+(4)
+
+Lemma 2 (Robustness of the momentum operator). As proven in Appendix A, if the generalized
+
+curvature, h, and hyperparamet(e1rs-, µµ)a2reinthh(exrto)bust(1re+gionµ, t)h2a,t is: then the spectral radius of the momentum operator only depends on momentum:
+
+(At)
+
+=
+
+µ.
+
+(5)
+
+We explain Lemma 2 as robust convergence with respect to learning rate and to variations in curvature.
+
+Momentum is robust to learning rate misspecification For a
+
+honfeodr iamllexnsaionndaL(l 1estm-romnagµl2y)s2cu/oghngveexstsquthaadt(r1at(+icAotb)µj=e)c2t/ivheµ.,
+
+we get h(x) = as long as
+(6)
+
+In Figure 2, we plot (At) for different value of momentum, the optimal rate of
+
+ and µ. As convergence
+
+weµiniscraecahsieevtehde
+
+by an ever-widening range of learning rates. Furthermore, for objec-
+
+tives with large condition number, higher values of momentum are
+
+both faster and more robust. This property influences the design
+
+of our tuner: as long as the learning rate satisfies (6), we are in the
+
+robust rate of
+
+regµiofnoraqnudaedxrapteiccts,thinedseapmenedaesnytmopf ttohteiclse,aern.gi.nga
+
+convergence rate. Having
+
+established that, we can just focus on optimally tuning momentum.
+
+Spectral radius
+
+1.0
+
+0.8
+
+0.6
+
+0.4
+
+µ = 0.0 µ = 0.1
+
+0.2 µ = 0.3 µ = 0.5
+
+0.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0
+
+Learning rate ()
+
+Figure 2: Momentum operator on scalar quadratic.
+
+Momentum is robust to curvature variation As discussed in Section 2.1, the intuition hidden in
+
+classic results is that for strongly convex smooth objectives, the momentum value in (2) guarantees
+
+the same rate of convergence along all directions. We extend this intuition to certain non-convex
+
+functions. Lemma 2 guarantees a constant, time-homogeneous spectral radius for the momentum
+
+operators (At)t if (5) is satisfied at every step. This motivates an extension of the condition number.
+
+Definition 3 (Generalized condition number). We define the generalized condition number (GCN) of
+
+a scalar function, f (x) : R  R, to be the dynamic range of its generalized curvature, h(x):
+
+
+
+=
+
+supxdom(f) h(x) infxdom(f) h(x)
+
+(7)
+
+The GCN captures variations in generalized curvature along a scalar slice. From Lemma 2 we get
+
+µ =
+
+
+
+
+
+- +
+
+1 1
+
+2
+,
+
+
+
+=
+
+(1 - µ)2 infxdom(f) h(x)
+
+(8)
+
+as the optimal homogeneous
+
+hyperparameters. spectral radius of
+
+Spµeciffiocraalllly,(Aµt)its.
+
+the smallest momentum value that The spectral radius of an operator
+
+guarantees a describes its
+
+sapsyecmtrpatlortiacdciuosnveµrgdenocees
+
+behavior. However, the product of not always follow the asymptotics
+
+aofseqµuet.ncIne
+
+of operators At other words, we
+
+··· do
+
+A1 not
+
+all with provide
+
+a convergence rate guarantee. Instead, we provide evidence in support of this intuition. For example,
+
+the non-convex objective in Figure 3(a), composed of two quadratics with curvatures 1 and 1000, has
+
+a GCN of 1000. Using the tuning rule of (8), and running the momentum algorithm (Figure 3(b))
+
+yields for an
+
+La SpTraMct,icthaellymcaojonrsittyanotfrvaaterioabf lceosnfvoellrogwenacetµhrcooungvheorguet.nIcne
+
+Figures 3(c,d) we demonstrate that rate. This property influences the
+
+design of our tuner: in the next section we use the tuning rules of (8) in YELLOWFIN, generalized
+
+appropriately to handle SGD noise.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+f (x) Distance from optimum Distance from final value
+
+0.8 0.7 0.6 0.5 0.4 0.3 0.2 0.1 0.0
+-20-15-10-5 0 x
+
+5 10 15 20
+
+(a)
+
+103 102 101 100 10-1 10-2 10-3 10-4 10-5 10-6 10-7
+0
+
+100 200 300 400 500 Iterations
+(b)
+
+10-1
+
+10-2
+
+10-3
+
+10-4
+10-5 0
+
+µ = 0.9
+50 100 150 200 250 300 Iterations
+
+(c)
+
+µ = 0.99
+0 50 100 150 200 250 300 Iterations
+(d)
+
+Figure 3: (a) Non-convex toy example; (b) constant convergence rate achieved empirically on the
+
+objective variables
+
+(oshf o(wa)ntiunngedreya)ccfaolrldiinngthteoro(8b)u;st(cr,edg)ioLnSaTnMd foolnloMwNthIeSTro:bausstmraotme,entµu.m
+
+increases,
+
+more
+
+3 THE YELLOWFIN TUNER
+
+In this section we describe YELLOWFIN, our tuner for momentum SGD. We introduce a noisy quadratic model and work on a local quadratic approximation of f (x) to apply the tuning rule of (8) to SGD on an arbitrary objective. YELLOWFIN is our implementation of that rule.
+
+Noisy quadratic model We consider minimizing the one-dimensional quadratic
+
+f (x)
+
+=
+
+1 2
+
+hx2
+
++C
+
+=
+
+1 n
+
+1 2
+
+h(x
+
+-
+
+ci)2
+
+1 n
+
+fi(x),
+
+ii
+
+ci = 0.
+i
+
+(9)
+
+The objective is defined as the average of n component functions, fi. This is a common model
+
+for SGD, where we use only a single data point (or a mini-batch) drawn uniformly at random,
+
+St
+
+
+
+Uni([n])
+
+to
+
+compute
+
+a
+
+noisy
+
+gradient,
+
+fSt (x),
+
+for
+
+step
+
+t.
+
+Here,
+
+C
+
+=
+
+1 2n
+
+i hci2 denotes the
+
+gradient variance. This scalar model is sufficient to study an arbitrary local quadratic approximation:
+
+optimization on quadratics decomposes trivially into scalar problems along the principal eigenvectors
+
+of the Hessian. Next we get an exact expression for the mean square error after running momentum
+
+SGD on a scalar quadratic for t steps.
+
+Lemma 4. Let f (x) be defined as in (9), x1 = x0 and xt follow the momentum update (1) with
+
+stochastic gradients the optimum x is
+
+fSt (xt-1)
+
+for
+
+t
+
+
+
+2.
+
+Let
+
+e1
+
+=
+
+[1,
+
+0]T
+
+,
+
+the
+
+expectation
+
+of
+
+squared
+
+distance
+
+to
+
+E(xt+1 - x)2 = (e1 At[x1 - x, x0 - x] )2 + 2Ce1 (I - B t)(I - B )-1e1,
+
+(10)
+
+where the first and second term correspond to squared bias and variance, and their corresponding momentum dynamics are captured by operators
+
+A=
+
+1 - h + µ 1
+
+-µ 0
+
+,
+
+(1 - h + µ)2
+
+B =
+
+1
+
+1 - h + µ
+
+µ2 0 0
+
+-2µ(1 - h + µ) 0 . -µ
+
+(11)
+
+Even though it is possible to numerically work on (10) directly, we use a scalar, asymptotic surrogate
+
+based in (12) on the spectral radii of operators to simplify analysis and expose insights. This decision
+
+is supported by our findings in Section 2: the spectral radii can capture empirical convergence speed.
+
+E(xt+1
+
+-
+
+x)2
+
+(A)2t(x0
+
+-
+
+x)2
+
++
+
+(1
+
+-
+
+(B )t) 1
+
+2C - (B)
+
+(12)
+
+kOnnoewofthoautrtdheissiigmnpdleiecsisaiosnpsefcotrraYl EraLdLiOusWFIµN
+
+is of
+
+to always work the momentum
+
+in the robust region of Lemma 2. We operator, A, for the bias. Lemma 5
+
+shows that under the exact same condition, the variance operator B has spectral radius µ. Lemma 5. The spectral radius of the variance operator, B is µ, if (1 - µ)2  h  (1 + µ)2.
+
+As a result, the surrogate objective of (12), takes the following form in the robust region.
+
+E(xt+1
+
+-
+
+x)2
+
+
+
+µt(x0
+
+-
+
+x)2
+
++
+
+(1
+
+-
+
+µt)
+
+2C 1-µ
+
+We use this surrogate objective to extract a noisy tuning rule for YELLOWFIN.
+
+(13)
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+3.1 TUNING RULE
+
+Based on the surrogate in (13), we present YELLOWFIN (Algorithm 1). Let D denote an estimate of the current model's distance to a local quadratic approximation's minimum, and C denote an estimate for gradient variance. Also, let hmax and hmin denote estimates for the largest and smallest generalized curvature respectively. The extremal curvatures hmin and hmax are meant to capture both curvature variation along different directions (like the classic condition number) and also variation
+that occurs as the landscape evolves. At each iteration, we solve the following SINGLESTEP problem.
+
+(SINGLESTEP) µt, t =
+s.t.
+
+arg min µD2 + 2C
+µ
+µ  hmax/hmin - 1 hmax/hmin + 1
+(1 - µ)2  = hmin
+
+2
+
+Algorithm 1 YELLOWFIN
+function YELLOWFIN(gradient gt, ) hmax, hmin  CURVATURERANGE(gt, ) C  VARIANCE(gt, ) D  DISTANCE(gt, ) µt, t  SINGLESTEP(C, D, hmax, hmin) return µt, t
+end function
+
+SINGLESTEP minimizes the surrogate for the expected squared distance from the optimum of a local quadratic approximation (13) after a single step (t = 1), while keeping all directions in the
+
+robust region (5). This is the SGD version of the noiseless tuning rule in (8). It can be solved in
+
+closed form; we refer to Appendix D for discussion on the closed form solution. YELLOWFIN uses
+functions CURVATURERANGE, VARIANCE and DISTANCE to measure quantities hmax, hmin, C and D respectively. These measurement functions can be designed in different ways. We present the
+
+implementations we used for our experiments, based completely on gradients, in Section 3.2.
+
+3.2 MEASUREMENT FUNCTIONS IN YELLOWFIN
+This section describes our implementation of the measurement oracles used by YELLOWFIN: CURVATURERANGE, VARIANCE, and DISTANCE. We design the measurement functions with the assumption of a negative log-probability objective; this is in line with typical losses in machine learning, e.g. cross-entropy for neural nets and maximum likelihood estimation in general. Under this assumption, the Fisher information matrix--i.e. the expected outer product of noisy gradients--equals the Hessian of the objective (Duchi, 2016; Pascanu and Bengio, 2013). This allows for measurements purely from minibatch gradients with overhead linear to model dimensionality. These implementations are not guaranteed to give accurate measurements. Nonetheless, their use in our experiments in Section 5 shows that they are sufficient for YELLOWFIN to outperform the state of the art on a variety of objectives. We also refer to Appendix E for implementation details on zero-debias (Kingma and Ba, 2014), slow start (Schaul et al., 2013) and smoothing for curvature range estimation.
+
+Algorithm 2 Curvature range
+
+state: hmax, hmin, hi, i  {1, 2, 3, ...}
+
+function CURVATURERANGE(gradient gt, )
+
+ht  gt 2
+
+hmax,tmax hi, hmin,t min hi
+
+t-wit
+
+t-wit
+
+hmax   · hmax + (1 - ) · hmax,t hmin   · hmin + (1 - ) · hmin,t
+
+return hmax, hmin
+
+end function
+
+Algorithm 3 Gradient variance Algorithm 4 Distance to opt.
+
+state: g2  0, g  0 function VARIANCE(gradient gt, )
+g2   · g2 + (1 - ) · gt gt g   · g + (1 - ) · gt return g2 - g2 1 end function
+
+state: g  0, h  0 function DISTANCE(gradient gt, )
+g   · g + (1 - ) · gt h   · h + (1 - ) · gt 2 D   · D + (1 - ) · g /h return D
+end function
+
+Curvature range Let gt be a noisy gradient, we estimate the range of curvatures in Algorithm 2. We notice that the outer product of gt and gtT has an eigenvalue ht = gt 2 with eigenvector gt. Thus under our negative log-likelihood assumption, we use ht to approximate the curvature of Hessian
+along gradient direction gt. Specifically, we maintain hmin and hmax as running averages of extreme curvature hmin,t and hmax,t, from a sliding window of width 20. As gradient directions evolve, we explore curvatures along different directions. Thus hmin and hmax capture the curvature variations.
+
+Gradient variance To estimate the gradient variance in Algorithm 3, we use running averages
+g and g2 to keep track of gt and gt gt, the first and second order moment of the gradient. As Var(gt) = Egt2 - (Egt)2, we estimate the gradient variance C in (14) using C = g2 - g2 1.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+Gradient norm Training loss
+
+105 103
+100
+10-3 0k
+
+Without clipping With clipping Clipping thresh.
+
+1k 2k Iterations
+
+3k
+
+102 101 100 10-1
+0k
+
+Without clipping With clipping
+
+1k 2k Iterations
+
+3k
+
+Loss BLEU4
+
+Default w/o clip. Default w/ clip.
+YF
+
+diverge 2.86 30.75 2.75 31.59
+
+Figure 4: A variation of the LSTM architecture in (Zhu et al., Table 1: German-English transla2016) exhibits exploding gradients. The proposed adaptive tion validation performance using gradient clipping threshold (blue) stabilizes the training loss. convolutional seq-to-seq learning.
+
+Distance to optimum In Algorithm 4, we estimate the distance to the optimum of the local quadratic approximation. Inspired by the fact that f (x )  H x - x for a quadratic f (x) with Hessian H and minimizer x , we first maintain h and g as running averages of curvature ht
+and gradient norm gt . Then the distance is approximated using g /h.
+
+3.3 STABILITY ON NON-SMOOTH OBJECTIVES
+Neural network objectives can involve arbitrary non-linearities, and large Lipschitz constants (Szegedy et al., 2013). Furthermore, the process of training them is inherently non-stationary, with the landscape abruptly switching from flat to steep areas. In particular, the objective functions of RNNs with hidden units can exhibit occasional but very steep slopes (Pascanu et al., 2013). To deal with this issue, we use adaptive gradient clipping heuristics as a very natural addition to our basic tuner. It is discussed with extensive details in Appendix F. In Figure 4, we present an example of an LSTM that exhibits the 'exploding gradient' issue. The proposed adaptive clipping can stabilize the training process using YELLOWFIN and prevent large catastrophic loss spikes.
+We validate the proposed adaptive clipping on the convolutional sequence to sequence learning model (Gehring et al., 2017) for IWSLT 2014 German-English translation. The default optimizer (Gehring et al., 2017) uses learning rate 0.25 and Nesterov's momentum 0.99, diverging to loss overflow due to 'exploding gradient'. It requires, as in Gehring et al. (2017), strict manually set gradient norm threshold 0.1 to stabilize. In Table 1, we can see YellowFin, with adaptive clipping, outperforms the default optimizer using manually set clipping, with 0.84 higher validation BLEU4 after 120 epochs.
+
+4 CLOSED-LOOP YELLOWFIN
+
+Asynchrony is a parallelization technique that avoids synchronization barriers (Niu et al., 2011). It yields better hardware efficiency, i.e. faster steps, but can increase the number of iterations to a given metric, i.e. statistical efficiency, as a tradeoff (Zhang and Ré, 2014). Mitliagkas et al. (2016) interpret asynchrony as added momentum dynamics. We design closed-loop YELLOWFIN, a variant of YELLOWFIN to automatically control algorithmic momentum, compensate for asynchrony and accelerate convergence. We use the formula in (14) to model the dynamics in the system, where the total momentum, µT , includes both asynchrony-induced and algorithmic momentum, µ, in (1).
+
+E[xt+1 - xt] = µT E[xt - xt-1] - Ef (xt)
+
+(14)
+
+We first use (14) to design an robust estimator µ^T for the value of total momentum at every iteration. Then we use a simple negative feedback control loop to adjust the value of algorithmic momentum so that µ^T matches the target momentum decided by YELLOWFIN in Algorithm 1. In Figure 5, we demonstrate momentum dynamics in an asynchronous training system. As directly using the target value as algorithmic momentum, YELLOWFIN (middle) presents total momentum µ^T strictly larger than the target momentum, due to asynchrony-induced momentum. Closed-loop YELLOWFIN (right) automatically brings down algorithmic momentum, match measured total momentum µ^T to target value and, as we will see, significantly speeds up convergence comparing to YELLOWFIN. We refer to Appendix G for details on estimator µ^T and Closed-loop YELLOWFIN in Algorithm 5.
+
+5 EXPERIMENTS
+In this section, we empirically validate the importance of momentum tuning and evaluate YELLOWFIN in both synchronous (single-node) and asynchronous settings. In synchronous settings, we first demonstrate that, with hand-tuning, momentum SGD is competitive with Adam, a state-of-the-art
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Momentum
+
+0.8 0.6 Total mom.
+Target mom. 0.4
+0.2
+0.0
+0.2
+0k 5k 10k 15k 20k 25k 30k 35k 40k
+Iterations
+
+0.8 0.6 Asynchrony
+-induced momentum 0.4
+0.2 0.0 Total mom. 0.2 Target mom.
+0k 5k 10k 15k 20k 25k 30k 35k 40k
+Iterations
+
+0.8 0.6 Total mom.
+Target mom. 0.4 Algorithmic mom. 0.2
+0.0
+0.2
+0k 5k 10k 15k 20k 25k 30k 35k 40k
+Iterations
+
+Figure 5: When running YELLOWFIN, total momentum µ^t equals algorithmic value in synchronous settings (left); µ^t is greater than algorithmic value on 16 asynchronous workers (middle). Closed-loop
+YELLOWFIN automatically lowers algorithmic momentum and brings total momentum to match the
+target value (right). Red dots are measured µ^t at every step with red line as its running average.
+
+adaptive method. Then, we evaluate YELLOWFIN without any hand tuning in comparison to handtuned Adam and momentum SGD. In asynchronous settings, we show that closed-loop YELLOWFIN accelerates with momentum closed-loop control, performing significantly better than Adam.
+We evaluate on convolutional neural networks (CNN) and recurrent neural networks (RNN). For CNN, we train ResNet (He et al., 2016) for image recognition on CIFAR10 and CIFAR100 (Krizhevsky et al., 2014). For RNN, we train LSTMs for character-level language modeling with the TinyShakespeare (TS) dataset (Karpathy et al., 2015), word-level language modeling with the Penn TreeBank (PTB) (Marcus et al., 1993), and constituency parsing on the Wall Street Journal (WSJ) dataset (Choe and Charniak). We refer to Table 3 in Appendix H for model specifications. To eliminate influences of a specific random seed, in our synchronous and asynchronous experiments, the training loss and validation metrics are averaged from 3 runs using different random seeds.
+
+5.1 SYNCHRONOUS EXPERIMENTS
+We tune Adam and momentum SGD on learning rate grids with prescribed momentum 0.9 for SGD. We fix the parameters of Algorithm 1 in all experiments, i.e. YELLOWFIN runs without any hand tuning. We provide full specifications, including the learning rate (grid) and the number of iterations we train on each model in Appendix I. For visualization purposes, we smooth training losses with a uniform window of width 1000. For Adam and momentum SGD on each model, we pick the configuration achieving the lowest averaged smoothed loss. To compare two algorithms, we record the lowest smoothed loss achieved by both. Then the speedup is reported as the ratio of iterations to achieve this loss. We use this setup to validate our claims.
+
+Momentum SGD is competitive with adaptive methods Table 2: Speedup of YELLOWFIN and
+
+In Table 2, we compare tuned momentum SGD and tuned tuned mom. SGD over tuned Adam.
+
+Adam on ResNets with training losses shown in Figure 9 in Appendix J. We can observe that momentum SGD achieves
+
+Adam mom.SGD YF
+
+1.71x and 1.87x speedup to tuned Adam on CIFAR10 and CIFAR100 respectively. In Figure 6 and Table 2, with the exception of PTB LSTM, momentum SGD also produces better training loss, as well as better validation perplexity in language modeling and validation F1 in parsing. For the parsing task, we also compare with tuned Vanilla SGD and
+
+CIFAR10 CIFAR100
+PTB TS WSJ
+
+1x 1x 1x 1x 1x
+
+1.71x 1.87x 0.88x 2.49x 1.33x
+
+1.93x 1.38x 0.77x 3.28x 2.33x
+
+AdaGrad, which are used in the NLP community. Figure 6 (right) shows that fixed momentum 0.9
+
+can already speedup Vanilla SGD by 2.73x, achieving observably better validation F1. We refer to
+
+Appendix J.2 for further discussion on the importance of momentum adaptivity in YELLOWFIN.
+
+YELLOWFIN can match hand-tuned momentum SGD and can outperform hand-tuned Adam In our experiments, YELLOWFIN, without any hand-tuning, yields training loss matching hand-tuned momentum SGD for all the ResNet and LSTM models in Figure 6 and 9. When comparing to tuned Adam in Table 2, except being slightly slower on PTB LSTM, YELLOWFIN achieves 1.38x to 3.28x speedups in training losses on the other four models. More importantly, YELLOWFIN consistently shows better validation metrics than tuned Adam in Figure 6. It demonstrates that YELLOWFIN can match tuned momentum SGD and outperform tuned state-of-the-art adaptive optimizers. In Appendix J.4, we show YELLOWFIN further speeding up with finer-grain manual learning rate tuning.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Training loss
+
+7
+
+Momentum SGD
+
+6
+
+Adam YellowFin
+
+5
+
+4 3.5
+0k
+103
+
+5k 10k 15k 20k 25k 30k
+Iterations
+Momentum SGD Adam YellowFin
+
+102 0k
+
+5k 10k 15k 20k 25k 30k
+Iterations
+
+Validation perplexity
+
+Training loss
+
+2
+1.5
+1 0k 7 6 5 4.5 0k
+
+Training loss
+
+Momentum SGD Adam YellowFin
+
+2.5 2.0
+
+Vanilla SGD Momentum SGD Adam AdaGrad YellowFin
+
+5k 10k 15k
+Iterations
+
+20k
+
+Momentum SGD Adam YellowFin
+
+5k 10k 15k
+Iterations
+
+20k
+
+Validation F1
+
+1.5 0k
+91.5 91.0 90.5 90.0 89.5 89.0 88.5 88.0
+0
+
+30k 60k 90k
+Iterations
+
+120k
+
+Momentum SGD Adam YellowFin AdaGrad Vanilla SGD
+
+10 20 30 40
+Iterations
+
+50
+
+Validation perplexity
+
+Figure 6: Training loss and test metrics on word-level language modeling with PTB (left), characterlevel language modeling with TS (middle) and constituency parsing on WSJ (right). Note the validation metrics are monotonic as we report the best values up to each specific number of iterations.
+
+5.2 ASYNCHRONOUS EXPERIMENTS
+
+In this section, we evaluate closed-loop YELLOWFIN with focus
+
+101
+
+Adam
+
+Training loss
+
+on the number of iterations to reach a certain solution. To that end, we run 16 asynchronous workers on a single machine and force them to update the model in a round-robin fashion, i.e. the gradient is delayed for 15 iterations. Figure 7 presents training losses on
+
+100
+
+YellowFin Closed-loop YellowFin
+
+the CIFAR100 ResNet, using YELLOWFIN in Algorithm 1, closed-
+loop YELLOWFIN in Algorithm 5 and Adam with the learning rate
+achieving the best smoothed loss in Section 5.1. We can observe closed-loop YELLOWFIN achieves 20.1x speedup to YELLOWFIN, and consequently a 2.69x speedup to Adam. This demonstrates
+
+0k 30k 60k 90k 120k
+Iterations
+Figure 7: Asynchronous performance on CIFAR100 ResNet.
+
+that (1) closed-loop YELLOWFIN accelerates by reducing algorithmic momentum to compensate for
+
+asynchrony and (2) can converge in less iterations than Adam in asynchronous-parallel training.
+
+6 RELATED WORK
+Many techniques have been proposed on tuning hyperparameters for optimizers. General hyperparameter tuning approaches, such as random search (Bergstra and Bengio, 2012) and Bayesian approaches (Snoek et al., 2012; Hutter et al., 2011), directly applies to optimizer tuning. As another trend, adaptive methods, including AdaGrad (Duchi et al., 2011), RMSProp (Tieleman and Hinton, 2012) and Adam (Chilimbi et al., 2014), uses per-dimension learning rate. Schaul et al. (2013) use a noisy quadratic model similar to ours to extract learning rate tuning rule in Vanilla SGD. However they do not use momentum which is essential in training modern neural networks. Existing adaptive momentum approach either consider the deterministic setting (Graepel and Schraudolph, 2002; Rehman and Nawi, 2011; Hameed et al., 2016; Swanston et al., 1994; Ampazis and Perantonis, 2000; Qiu et al., 1992) or only analyze stochasticity with O(1/t) learning rate (Leen and Orr, 1994). In the contrast, we aim at practical momentum adaptivity for stochastically training neural networks.
+
+7 DISCUSSION
+We presented YELLOWFIN, the first optimization method that automatically tunes momentum as well as the learning rate of momentum SGD. YELLOWFIN outperforms the state-of-the-art adaptive optimizers on a large class of models both in synchronous and asynchronous settings. It estimates statistics purely from the gradients of a running system, and then tunes the hyperparameters of momentum SGD based on noisy, local quadratic approximations. As future work, we believe that more accurate curvature estimation methods, like the bbprop method (Martens et al., 2012) can further improve YELLOWFIN. We also believe that our closed-loop momentum control mechanism in Section 4 could accelerate convergence for other adaptive methods in asynchronous-parallel settings.
+
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Boris T Polyak. Some methods of speeding up the convergence of iteration methods. USSR Computational Mathematics and Mathematical Physics, 4(5):1­17, 1964.
+Yurii Nesterov. A method of solving a convex programming problem with convergence rate o (1/k2). In Soviet Mathematics Doklady, volume 27, pages 372­376, 1983.
+Ilya Sutskever, James Martens, George Dahl, and Geoffrey Hinton. On the importance of initialization and momentum in deep learning. In Proceedings of the 30th international conference on machine learning (ICML-13), pages 1139­1147, 2013.
+Yoshua Bengio. Practical recommendations for gradient-based training of deep architectures. In Neural networks: Tricks of the trade, pages 437­478. Springer, 2012.
+Genevieve B Orr and Klaus-Robert Müller. Neural networks: tricks of the trade. Springer, 2003.
+Yoshua Bengio et al. Deep learning of representations for unsupervised and transfer learning. ICML Unsupervised and Transfer Learning, 27:17­36, 2012.
+Léon Bottou. Stochastic gradient descent tricks. In Neural networks: Tricks of the trade, pages 421­436. Springer, 2012.
+James Bergstra and Yoshua Bengio. Random search for hyper-parameter optimization. Journal of Machine Learning Research, 13(Feb):281­305, 2012.
+Jasper Snoek, Hugo Larochelle, and Ryan P Adams. Practical bayesian optimization of machine learning algorithms. In Advances in neural information processing systems, pages 2951­2959, 2012.
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and stochastic optimization. Journal of Machine Learning Research, 12(Jul):2121­2159, 2011.
+Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural networks for machine learning, 4(2), 2012.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Danqi Chen, Jason Bolton, and Christopher D Manning. A thorough examination of the cnn/daily mail reading comprehension task. arXiv preprint arXiv:1606.02858, 2016.
+Jonas Gehring, Michael Auli, David Grangier, Denis Yarats, and Yann N Dauphin. Convolutional sequence to sequence learning. arXiv preprint arXiv:1705.03122, 2017.
+Ashia C Wilson, Rebecca Roelofs, Mitchell Stern, Nathan Srebro, and Benjamin Recht. The marginal value of adaptive gradient methods in machine learning. arXiv preprint arXiv:1705.08292, 2017.
+Razvan Pascanu, Tomas Mikolov, and Yoshua Bengio. On the difficulty of training recurrent neural networks. In International Conference on Machine Learning, pages 1310­1318, 2013.
+Ioannis Mitliagkas, Ce Zhang, Stefan Hadjis, and Christopher Ré. Asynchrony begets momentum, with an application to deep learning. arXiv preprint arXiv:1605.09774, 2016.
+Yurii Nesterov. Introductory lectures on convex optimization: A basic course, volume 87. Springer Science & Business Media, 2013.
+Laurent Lessard, Benjamin Recht, and Andrew Packard. Analysis and design of optimization algorithms via integral quadratic constraints. SIAM Journal on Optimization, 26(1):57­95, 2016.
+John Duchi. Fisher information., 2016. URL https://web.stanford.edu/class/ stats311/Lectures/lec-09.pdf.
+Razvan Pascanu and Yoshua Bengio. Revisiting natural gradient for deep networks. arXiv preprint arXiv:1301.3584, 2013.
+9
+
+Under review as a conference paper at ICLR 2018
+Tom Schaul, Sixin Zhang, and Yann LeCun. No more pesky learning rates. ICML (3), 28:343­351, 2013.
+Chenzhuo Zhu, Song Han, Huizi Mao, and William J Dally. Trained ternary quantization. arXiv preprint arXiv:1612.01064, 2016.
+Christian Szegedy, Wojciech Zaremba, Ilya Sutskever, Joan Bruna, Dumitru Erhan, Ian Goodfellow, and Rob Fergus. Intriguing properties of neural networks. arXiv preprint arXiv:1312.6199, 2013.
+Feng Niu, Benjamin Recht, Christopher Re, and Stephen Wright. Hogwild: A lock-free approach to parallelizing stochastic gradient descent. In Advances in Neural Information Processing Systems, pages 693­701, 2011.
+Ce Zhang and Christopher Ré. Dimmwitted: A study of main-memory statistical analytics. PVLDB, 7(12):1283­1294, 2014. URL http://www.vldb.org/pvldb/vol7/p1283-zhang. pdf.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 770­778, 2016.
+Alex Krizhevsky, Vinod Nair, and Geoffrey Hinton. The cifar-10 dataset, 2014.
+Andrej Karpathy, Justin Johnson, and Li Fei-Fei. Visualizing and understanding recurrent networks. arXiv preprint arXiv:1506.02078, 2015.
+Mitchell P Marcus, Mary Ann Marcinkiewicz, and Beatrice Santorini. Building a large annotated corpus of english: The penn treebank. Computational linguistics, 19(2):313­330, 1993.
+Do Kook Choe and Eugene Charniak. Parsing as language modeling.
+Frank Hutter, Holger H Hoos, and Kevin Leyton-Brown. Sequential model-based optimization for general algorithm configuration. LION, 5:507­523, 2011.
+Trishul M Chilimbi, Yutaka Suzue, Johnson Apacible, and Karthik Kalyanaraman. Project adam: Building an efficient and scalable deep learning training system. In OSDI, volume 14, pages 571­582, 2014.
+Thore Graepel and Nicol N Schraudolph. Stable adaptive momentum for rapid online learning in nonlinear systems. In International Conference on Artificial Neural Networks, pages 450­455. Springer, 2002.
+Mohammad Zubair Rehman and Nazri Mohd Nawi. The effect of adaptive momentum in improving the accuracy of gradient descent back propagation algorithm on classification problems. In International Conference on Software Engineering and Computer Systems, pages 380­390. Springer, 2011.
+Alaa Ali Hameed, Bekir Karlik, and Mohammad Shukri Salman. Back-propagation algorithm with variable adaptive momentum. Knowledge-Based Systems, 114:79­87, 2016.
+DJ Swanston, JM Bishop, and Richard James Mitchell. Simple adaptive momentum: new algorithm for training multilayer perceptrons. Electronics Letters, 30(18):1498­1500, 1994.
+Nikolaos Ampazis and Stavros J Perantonis. Levenberg-marquardt algorithm with adaptive momentum for the efficient training of feedforward networks. In Neural Networks, 2000. IJCNN 2000, Proceedings of the IEEE-INNS-ENNS International Joint Conference on, volume 1, pages 126­131. IEEE, 2000.
+G Qiu, MR Varley, and TJ Terrell. Accelerated training of backpropagation networks by using adaptive momentum step. Electronics letters, 28(4):377­379, 1992.
+Todd K Leen and Genevieve B Orr. Optimal stochastic search and adaptive momentum. In Advances in neural information processing systems, pages 477­484, 1994.
+10
+
+Under review as a conference paper at ICLR 2018 James Martens, Ilya Sutskever, and Kevin Swersky. Estimating the hessian by back-propagating
+curvature. arXiv preprint arXiv:1206.6464, 2012. Ian Goodfellow, Yoshua Bengio, and Aaron Courville. Deep Learning. MIT Press, 2016. http:
+//www.deeplearningbook.org. Stefan Hadjis, Ce Zhang, Ioannis Mitliagkas, Dan Iter, and Christopher Ré. Omnivore: An optimizer
+for multi-device deep learning on cpus and gpus. arXiv preprint arXiv:1606.04487, 2016. Saining Xie, Ross Girshick, Piotr Dollár, Zhuowen Tu, and Kaiming He. Aggregated residual
+transformations for deep neural networks. arXiv preprint arXiv:1611.05431, 2016. Ofir Press and Lior Wolf. Using the output embedding to improve language models. arXiv preprint
+arXiv:1608.05859, 2016.
+11
+
+Under review as a conference paper at ICLR 2018
+
+A PROOF OF LEMMA 2
+
+To prove Lemma 2, we first prove a more generalized version in Lemma 6. By restricting f to be a one
+
+dimensional quadratics function, the generalized curvature ht itself is the only eigenvalue. We can
+
+prove Lemma 2 correspondence
+
+as of
+
+a straight-forward corollary. (4), the spectral radius (At)
+
+L=emmµaif6thalesocuirmvaptluierse,
+
+in on
+
+the multiple dimensional all eigenvector directions
+
+(eigenvalue) satisfies (5).
+
+Lemma 6. Let the gradients of a function f be described by
+
+f (x t) = H (x t)(x t - x ),
+
+(15)
+
+with H (xt)  Rn  Rn×n. Then the momentum update can be expressed as a linear operator:
+
+y t+1 yt
+
+=
+
+I - H (x t) + µI I
+
+-µI 0
+
+yt y t-1
+
+= At
+
+yt y t-1
+
+,
+
+(16)
+
+where y t x t - x . Now, assume that the following condition holds for all eigenvalues (H (xt))
+
+of H (xt):
+
+then
+
+the
+
+spectral
+
+radius
+
+of
+
+(1 - µ)2 
+
+
+
+(H (xt))
+
+
+
+At is controlled by momentum
+
+(1 + µ)2 .
+with (At) =
+
+µ.
+
+(17)
+
+Proof. Let t be an eigenvalue of matrix At, it gives det (At - tI ) = 0. We define the blocks in At as C = I - H t + µI - tI , D = -µI , E = I and F = -tI which gives
+det (At - tI ) = det F det C - DF -1E = 0
+
+assuming generally F is invertible. Note we use H t H (x t) for simplicity in writing. The equation det C - DF -1E = 0 implies that
+
+det t2I - tM t + µI = 0
+
+(18)
+
+with M t = (I - H t + µI ). In other words, t satisfied that t2 - t(M t) + µ = 0 with (M t) being one eigenvalue of Mt . I.e.
+
+t = (M t) ±
+
+(M t)2 - 4µ 2
+
+(19)
+
+On the other hand, (17) guarantees that (1 - (H t) + µ)2  4µ. We know both H t and I - H t +
+
+4µlaµIrgwaershetisceyhigmgemnuvaeartarluincet.eoTefshAu|sttf,|owr=ealhl aeµvigefeotnhrveaalslulpeesctt.r(aAMlsrattdh)ieousfspMoefcAttr,awtlbereahidanivguesis(µM.equt)a2l
+
+= to
+
+(1-(H t)+µ)2  the magnitude of the
+
+B PROOF OF LEMMA 4
+
+We first prove Lemma 7 and Lemma 8 as preparation for the proof of Lemma 4. After the proof for one dimensional case, we discuss the trivial generalization to multiple dimensional case.
+
+Lemma 7. Let the h be the curvature of a one dimensional quadratic function f and xt = Ext. We assume, without loss of generality, the optimum point of f is x = 0. Then we have the following
+
+recurrence
+
+xt+1 xt
+
+=
+
+1 - h + µ 1
+
+-µ t 0
+
+x1 x0
+
+(20)
+
+Proof. From the recurrence of momentum SGD, we have
+Ext+1 =E[xt - fSt (xt) + µ(xt - xt-1)] =Ext [xt - ESt fSt (xt) + µ(xt - xt-1)] =Ext [xt - hxt + µ(xt - xt-1)] =(1 - h + µ)xt - µxt-1
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+By putting the equation in to matrix form, (20) is a straight-forward result from unrolling the
+recurrence for t times. Note as we set x1 = x0 with no uncertainty in momentum SGD, we have [x0, x1] = [x0, x1].
+
+Lemma 8. Let Ut = E(xt - xt)2 and Vt = E(xt - xt)(xt-1 - xt-1) with xt being the expectation of xt. For quadratic function f (x) with curvature h  R, We have the following recurrence
+
+Ut+1 Ut
+Vt+1
+
+2 C  = (I - B )(I - B )-1  0 
+0
+
+(21)
+
+where
+
+(1 - h + µ)2 µ2 -2µ(1 - h + µ)
+
+B =
+
+1
+
+0
+
+0
+
+1 - h + µ 0
+
+-µ
+
+(22)
+
+and C = E(fSt (xt) - f (xt))2 is the variance of gradient on minibatch St.
+
+Proof. We prove by first deriving the recurrence for Ut and Vt respectively and combining them in to a matrix form. For Ut, we have
+
+Ut+1 =E(xt+1 - xt+1)2 =E(xt - fSt (xt) + µ(xt - xt-1) - (1 - h + µ)xt + µxt-1)2 =E(xt - f (xt) + µ(xt - xt-1) - (1 - h + µ)xt + µxt-1 + (f (xt) - fSt (xt)))2 =E((1 - h + µ)(xt - xt) - µ(xt-1 - xt-1))2 + 2E(f (xt) - fSt (xt))2 =(1 - h + µ)2E(xt - xt)2 - 2µ(1 - h + µ)E(xt - xt)(xt-1 - xt-1) + µ2E(xt-1 - xt-1)2 + 2C (23)
+where the cross terms cancels due to the fact ESt [f (xt) - fSt (xt)] = 0 in the third equality.
+For Vt, we can similarly derive
+
+Vt =E(xt - xt)(xt-1 - xt-1)
+
+=E((1 - h + µ)(xt-1 - xt-1) - µ(xt-2 - xt-2) + (f (xt) - fSt (xt)))(xt-1 - xt-1)
+
+=(1 - h + µ)E(xt-1 - xt-1)2 - µE(xt-1 - xt-1)(xt-2 - xt-2)
+
+(24)
+
+Again, the term involving f (xt) - fSt (xt) cancels in the third equality as a results of ESt [f (xt) - fSt (xt)] = 0. (23) and (24) can be jointly expressed in the following matrix form
+
+Ut+1
+
+Ut 2C t-1 2C
+
+U1
+
+2 C 
+
+Ut = B Ut-1 +  0  = B i  0  + B t U0 = (I - B t)(I - B )-1  0  .
+
+Vt+1
+
+Vt
+
+0 i=0
+
+0
+
+V1
+
+0
+
+(25)
+
+Note the second term in the second equality is zero because x0 and x1 are deterministic. Thus U1 = U0 = V1 = 0.
+
+According to Lemma 7 and 8, we have E(xt - x)2 = (e1 At[x1, x0] )2 and E(xt - xt)2 = 2Ce1 (I -B t)(I -B )-1e1 where e1  Rn has all zero entries but the first dimension. Combining these two terms, we prove Lemma 4. Though the proof here is for one dimensional quadratics, it trivially generalizes to multiple dimensional quadratics. Specifically, we can decompose the quadratics along the eigenvector directions, and then apply Lemma 4 to each eigenvector direction using the corresponding curvature h (eigenvalue). By summing quantities in (10) for all eigenvector directions, we can achieve the multiple dimensional correspondence of (10).
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+C PROOF OF LEMMA 5
+
+Again we first present a proof of a multiple dimensional generalized version of Lemma 5. The proof
+
+of Lemma 5 is a one dimensional special case of Lemma 9. Lemma 9 also implies that for multiple
+
+dimension quadratics, the corresponding spectral radius (B) = µ if
+
+(1-µ)2 
+
+
+
+h
+
+
+
+(1+µ)2 
+
+on
+
+all the eigenvector directions with h being the eigenvalue (curvature).
+
+Lemma 9. Let H  Rn×n be a symmetric matrix and (B ) be the spectral radius of matrix
+
+(I - H + µI ) (I - H + µI ) µ2I -2µ(I - H + µI )
+
+B =
+
+I
+
+0 0
+
+I - H + µI
+
+0 -µI
+
+(26)
+
+We have (B) = µ if all eigenvalues (H ) of H satisfies
+
+(1 - µ)2
+
+(1 + µ)2
+
+  (H )   .
+
+(27)
+
+Proof. Let  be an eigenvalue of matrix B, it gives det (B - I ) = 0 which can be alternatively
+
+expressed as
+
+det (B - I ) = det F det C - DF -1E = 0
+
+(28)
+
+assuming F is invertible, i.e.  + µ = 0, where the blocks in B
+
+C=
+
+M M - I µ2I I -I
+
+,D =
+
+-2µM 0
+
+,E =
+
+M 0
+
+, F = -µI - I
+
+with M = I - H + µI . (28) can be transformed using straight-forward algebra as
+
+det
+
+( - µ)M M - ( + µ)I ( + µ)µ2I
+
+( + µ)I
+
+-( + µ)I
+
+=0
+
+(29)
+
+Using similar simplification technique as in (28), we can further simplify into
+
+( - µ) det ( + µ)2I - M M = 0
+
+(30)
+
+if  = µ, as ( + µ)2I - M M is diagonalizable, we have ( + µ)2 - (M )2 = 0 with
+
+(M ) being an eigenvalue of symmetric M . The analytic solution to the equation can be explicitly
+
+expressed as
+
+ = (M )2 - 2µ ±
+
+((M 2
+
+)2
+
+-
+
+2µ)2
+
+-
+
+4µ2
+
+.
+
+(31)
+
+When the condition in (27) holds, we have (M )2 = (1 - (H ) + µ)2  4µ. One can verify that
+
+((M )2 - 2µ)2 - 4µ2 = ((M )2 - 4µ)(M )2
+
+= (1 - (H ) + µ)2 - 4µ (M )2
+
+(32)
+
+0
+
+Thus the roots in (31) are conjugate with || = µ. In conclusion, the condition in (27) can guarantee all the eigenvalues of B has magnitude µ. Thus the spectral radius of B is controlled by µ.
+
+D ANALYTICAL SOLUTION TO (14)
+Tsseehctetoinpngrdotcbholeenmsgtrraiandini(et1,n4tt)hoedfoopeb(sjxenc)ottitovne0ebe, edwcieotemcraaentsivgpee(xtsoa)lvc=uerbxib2cuDet qh2ua+ast(ai1onn-anwxah)lyo4t/siehca2mrloisonotClxuwti=oitnh. xSµu=pbcsatintµubtiencg[0oo,mn1pl)yu. ttBehdye in closed form using Vieta's substitution. As p(x) is uni-modal in [0, 1), the optimizer for (14) is exactly the maximum of µp and ( hmax/hmin - 1)2/( hmax/hmin + 1)2, the right hand-side of the first constraint in (14).
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+Training loss Training loss
+
+7 YF with clipping
+6 YF without clipping
+
+5
+
+4 3.5
+0k
+
+5k 10k 15k 20k 25k 30k
+Iterations
+
+YF with clipping
+YF without clipping 100
+
+10-1 0k
+
+10k 20k 30k
+Iterations
+
+40k
+
+Figure 8: Training losses on PTB LSTM (left) and CIFAR10 ResNet (right) for YellowFin with and without adaptive clipping.
+
+E PRACTICAL IMPLEMENTATION
+In Section 3.2, we discuss estimators for learning rate and momentum tuning in YELLOWFIN. In our experiment practice, we have identified a few practical implementation details which are important for improving estimators. Zero-debias is proposed by Kingma and Ba (2014), which accelerates the process where exponential average adapts to the level of original quantity in the beginning. We applied zero-debias to all the exponential average quantities involved in our estimators. In some LSTM models, we observe that our estimated curvature may decrease quickly along the optimization process. In order to better estimate extremal curvature hmax and hmin with fast decreasing trend, we apply zero-debias exponential average on the logarithmic of hmax,t and hmin,t, instead of directly on hmax,t and hmin,t. Except from the above two techniques, we also implemented the slow start heuristic proposed by (Schaul et al., 2013). More specifically, we use  = min{t, t · t/(10 · w)} as our learning rate with w as the size of our sliding window in hmax and hmin estimation. It discount the learning rate in the first 10 · w steps and helps to keep the learning rate small in the beginning when the exponential averaged quantities are not accurate enough.
+
+F ADAPTIVE GRADIENT CLIPPING IN YELLOWFIN
+
+Gradient clipping has been established in literature as a standard--almost necessary--tool for training
+such objectives (Pascanu et al., 2013; Goodfellow et al., 2016; Gehring et al., 2017). However, the
+classic tradeoff between adaptivity and stability applies: setting a clipping threshold that is too low
+can hurt performance; setting it to be high, can compromise stability. YELLOWFIN, keeps running estimates of extremal gradient magnitude squares, hmax and hmin in order to estimate a generalized condition number. We posit that hmax is an ideal gradient norm threshold for adaptive clipping. In order to ensure robustness to extreme gradient spikes, like the ones in Figure 4, we also limit the growth rate of the envelope hmax in Algorithm 2 as follows:
+
+hmax   · hmax + (1 - ) · min {hmax,t, 100 · hmax}
+
+(33)
+
+Our heuristics follows along the lines of classic recipes like Pascanu et al. (2013). However, instead of using the average gradient norm to clip, it uses a running estimate of the maximum norm hmax.
+In Section 3.3, we saw that adaptive clipping stabilizes the training on objectives that exhibit exploding gradients. In Figure 8, we demonstrate that the adaptive clipping does not hurt performance on models that do not exhibit instabilities without clipping. Specifically, for both PTB LSTM and CIFAR10 ResNet, the difference between YELLOWFIN with and without adaptive clipping diminishes quickly.
+
+G CLOSED-LOOP YELLOWFIN FOR ASYNCHRONOUS TRAINING
+In Section 4, we briefly discuss the closed-loop momentum control mechanism in closed-loop YELLOWFIN. In this section, after presenting more preliminaries on asynchrony, we show with
+15
+
+Under review as a conference paper at ICLR 2018
+
+details on the mechanism: it measures the dynamics on a running system and controls momentum with a negative feedback loop.
+
+Preliminaries Asynchrony is a popular parallelization technique (Niu et al., 2011) that avoids synchronization barriers. When training on M asynchronous workers, staleness (the number of model updates between a worker's read and write operations) is on average  = M - 1, i.e., the gradient in the SGD update is delayed by  iterations as fSt- (xt- ). Asynchrony yields faster steps, but can increase the number of iterations to achieve the same solution, a tradeoff between hardware and
+statistical efficiency (Zhang and Ré, 2014). Mitliagkas et al. (2016) interpret asynchrony as added
+momentum dynamics. Experiments in Hadjis et al. (2016) support this finding, and demonstrate
+that reducing algorithmic momentum can compensate for asynchrony-induced momentum and
+significantly reduce the number of iterations for convergence. Motivated by that result, we use the model in (34), where the total momentum, µT , includes both asynchrony-induced and algorithmic momentum, µ, in (1).
+
+E[xt+1 - xt] = µT E[xt - xt-1] - Ef (xt)
+
+(34)
+
+We will use this expression to design an estimator for the value of total momentum, µ^T . This estimator is a basic building block of closed-loop YELLOWFIN, that removes the need to manually compensate
+for the effects of asynchrony.
+
+Measuring the momentum dynamics Closed-loop YELLOWFIN estimates total momentum µT
+
+on a running system and uses a negative feedback loop to adjust algorithmic momentum accordingly.
+
+Equation (14) gives an estimate of µ^T on a system with staleness  , based on (14).
+
+µ^T = median
+
+xt- - xt- -1 + St--1 f (xt- -1) xt- -1 - xt- -2
+
+(35)
+
+We use  -stale model values to match the staleness of the gradient, and perform all operations in
+
+an elementwise fashion. This way we get a total momentum measurement from each variable; the
+
+median combines them into a more robust estimate.
+
+Closing the asynchrony loop Given a reliable measurement of µT , we can use it to adjust the value of algorithmic momentum so that the total momentum matches the target momentum as decided by YELLOWFIN in Algorithm 1. Closed-loop YELLOWFIN in Algorithm 5 uses a simple negative feedback loop to achieve the adjustment.
+
+Algorithm 5 Closed-loop YELLOWFIN
+
+1: Input: µ  0,   0.0001,   0.01,  (staleness)
+
+2: for t  1 to T do
+
+3: 4:
+
+xt  xt-1 + µ(xt-1 µ,   YELLOWFI
+
+- xt-2) - St f N(St f (xt--1),
+
+(xt- )
+
+-1
+
+)
+
+µ^  median5: T
+
+xt- -xt- -1+St- -1 f (xt- -1) xt- -1-xt- -2
+
+6: µ  µ +  · (µ - µ^T )
+
+7: end for
+
+Measuring total momentum Closing the loop
+
+H MODEL SPECIFICATION
+The model specification is shown in Table 3 for all the experiments in Section 5. CIRAR10 ResNet uses the regular ResNet units while CIFAR100 ResNet uses the bottleneck units. Only the convolutional layers are shown with filter size, filter number as well as the repeating count of the units. The layer counting for ResNets also includes batch normalization and Relu layers. The LSTM models are also diversified for different tasks with different vocabulary sizes, word embedding dimensions and number of layers.
+I SPECIFICATION FOR SYNCHRONOUS EXPERIMENTS
+In Section 5.1, we demonstrate the synchronous experiments with extensive discussions. For the reproducibility, we provide here the specification of learning rate grids. The number of iterations as
+16
+
+Under review as a conference paper at ICLR 2018
+
+Table 3: Specification of ResNet and LSTM model architectures.
+
+network
+
+# layers
+
+CIFAR10 ResNet 110
+
+CIFAR100 ResNet 164
+
+Conv 0 3 × 3, 4
+3 × 3, 4
+
+Unit 1s
+
+Unit 2s
+
+Unit 3s
+
+3 × 3, 3 × 3,
+
+4 4
+
+×6
+
+3 × 3, 3 × 3,
+
+8 8
+
+×6
+
+3 × 3, 3 × 3,
+
+16 16
+
+×6
+
+ 1 × 1,  3 × 3,
+1 × 1,
+
+16 
+
+ 1 × 1,
+
+16  × 6  3 × 3,
+
+64 1 × 1,
+
+32 
+
+ 1 × 1,
+
+32  × 6  3 × 3,
+
+128 1 × 1,
+
+64  64  × 6 256
+
+network TS LSTM PTB LSTM WSJ LSTM
+
+# layers
+
+Word Embed.
+
+2 [65 vocab, 128 dim]
+
+2 [10000 vocab, 200 dim]
+
+3 [6922 vocab, 500 dim]
+
+Layer 1 128 hidden units 200 hidden units 500 hidden units
+
+Layer 2 128 hidden units 200 hidden units 500 hidden units
+
+Layer 3 ­ ­
+500 hidden units
+
+well as epochs, i.e. the number of passes over the full training sets, are also listed for completeness. For YELLOWFIN in all the experiments in Section 5, we uniformly use sliding window size 20 for extremal curvature estimation and  = 0.999 for smoothing. For momentum SGD and Adam, we use the following configurations.
+· CIFAR10 ResNet ­ 40k iterations (114 epochs) ­ Momentum SGD learning rates {0.001, 0.01(best), 0.1, 1.0}, momentum 0.9 ­ Adam learning rates {0.0001, 0.001(best), 0.01, 0.1}
+· CIFAR100 ResNet ­ 120k iterations (341 epochs) ­ Momentum SGD learning rates {0.001, 0.01(best), 0.1, 1.0}, momentum 0.9 ­ Adam learning rates {0.00001, 0.0001(best), 0.001, 0.01}
+· PTB LSTM ­ 30k iterations (13 epochs) ­ Momentum SGD learning rates {0.01, 0.1, 1.0(best), 10.0}, momentum 0.9 ­ Adam learning rates {0.0001, 0.001(best), 0.01, 0.1}
+· TS LSTM ­ 21k iterations (50 epochs) ­ Momentum SGD learning rates {0.05, 0.1, 0.5, 1.0(best), 5.0}, momentum 0.9 ­ Adam learning rates {0.0005, 0.001, 0.005(best), 0.01, 0.05} ­ Decrease learning rate by factor 0.97 every epoch for all optimizers, following the design by Karpathy et al. (2015).
+· WSJ LSTM ­ 120k iterations (50 epochs) ­ Momentum SGD learning rates {0.05, 0.1, 0.5(best), 1.0, 5.0}, momentum 0.9 ­ Adam learning rates {0.0001, 0.0005, 0.001(best), 0.005, 0.01} ­ Vanilla SGD learning rates {0.05, 0.1, 0.5, 1.0(best), 5.0} ­ Adagrad learning rates {0.05, 0.1, 0.5(best), 1.0, 5.0} ­ Decrease learning rate by factor 0.9 every epochs after 14 epochs for all optimizers, following the design by Choe and Charniak.
+J ADDITIONAL EXPERIMENT RESULTS
+J.1 TRAINING LOSSES ON CIFAR10 AND CIFAR100 RESNET
+In Figure 9, we demonstrate the training loss on CIFAR10 ResNet and CIFAR100 ResNet. Specifically, YELLOWFIN can match the performance of hand-tuned momentum SGD, and achieves 1.93x and 1.38x speedup comparing to hand-tuned Adam respectively on CIFAR10 and CIFAR100 ResNet.
+
+17
+
+Under review as a conference paper at ICLR 2018
+
+Training loss
+
+Training loss
+
+Momentum SGD
+
+101
+
+Adam 100 YellowFin
+
+100
+
+Momentum SGD Adam YellowFin
+
+10-1 0k
+
+10k 20k 30k
+Iterations
+
+40k
+
+0k 30k 60k 90k 120k
+Iterations
+
+Figure 9: Training loss for ResNet on 100-layer CIFAR10 ResNet (left) and 164-layer CIFAR100 bottleneck ResNet.
+
+Training loss
+
+2 YellowFin YF mom.=0.0 YF mom.=0.9
+1.5
+1 0k 5k 10k 15k 20k
+Iterations
+
+Training loss
+
+101 YellowFin YF mom.=0.0 YF mom.=0.9
+100
+0k 30k 60k 90k 120k
+Iterations
+
+Figure 10: Training loss comparison between YELLOWFIN with adaptive momentum and YELLOWFIN with fixed momentum value.
+
+J.2 IMPORTANCE OF MOMENTUM ADAPTIVITY
+To further emphasize the importance of momentum adaptivity in YELLOWFIN, we run YF on CIFAR100 ResNet and TS LSTM. In the experiments, YELLOWFIN tunes the learning rate. Instead of also using the momentum tuned by YF, we continuously feed prescribed momentum value 0.0 and 0.9 to the underlying momentum SGD optimizer which YF is tuning. In Figure 10, when comparing to YELLOWFIN with prescribed momentum 0.0 or 0.9, YELLOWFIN with adaptively tuned momentum achieves observably faster convergence on both TS LSTM and CIFAR100 ResNet. It empirically demonstrates the essential role of momentum adaptivity in YELLOWFIN.
+
+J.3 TUNING MOMENTUM CAN IMPROVE ADAM IN ASYNCHRONOUS-PARALLEL SETTING
+
+We conduct experiments on PTB LSTM with 16 asynchronous workers using Adam using the same protocol as in Section 5.2. Fixing the learning rate to the value achieving the lowest smoothed loss in Section 5.1, we sweep the smoothing parameter 1 (Kingma and Ba, 2014) of the first order moment estimate in grid {-0.2, 0.0, 0.3, 0.5, 0.7, 0.9}. 1 serves the same role as momentum in SGD and we call it the momentum in Adam. Figure 11 shows tuning momentum for Adam under asynchrony gives measurably better training loss. This result emphasizes the importance of momentum tuning in asynchronous settings and suggests that state-of-the-art adaptive methods can perform sub-optimally when using prescribed momentum.
+
+7
+
+Training loss
+
+6
+
+5
+
+4
+
+1 = -0.2
+
+1 = 0.3
+
+1 = 0.7
+
+3
+
+1 = 0.0
+
+1 = 0.5
+
+1 = 0.9
+
+0k 5k 10k 15k 20k 25k 30k
+
+Iterations
+
+Figure 11: Hand-tuning Adam's
+
+momentum under asynchrony.
+
+18
+
+Under review as a conference paper at ICLR 2018
+
+Validation perplexity Validation accuracy
+
+110
+90 YellowFin Adam default YF searched Adam searched
+70 0 5 10 15 20 25 30 35 40
+Epochs
+
+95
+90
+YellowFin 85 Adam default
+YF searched Adam searched 80 0 50 100 150 200
+Epochs
+
+Figure 12: Validation perplexity on Tied LSTM and validation accuracy on ResNext. Learning rate fine-tuning using grid-searched factor can further improve the performance of YELLOWFIN in Algorithm 1. YELLOWFIN with learning factor search can outperform hand-tuned Adam on validation metrics on both models.
+
+J.4 ACCELERATING YELLOWFIN WITH FINER GRAIN LEARNING RATE TUNING
+
+As an adaptive tuner, YELLOWFIN does not involve manual tuning. It can present faster development iterations on model architectures than grid search on optimizer hyperparameters. In deep learning practice for computer vision and natural language processing, after fixing the model architecture, extensive optimizer tuning (e.g. grid search or random search) can further improve the performance of a model. A natural question to ask is can we also slightly tune YELLOWFIN to accelerate convergence and improve the model performance. Specifically, we can manually multiply a positive number, the learning rate factor, to the auto-tuned learning rate in YELLOWFIN to further accelerate.
+
+In this section, we empirically demonstrate the effectiveness of learning rate factor on a 29-
+
+layer ResNext (2x64d) (Xie et al., 2016) on CIFAR10 and a Tied LSTM model (Press and
+
+Wolf, 2016) with 650 dimensions for word embedding and two hidden units layers on the PTB
+
+dataset. When running YELLOWFIN, we search for the optimal learning rate factor in grid
+
+{
+
+1 3
+
+,
+
+0.5,
+
+1,
+
+2(best
+
+for
+
+ResNext),
+
+3(best
+
+for
+
+Tied
+
+LSTM),
+
+10}.
+
+Similarly, we search the same learn-
+
+ing rate factor grid for Adam, multiplying the factor to its default learning rate 0.001. To further
+
+strength the performance of Adam as a baseline, we also run it on conventional logarithmic learning rate grid {5e-5, 1e-4, 5e-4, 1e-3, 5e-3} for ResNext and {1e-4, 5e-4, 1e-3, 5e-3, 1e-2} for Tied
+
+LSTM. We report the best metric from searching the union of learning rate factor grid and logarithmic
+
+learning
+
+rate
+
+grid
+
+as
+
+searched
+
+Adam
+
+results.
+
+Empirically,
+
+learning
+
+factor
+
+1 3
+
+and
+
+1.0
+
+works
+
+best
+
+for
+
+Adam respectively on ResNext and Tied LSTM.
+
+As shown in Figure 12, with the searched best learning rate factor, YELLOWFIN can improve validation perplexity on Tied LSTM from 88.7 to 80.5, an improvement of more than 9%. Similarly, the searched learning rate factor can improve test accuracy from 92.63 to 94.75 on ResNext. More importantly, we can observe, with learning rate factor search on the two models, YELLOWFIN can
+achieve better validation metric than the searched Adam results. It demonstrates that finer-grain
+learning rate tuning, i.e. the learning rate factor search, can be effectively applied on YELLOWFIN to
+improve the performance of deep learning models.
+
+19
+
+

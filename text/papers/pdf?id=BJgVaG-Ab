@@ -1,0 +1,496 @@
+Under review as a conference paper at ICLR 2018
+AUTOMATA GUIDED HIERARCHICAL REINFORCEMENT LEARNING FOR ZERO-SHOT SKILL COMPOSI-
+TION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+An obstacle that prevents the wide adoption of (deep) reinforcement learning (RL) in control systems is its need for a large amount of interactions with the environment in order to master a skill. The learned skill usually generalizes poorly across domains and re-training is often necessary when presented with a new task. We present a framework that combines methods in temporal logic (TL) with hierarchical reinforcement learning (HRL). The set of techniques we provide allows for convenient specification of tasks with complex logic, learn hierarchical policies (meta-controller and low-level controllers) with well-defined intrinsic rewards using any RL methods and is able to construct new skills from existing ones without additional learning. We evaluate the proposed methods in a simple grid world simulation as well as simulation on a Baxter robot.
+1 INTRODUCTION
+Reinforcement learning has received much attention in the recent years because of its achievements in games Mnih et al. (2015)Silver et al. (2016), robotics Jang et al.Levine et al. (2016)Gu et al. (2016) and autonomous driving Isele et al. (2017)Madrigal (2017). However, training a policy that sufficiently masters a skill requires an enormous amount of interactions with the environment and acquiring such experience can be difficult on physical systems. Moreover, most learned policies are tailored to mastering one skill (by maximizing the reward) and is hardly reusable on a new skill.
+Skill composition is the idea of constructing new skills with existing skills (and hence their policies) with little to no additional learning. In stochastic optimal control, this idea has been adopted by authors of Todorov (2009) and Da Silva et al. (2009) to construct provably optimal control laws based on linearly solvable Markov decision processes. Authors of Haarnoja et al. (2017), Tang & Haarnoja have showed in simulated manipulation tasks that approximately optimal policies can result from adding the Q-functions of the existing policies.
+Hierarchical reinforcement learning is an effective means of achieving transfer among tasks. The goal is to obtain task-invariant low-level policies, and by re-training the meta-policy that schedules over the low-level policies, different skills can be obtain with less samples than training from scratch. Authors of Heess et al. (2016) have adopted this idea in learning locomotor controllers and have shown successful transfer among simulated locomotion tasks. Authors of Oh et al. (2017) have utilized a deep hierarchical architecture for multi-task learning using natural language instructions.
+Temporal logic is a formal language commonly used in software and digital circuit verification Baier & Katoen (2008) as well as formal synthesis Belta et al. (2017). It allows for convenient expression of complex behaviors and causal relationships. TL has been used by Sadraddini & Belta (2015), Leahy et al. (2015) to synthesis provably correct control policies. Authors of Aksaray et al. (2016) have also combined TL with Q-learning to learn satisfiable policies in discrete state and action spaces.
+In this work, we focus on hierarchical skill acquisition and zero-shot skill composition. Once a set of skills are acquired, we provide a technique that can synthesize new skills without the need to further interact with the environment (given the state and action spaces as well as the transition remain the same). We adopt temporal logic as the task specification language. Compared to most
+1
+
+Under review as a conference paper at ICLR 2018
+
+heuristic reward structures used in the RL literature to specify tasks, formal specification language excels at its semantic rigor and interpretability of specified behaviors. Our main contributions are:
+· We take advantage of the transformation between TL formula and finite state automatons (FSA) to construct deterministic meta-controllers directly from the task specification without the necessity for additional learning. We show that by adding one discrete dimension to the original state space, structurally simple parameterized policies such as feed-forward neural networks can be used to learn tasks that require complex temporal reasoning.
+· Intrinsic motivation has been shown to help RL agents learn complicated behaviors with less interactions with the environment Singh et al. (2004)Kulkarni et al. (2016)Jaderberg et al. (2016). However, designing a well-behaved intrinsic reward that aligns with the extrinsic reward takes effort and experience. In our work, we construct intrinsic rewards directly from the input alphabets of the FSA (a component of the automaton), which guarantees that maximizing each intrinsic reward makes positive progress towards satisfying the entire task specification. From a user's perspective, the intrinsic rewards are constructed automatically from the TL formula.
+· In our framework, each FSA represents a hierarchical policy with low-level controllers can be re-modulated to achieve different tasks. Skill composition is achieved by manipulating the FSA that results from their TL specifications in a deterministic fashion. Instead of interpolating/extrapolating among existing skills, we present a simple policy switching scheme based on graph manipulation of the FSA. Therefore, the compositional outcome is much more transparent. We introduce a method that allows learning of such hierarchical policies with any non-hierarchical RL algorithm. Compared with previous work on skill composition, we impose no constraints on the policy representation or the problem class.
+
+2 PRELIMINARIES
+2.1 THE OPTIONS FRAMEWORK IN HIERARCHICAL REINFORCEMENT LEARNING
+In this section, we briefly introduce the options framework Sutton et al. (1998), especially the terminologies that we will inherit in later sections. We start with the definition of a Markov Decision Process.
+Definition 1. An MDP is defined as a tuple M = T, S, A, p(·|·, ·), R(·, ·, ·) , where T is the length of a fixed time horizon; S  IRn is the state space ; A  IRm is the action space (S and A can also be discrete sets); p : S × A × S  [0, 1] is the transition function with p(s |s, a) being the conditional probability density of taking action a  A at state s  S and ending up in state s  S; R : S × A × S  IR is the reward function. The goal is to find a policy  : S  A (or  : S × A  [0, 1] for stochastic policies) that maximizes the expected return, i.e.
+
+ = arg maxE[R(T )]
+
+
+(1)
+
+where T = (s0, a0, ..., sT , ) denotes the state-action trajectory from time 0 to T .
+The options framework exploits temporal abstractions over the action space. An option is defined as a tuple o = I, o,  where I is the set of states that option o can be initiated (here we let I = S for all options), o : S  A is an options policy and  : S  [0, 1] is the termination condition for the option. In addition, there is a policy over options h : S  O (where O is a set of available options) that schedules among options. At a given time step t, an option o is chosen according to h(st) and the options policy o is followed until (s) > threshold at time t + k, and the next option is chosen by h(st+k).
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+2.2 SCTLTL AND AUTOMATA
+In this work, we consider tasks specified with Truncated Linear Temporal Logic (TLTL). We restrict the set of allowed operators to be
+
+ := | f (s) < c | ¬ |    |    |  |  U  |  T  |  |   
+
+(2)
+
+where f (s) < c is a predicate, ¬ (negation/not),  (conjunction/and), and  (disjunction/or) are Boolean connectives, and  (eventually), U (until), T (then), (next), are temporal operators. Implication is denoted by  (implication). Essentially we excluded the Always operator (2) with reasons similar to Kupferman & Vardi (2001). We refer to this restricted TLTL as syntactically
+co-safe TLTL (scTLTL). There exists a real-value function (s0:T , ) called robustness degree that measures the level of satisfaction of trajectory s0:T with respective to . (s0:T , ) > 0 indicates that s0:T satisfies  and vice versa. Due to space constraints, we refer readers to Li et al. (2016) for definitions of TLTL and robustness degree.
+
+Any scTLTL formula can be translated into a finite state automata (FSA) with the following defini-
+tion:
+Definition 2. An FSA is defined as a tuple A = Q, , q0, p(·|·), F , where Q is a set of automaton states;  is an input alphabet, we denote qi,qj   the predicate guarding the transition from qi to qj (as illustrated in Figure 1 ); q0  Q is the initial state; p : Q × Q  [0, 1] is a conditional probability defined as
+
+p(qj|qi) =
+
+1 0
+
+qi,qj is true otherwise.
+
+With each MDP state s, we can calculate the transition in automata states at s by
+
+(3)
+
+p(qj|qi, s) =
+
+1 0
+
+(s, qi,qj ) > 0 otherwise.
+
+(4)
+
+We abuse the notation p to represent both kinds of transitions when the context is clear. F is a set of final automaton states.
+
+The translation from TLTL formula FSA to can be done automatically with available packages like
+Lomap Ulusoy (2017).
+Example 1. Figure 1 (left) illustrates the FSA resulting from formula  = ¬b U a. In English, 
+entails during a run, b cannot be true until a is true and a needs to be true at least once. The FSA has four automaton states Q = {q0, qf , trap} with q0 being the input(initial) state (here qi serves to track the progress in satisfying ). The input alphabet is defined as the  = {¬a  ¬b, ¬a  b, a¬b, ab}. Shorthands are used in the figure, for example a = (ab)(a¬b).  represents the power set of {a, b}, i.e.  = 2{a,b}. During execution, the FSA always starts from state q0 and transitions according to Equation (3) or (4). The specification is satisfied when qf is reached and violated when trap is reached. In this example, qf is reached only when a becomes true before b becomes true.
+
+3 PROBLEM FORMULATION AND APPROACH
+
+We start with the following problem definition:
+Problem 1. Given an MDP in Definition 1 with unknown transition dynamics p(s |s, a) and a scTLTL specification  over state predicates (along with its FSA A) as in Definition 2. Find a policy  : S  A such that
+
+ = arg maxE [1((s0:T , ) > 0)]. 
+
+(5)
+
+where 1((s0:T , ) > 0) is an indicator function with value 1 if (s0:T , ) > 0 and 0 otherwise.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Problem 1 defines a policy search problem where the trajectories resulting from following the optimal policy should satisfy the given scTLTL formula in expectation.
+Problem 2. Given two scTLTL formula 1 and 2 along with policy 1 that satisfies 1 and 2 that satisfies 2. Obtain a policy  that satisfies  = 1  2.
+Problem 2 defines the problem of task composition. Given two policies each satisfying a scTLTL specification, the policy that satisfies the conjunction of the given specifications can be synthesized. Solving this problem is useful when we want to break a complex task into simple and manageable components, learn a policy that satisfy each component and "stitch" all the components together so that the original task is satisfied. It can also be the case that as the scope of the task grows with time, the original task specification is amended with new items. Instead of having to re-learn the task from scratch, we can only learn a policy that satisfies the new items and combine them with the old policy.
+We propose to solve Problem 1 by constructing a product MDP from the given MDP and FSA that can be solved using any state-of-the-art RL algorithm. The idea of using product automaton for control synthesis has been adopted in various literature Leahy et al. (2015), Chen et al. (2012). However, the methods proposed in these work are restricted to discrete state and actions spaces. We extend this idea to continuous state-action spaces and show its applicability on real robotics systems.
+For Problem 2, we propose a policy switching scheme that guarantees to satisfy the compositional task specification. The switching policy takes advantage of the characteristics of FSA and uses robustness comparison at each step for decision making. Under mild constraints, the same switching policy can also be used to achieve zero-shot task space transfer. Details will be provided in the following sections.
+
+4 FSA AUGMENTED MDP
+
+Problem 1 can be solved with any episode-based RL algorithm. However, these methods suffers from sparse feedback because a reward signal can only be obtained at the end of each episode. To address this problem as well as setting up ground for automata guided HRL, We introduce the FSA augmented MDP
+Definition 3. An FSA augmented MDP corresponding to scTLTL formula  is defined as M = T, S~, A, p~(·|·, ·), R~(·, ·) where T is the length of a fixed time horizon, S~  S × Q, A is the same as the original MDP. p~(s~ |s~, a) is the probability of transitioning to s~ given s~ and a, in particular
+
+p~(s~ |s~, a) = p (s , q )|(s, q), a = p(s |s, a) p(q |q) = 1 0 otherwise.
+
+(6)
+
+Here p is defined in Equation (3). R~ : S~ × S~  IR is the FSA augmented reward function, defined by
+
+R~(s~, s~ ) = 1 (s , Dq) > 0 ,
+
+(7)
+
+where q is the set of automata states that are connected with q through outgoing edges. Dq = q q q,q represents the disjunction of all predicates guarding the transitions that originate from
+q.
+
+As a quick example to the notation Dq , consider the state q0 in the FSA in Figure 1 , q0 = {trap, qf }, Dq0 = q0,trap  q0,qf = b  a. The goal is then to find a policy  : S~  A that maximizes the expected sum of R~ over the horizon T .
+The FSA augmented MDP can be constructed with any standard MDP and a scTLTL formula. And it can be solved with any off-the-shelf RL algorithm. By directly learning the flat policy  we bypass the need to learn multiple options policy separately. After obtaining the optimal policy
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Figure 1 : FSA constructed from  = ¬b U a. (right): Specification amendment example. A1 is constructed from 1 = a  b. A2 is constructed from 2 = ¬bU a. A is constructed from  = 1  2. The
+automaton state pair in parenthesis denote the corresponding states from Q1 and Q2 that the product state is constructed from. qi0 denotes the initial state of Ai , qi,j denotes the jth state of Qi .
+
+ , the optimal options policy for any option oqcan be extracted by executing  (a|s, q) without transitioning the automata state, i.e. keeping qi fixed (denoted q ). And q satisfies
+
+T -1
+
+qi
+
+=
+
+arg maxEq1
+qi
+
+1 (st+1, Dqi ) > 0
+t=0
+
+.
+
+(8)
+
+In other words, the purpose of qi is to activate one of the outgoing edges of qi and by doing so reach qf as soon as possible.
+
+The reward function in Equation (7) encourages the system to exit the current automata state and
+move on to the next, and by doing so eventually reach the final state qf . However, this reward does not distinguish between the trap state and other states and therefore will also promote entering of
+the trap state. One way to address this issue is to impose a terminal reward on both qf and trap. Because the reward is an indicator function with maximum value of 1, we assign terminal rewards Rqf = 2 and Rtrap = -2.
+
+Appendix D describes the typical learning routine using FSA augmented MDP. The algorithm uti-
+lizes memory replay which is popular among off-policy RL methods (DQN, A3C, etc) but this is not a requirement for learning with M~. On-policy methods can also be used.
+
+5 AUTOMATA GUIDED TASK COMPOSITION
+To provide a solution for Problem 2, we will start by constructing the FSA of  from that of 1 and 2 with the following definition. Definition 4. Given A1 = Q1 , 1 , q10, p1 , F1 and A2 = Q2 , 2 , q20, p2 , F2 , The FSA of  is the product automaton of A1 and A1 , i.e. A=12 = A1 × A2 = Q, , q0, p, F where Q  Q1 × Q2 is the set of product automaton, states, q0 = (q10, q20) is the product initial state, F  F1 × F2 is the final accepting states. Following Definition 2, for states q = (q1, q2)  Q and q = (q1, q2)  Q, the transition probability p is defined as
+
+p(q |q) =
+
+1 0
+
+p1 (q1|q1)p2 (q2|q2) = 1 otherwise.
+
+(9)
+
+Example 2. Figure 1 (right) illustrates the FSA of A1 and A2 and their product automaton A. Here 1 = a  b which entails that both a and b needs to be true at least once (order does not matter), and 2 = ¬b U a which is the same as Example 1. The resultant product corresponds to the formula  = (a  b)  (¬b U a) which dictates that a and b need to be true at least once, and
+a needs to be true before b becomes true (an ordered visit). We can see that the trap state occurs
+in A2 and A, this is because if b is ever true before a is true, the specification is violated and qf can never be reached. In the product automaton, we aggregate all state pairs with a trap state
+component into one trap state.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+For q = (q1, q2)  Q, let q, q1 and q2 denote the set of predicates guarding the outgoing
+edges of q, q1 and q2 respectively. Equation (9) entails that a transition at q in the product automaton
+A exists only if corresponding transitions at q1, q2exist in A1 and A2 respectively. Therefore, q,q = q1,q1  q2,q2 , for q,q  q, q1,q1  q1 , q2,q2  q2 . Following Equation (8),
+
+T -1
+
+q = arg maxEq
+
+1 (st+1, Dq ) > 0
+
+q t=0
+
+where Dq =
+
+(q1,q1  q2,q2 ).
+
+q1 ,q2
+
+,
+
+(10)
+
+Repeatedly applying the distributive law (  1)  (  2) =   (1  2) to the logic formula Dq transforms the formula to
+
+Therefore,
+
+Dq =
+
+q1,q1 
+q1
+
+q2,q2 = Dq11  Dq22 .
+q2
+
+(11)
+
+T -1
+
+q = arg maxEq
+
+1 (st+1, Dq1  Dq2 ) > 0)
+
+q t=0
+
+T -1
+
+= arg maxEq
+
+1 min((st+1, Dq1 ), (st+1, Dq2 )) > 0)
+
+q t=0
+
+.
+
+(12)
+
+Given flat policies 1 and 2 that satisfies 1 and 2, following Equation (8), optimal options
+policy corresponding to their automaton states are q1,i and q2,j (q1,i denotes the ith state in Q1 ). We propose the following switching policy that satisfies  = 1  2
+
+(s, q) =
+
+1 (s, q1) 2 (s, q2)
+
+(st, Dq11 ) < (st, Dq22 ) otherwise
+
+(13)
+
+We show empirically the above switching policy for skill composition in the following sections.
+
+6 EXPERIMENTS AND DISCUSSION
+6.1 GRID WORLD SIMULATION
+In this section, we provide a simple grid world navigation example to illustrate the techniques presented in Sections 4 and 5. Here we have a robot navigating in a discrete 1 dimensional space. Its MDP state space S = {s|s  [-5, 5), s is discrete}, its action space A = {lef t, stay, right}. The robot navigates in the commanded direction with probability 0.8, and with probability 0.2 it randomly chooses to go in the opposite direction or stay in the same place. The robot stays in the same place if the action leads it to go out of bounds.
+We define two regions a : -3 < s < -1 and b : 2 < s < 4. For the first task, the scTLTL specification 1 =  a  b needs to be satisfied. In English, 1 entails that the robot needs to visit regions a and b at least once. To learn a deterministic optimal policy 1 : S × Q  A, we use standard Q-Learning Watkins (1989) on the FSA augmented MDP for this problem. We used a learning rate of 0.1, a discount factor of 0.99, epsilon-greedy exploration strategy with decaying linearly from 0.0 to 0.01 in 1500 steps. The episode horizon is T = 50 and trained for 500 iterations. All Q-values are initialized to zero. The resultant optimal policy is illustrated in Figure 3 .
+We can observe from the figure above that the policy on each automaton state q serves a specific purpose. q0 tries to reach region a or b depending on which is closer. q1 always proceeds to region
+
+6
+
+Under review as a conference paper at ICLR 2018
+Figure 2 : upper left: Optimal policy for 1 = a  b trained using Q-Learning. The arrows represent the action at each state and the dot represents stay still at that state. (upper right): Optimal policy for 2 = ¬b U a. (lower left):Optimal policy for  = (a  b)  (¬b U a). (lower right ): Robustness comparison used for construction of policy 12 . The robustness value is zero for states where bars disappear.
+a. q2 always proceeds to region b. This agrees with the definition in Equation 8. The robot can start anywhere on the s axis but must always start at automata state q0. Following 1 , the robot will first reach region a or b (whichever is nearer), and then aim for the other region which in turn satisfies . The states that have stay as their action are either goal regions (states (-2, q0), (3, q1), etc) where a transition on q happens or states that are never reached (states (-3, q1), (-4, q2), etc) because a transition on q occurs before they can be reached. To illustrate automata guided task composition described in Example 2, instead of learning the task described by  from scratch, we cam simply learn policy 2 for the added requirement 2 = ¬b U a. We use the same learning setup and the resultant optimal policy is depicted in Figure 4 . It can be observed that 2 tries to reach a while avoiding b. This behavior agrees with the specification 2 and its FSA provided in Figure 2 . The action at s = 4 is stay because in order for the robot to reach a it has to pass through b, therefore it prefers to obtain a low reward over violating the task. Having learned policies 1 and 2 , we can now use Equation 13 to construct policy 12 . The resulting policy for 12 is illustrated in Figure 2 (upper right). This policy guides the robot to first reach a (except for state s = 4) and then go to b which agrees with the specification. Looking at Figure 1 , the FSA of  = 12 have two options policies (·, q0) and (·, q1) 1 (trap state and qf are terminal states which don't have options). State q1 has only one outgoing edge with the guarding predicate q1,qf : b, which means (·, q1) = 1 (·, q2)(they have the same guarding predicate). Policy (·, q0) is a switching policy between 1 (·, q0) and 2 (·, q0). Figure 2 (lower left) shows the robustness comparison at each state. The policy with lower robustness is chosen following Equation (13). We can see that the robustness of both policies are the same from s = -5 to s = 0. And their policies agree in this range (Figures 3 and 4 ). As s becomes larger, disagreement emerge because 1 (·, q0) wants to stay closer to b but 2 (·, q0) wants otherwise. To maximize the robustness of their conjunction, the decisions of 2 (·, q0) are chosen for states s > 0.
+6.2 SIMULATED BAXTER
+In this section, we construct a set of more complicated tasks that require temporal reasoning and evaluate the proposed techniques on a Baxter robot. The environment is shown in Figure 3 (left). In front of the robot are three square regions and two circular regions. An object with planar coordinates p = (x, y) can use predicates Sred(p), Sblue(p), Sblack(p), Cred(p), Cblue(p) to evaluate whether or not it is within the regions. The predicates are defined by S : xmin < x < xmax, ymin < y < ymax and C : dist((x, y), (x, y)center) < r, where (x, y) is the planar coordinate in the world frame,
+1(·, qi) is the options policy of  at automata state qi (definiton in Equation (8)). Writing in this form prevents cluttered subscripts
+7
+
+Under review as a conference paper at ICLR 2018
+
+Figure 3 : (left): Simulation Environment. (upper right): Learning curve for task 1 over 5 random seeds. (lower right): Policy deployment success rate
+
+(xmin, ymin) and (xmax, ymax) are the boundary coordinates of the square region, (x, y)center and r are the center and radius of the circular region. There are also two boxes which planar positions are denoted as predbox = (x, y)redbox and pbluebox = (x, y)bluebox. And lastly there is a sphere that can randomly move in space which 3D coordinate is denoted as psphere = (x, y, z)sphere.
+We design seven tasks each specified by a scTLTL formula. The task specifications and their English translations are provided in Appendix A. Throughout the experiments in this section, we use proximal policy search Schulman et al. (2017) as the policy optimization method. The hyperparameters are kept fixed across the experiments and are listed in Appendix B. The policy is a Gaussian distribution parameterized by a feed-forward neural network with 2 hidden layers each of 64 relu units. The state and action spaces vary across tasks and comparison cases, and are described in Appendix C.
+We use the first task 1 to evaluate the learning outcome using the FSA augmented MDP. As comparisons, we design two other rewards structures. The first is to use the robustness (s0:T , ) as the terminal reward for each episode and zero everywhere else, the second is a heuristic reward that aims to aligns with 1. The heuristic reward consists of a tracking state and a set of quadratic distance function. For 1, the heuristic reward is
+
+r1 =
+
+-dist(predbox, predsquarecenter) -dist(predbox, Pblack square center)
+
+psphere is in red circle otherwise.
+
+(14)
+
+Heuristic rewards for other tasks are defined in a similar manner and are not presented explicitly due to space constraints.
+The results are illustrated in Figure 3 (right). The upper right plot shows the average robustness over training iterations. Robustness is chosen as the comparison metric for its semantic rigor (robustness greater than zero satisfies task the specification). The reported values are averaged over 60 episodes and the plot shows the mean and 2 standard deviations over 5 random seeds. From the plot we can observe that the FSA augmented MDP and the terminal robustness reward performed comparatively in terms of convergence rate, whereas the heuristic reward fails to learn the task. The FSA augmented MDP also learns a policy with lower variance in final performance.
+We deploy the learned policy on the robot in simulation and record the task success rate. For each of the three cases, we deploy the 5 policies learned from 5 random seeds on the robot and perform 10 sets of tests with randomly initialized states resulting in 50 test trials for each case. The average success rate is presented in Figure 3 (lower right). From the results we can see that the FSA augmented MDP is able to achieve the highest rate of success and this advantage over the robustness reward is due to the low variance of its final policy.
+
+8
+
+Under review as a conference paper at ICLR 2018
+Figure 4 : (left): Learning curves for tasks 6 and 7. (right): Policy deployment success rate for tasks 6 and 7
+To evaluate the policy switching technique for skill composition, we first learn four policies 2 , 3 , 4 , 5 using the FSA augmented MDP. Then we construct 6 = 23 and 7 = 2344 using Equation (13) (It is worth mentioning that the policies learned by the robustness and heuristic rewards do not have an automaton state in them, therefore the skill composition technique does not apply). We deploy 6 and 7 on tasks 6 and 7 for 10 trials and record the average robustness of the resulting trajectories. As comparisons, we also learn tasks 6 and 7 from scratch using terminal robustness rewards and heuristic rewards, the results are presented in Figure 4 . We can observe from the graphs that as the complexity of the tasks increase, using the robustness and heuristic rewards fail to learn a policy that satisfies the specifications while the constructed policy can reliably achieve a robustness of greater than zero. We perform the same deployment test as previously described and looking at Figure 4 (right) we can see that for both tasks 6 and 7, only the policies constructed by skill composition are able to consistently complete the tasks.
+7 CONCLUSION
+In this paper, we proposed the FSA augmented MDP, a product MDP that enables effective learning of hierarchical policies using any RL algorithm for tasks specified by scTLTL. We also introduced automata guided skill composition, a technique that combines existing skills to create new skills without additional learning. We show in robotic simulations that using the proposed methods we enable simple policies to perform logically complex tasks. Limitations of the current frame work include discontinuity at the point of switching (for Equation (13)), which makes this method suitable for high level decision tasks but not for low level control tasks. The technique only compares robustness at the current step and choose to follow a sub-policy for one time-step, this makes the switching policy short-sighted and may miss long term opportunities. One way to address this is to impose a termination condition for following each subpolicies and terminate only when the condition is triggered (as in the original options framework).
+REFERENCES
+Derya Aksaray, Austin Jones, Zhaodan Kong, Mac Schwager, and Calin Belta. Q-learning for robust satisfaction of signal temporal logic specifications. In Decision and Control (CDC), 2016 IEEE 55th Conference on, pp. 6565­6570. IEEE, 2016.
+Christel Baier and Joost-Pieter Katoen. Principles Of Model Checking, volume 950. 2008. Calin Belta, Boyan Yordanov, and Ebru Aydin Gol. Formal methods for discrete-time dynamical
+systems, 2017. Yushan Chen, Kun Deng, and Calin Belta. Multi-agent persistent monitoring in stochastic environ-
+ments with temporal logic constraints. In Decision and Control (CDC), 2012 IEEE 51st Annual Conference on, pp. 2801­2806. IEEE, 2012.
+9
+
+Under review as a conference paper at ICLR 2018
+Marco Da Silva, Fre´do Durand, and Jovan Popovic´. Linear bellman combination for control of character animation. Acm transactions on graphics (tog), 28(3):82, 2009.
+Shixiang Gu, Ethan Holly, Timothy Lillicrap, and Sergey Levine. Deep reinforcement learning for robotic manipulation with asynchronous off-policy updates. arXiv preprint arXiv:1610.00633, 2016.
+Tuomas Haarnoja, Haoran Tang, Pieter Abbeel, and Sergey Levine. Reinforcement learning with deep energy-based policies. arXiv preprint arXiv:1702.08165, 2017.
+Nicolas Heess, Greg Wayne, Yuval Tassa, Timothy Lillicrap, Martin Riedmiller, and David Silver. Learning and transfer of modulated locomotor controllers. arXiv preprint arXiv:1610.05182, 2016.
+David Isele, Akansel Cosgun, Kaushik Subramanian, and Kikuo Fujimura. Navigating Intersections with Autonomous Vehicles using Deep Reinforcement Learning. may 2017. URL http:// arxiv.org/abs/1705.01196.
+Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czarnecki, Tom Schaul, Joel Z Leibo, David Silver, and Koray Kavukcuoglu. Reinforcement learning with unsupervised auxiliary tasks. arXiv preprint arXiv:1611.05397, 2016.
+Eric Jang, Google Brain, Sudheendra Vijayanarasimhan, Peter Pastor, Julian Ibarz, and Sergey Levine. End-to-End Learning of Semantic Grasping. URL https://arxiv.org/pdf/ 1707.01932.pdf.
+Tejas D. Kulkarni, Karthik R. Narasimhan, Ardavan Saeedi, and Joshua B. Tenenbaum. Hierarchical Deep Reinforcement Learning: Integrating Temporal Abstraction and Intrinsic Motivation. 2016. URL http://arxiv.org/abs/1604.06057.
+Orna Kupferman and Moshe Y Vardi. Model checking of safety properties. Formal Methods in System Design, 19(3):291­314, 2001.
+Kevin Leahy, Austin Jones, Mac Schwager, and Calin Belta. Distributed information gathering policies under temporal logic constraints. In Decision and Control (CDC), 2015 IEEE 54th Annual Conference on, pp. 6803­6808. IEEE, 2015.
+Sergey Levine, Peter Pastor, Alex Krizhevsky, and Deirdre Quillen. Learning Hand-Eye Coordination for Robotic Grasping with Deep Learning and Large-Scale Data Collection. arXiv, 2016. doi: 10.1145/2835776.2835844. URL http://arxiv.org/abs/1603.02199v1.
+Xiao Li, Cristian-Ioan Vasile, and Calin Belta. Reinforcement learning with temporal logic rewards. arXiv preprint arXiv:1612.03471, 2016.
+Alexis C Madrigal. Inside Waymo's Secret World for Training Self-Driving Cars, 2017. URL https://www.theatlantic.com/technology/archive/2017/08/ inside-waymos-secret-testing-and-simulation-facilities/537648/.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei a Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, Stig Petersen, Charles Beattie, Amir Sadik, Ioannis Antonoglou, Helen King, Dharshan Kumaran, Daan Wierstra, Shane Legg, and Demis Hassabis. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015. doi: 10.1038/nature14236.
+Junhyuk Oh, Satinder Singh, Honglak Lee, and Pushmeet Kohli. Zero-Shot Task Generalization with Multi-Task Deep Reinforcement Learning. 2017.
+Sadra Sadraddini and Calin Belta. Robust Temporal Logic Model Predictive Control. 53rd Annual Conference on Communication, Control, and Computing (Allerton), 2015.
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+10
+
+Under review as a conference paper at ICLR 2018
+David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, Sander Dieleman, Dominik Grewe, John Nham, Nal Kalchbrenner, Ilya Sutskever, Timothy Lillicrap, Madeleine Leach, and Koray Kavukcuoglu. Mastering the game of Go with deep neural networks and tree search. Nature, 529(7585):484­489, 2016. ISSN 0028-0836. doi: 10.1038/nature16961. URL http://dx.doi.org/10.1038/nature16961.
+S. Singh, A.G. Barto, and N. Chentanez. Intrinsically motivated reinforcement learning. 18th Annual Conference on Neural Information Processing Systems (NIPS), 17(2):1281­1288, 2004. ISSN 1943-0604. doi: 10.1109/TAMD.2010.2051031.
+Richard S Sutton, Doina Precup, and Satinder Singh. Between MDPs and Semi-MDPs: Learning, Planning, and Representing Knowledge at Multiple Temporal Scales. Artificial Intelligence, 1 (98-74):1­39, 1998.
+Haoran Tang and Tuomas Haarnoja. Learning Diverse Skills via Maximum Entropy Deep Reinforcement Learning. URL http://bair.berkeley.edu/blog/2017/10/06/ soft-q-learning/.
+Emanuel Todorov. Compositionality of optimal control laws. In Advances in Neural Information Processing Systems, pp. 1856­1864, 2009.
+A Ulusoy. Ltl optimal multi-agent planner (lomap). Github repository, 2017. Christopher John Cornish Hellaby Watkins. Learning From Delayed Rewards. PhD thesis, King's
+College, Cambridge, England, 1989.
+11
+
+Under review as a conference paper at ICLR 2018
+
+Appendix
+
+A TASK SPECIFICATIONS AND HEURISTIC REWARDS
+
+Task
+
+scTLTL Formula
+
+English Description
+
+1
+
+Cred(psphere)  Sred(predbox)  ¬Cred(psphere)  Sblack(predbox)
+
+If sphere in red circle, then red box eventually in red square. Otherwise red box
+eventually in black square
+
+If sphere in red circle, then red
+
+2
+
+Cred(psphere)  Sred(predbox)  ¬(Cred(psphere)  (Sback(psphere))  Sblack(predbox)
+
+box eventually in red square. If sphere is not in red circle or black square,
+
+then red box eventually in black square
+
+If sphere in blue circle, then blue
+
+3
+
+Cblue(psphere)  Sblue(pbluebox)  ¬(Cred(psphere)  (Sback(psphere))  Sblack(pbluebox)
+
+box eventually in blue square. If red sphere is not in blue circle or black square
+
+, then blue box eventually in black square
+
+4 Sblack(psphere)  Sblue(predbox)
+
+If sphere in black square, then eventually red box in blue square
+
+5 Sblack(psphere)  Sred(pbluebox)
+
+If sphere in black square, then eventually blue box in red square
+
+6 2  3 7 2  3  4  5
+
+Conjunction of task 2 and 3 Conjunction of tasks 2, 3, 4, 5
+
+B HYPERPARAMETERS FOR PROXIMAL POLICY OPTIMIZATION
+
+Hyperparameter Value
+
+Num. Hidden Layers Num. Units per layer Activation Policy Learning Rate Value Learning Rate Discount Batch Size GAE parameter Num. Iterations Num. Epochs Clipping Parameter Horizon
+
+2 64 Relu 0.009 0.009 0.99 60 0.99 100 20 0.2 20
+
+C STATE AND ACTION SPACES
+
+Task
+
+State Space
+
+Action Space
+
+1
+
+s = (psphere, predbox)
+
+a = (predbox)target
+
+2
+
+s = (psphere, predbox)
+
+a = (predbox)target
+
+3
+
+s = (psphere, pbluebox)
+
+a = (predbox)target
+
+4
+
+s = (psphere, predbox)
+
+a = (predbox)target
+
+5
+
+s = (psphere, pbluebox)
+
+a = (predbox)target
+
+6 s = (psphere, predbox, pbluebox) a = (pi, d)target
+
+7 s = (psphere, predbox, pbluebox) a = (pi, d)target
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+D LEARNING WITH FSA AUGMENTED MDP (OFF-POLICY VERSION)
+
+Algorithm 1 Automata Guided RL (off-policy version)
+
+1: Inputs: Episode horizon T , M~ (consisting of an MDP and FSA A), maximum size for replay
+
+pool N
+
+2: Initialize parameterized policy 
+
+ is the policy parameters
+
+3: Initialize replay pool B  {}
+
+4: for n = 1 to number of training episodes do
+
+5: Select initial state s~0 = (s0, q0) automaton state q0
+
+s0 can be randomly selected, q0 is always the initial
+
+6: for t =0 to T do at = (s~t)
+
+7: s~t+1 = GetNextState(s~t, at)
+
+8: if qt+1 == qf then 9: r~t = 2
+
+terminal reward for satisfying 
+
+10: break
+
+ is satisfied, restart episode
+
+11: else if qt+1 == trap then 12: r~t = -2
+
+terminal reward for violating 
+
+13: break
+
+ is violated, restart episode
+
+14: else
+
+15: r~t = GetReward(s~t, s~t+1)
+
+using Equation 7
+
+16:
+
+17: end if
+
+18: B  (s~t, at, s~t+1, r~t) 19: if size(B) > N then
+
+store experience in replay pool
+
+20: pop(B[0])
+
+21: end if
+
+22:   UpdatePolicy(B) this can be any RL update rule and doesn't necessarily have to
+
+occur at this location
+
+23: end for
+
+24: end for
+
+13
+
+

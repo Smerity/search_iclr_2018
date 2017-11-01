@@ -1,0 +1,583 @@
+Under review as a conference paper at ICLR 2018
+TRACE NORM REGULARIZATION AND FASTER INFERENCE FOR EMBEDDED SPEECH RECOGNITION RNNS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We propose and evaluate new techniques for compressing and speeding up dense matrix multiplications as found in the fully connected and recurrent layers of neural networks for embedded large vocabulary continuous speech recognition (LVCSR). For compression, we introduce and study a trace norm regularization technique for training low rank factored versions of matrix multiplications. Compared to standard low rank training, we show that our method more consistently leads to good accuracy versus number of parameter trade-offs and can be used to speed up training of large models. For speedup, we enable faster inference on ARM processors through new open sourced kernels optimized for small batch sizes, resulting in 3x to 7x speed ups over the widely used gemmlowp library. Beyond LVCSR, we expect our techniques and kernels to be more generally applicable to embedded neural networks with large fully connected or recurrent layers.
+1 INTRODUCTION
+For embedded applications of machine learning, we seek models that are as accurate as possible given constraints on size and on latency at inference time. For many neural networks, the parameters and computation are concentrated in two basic building blocks:
+1. Convolutions. These tend to dominate in, for example, image processing applications. 2. Dense matrix multiplications (GEMMs) as found, for example, inside fully connected
+layers or recurrent layers such as GRU and LSTM. These are common in speech and natural language processing applications. These two building blocks are the natural targets for efforts to reduce parameters and speed up models for embedded applications. Much work on this topic already exists in the literature. For a brief overview, see Section 2. In this paper, we focus only on dense matrix multiplications and not on convolutions. Our two main contributions are: 1. Trace norm regularization: We describe a trace norm regularization technique and an accompanying training methodology that enables the practical training of models with competitive accuracy versus number of parameter trade-offs. It automatically selects the rank and eliminates the need for any prior knowledge on suitable matrix rank. 2. Efficient kernels for inference: We explore the importance of optimizing for low batch sizes in on-device inference, and we introduce kernels1 for ARM processors that vastly outperform publicly available kernels in the low batch size regime. These two topics are discussed in Sections 3 and 4, respectively. Although we conducted our experiments and report results in the context of large vocabulary continuous speech recognition (LVCSR) on embedded devices, the ideas and techniques are broadly applicable to other deep learning networks. Work on compressing any neural network for which large GEMMs dominate the parameters or computation time could benefit from the insights presented in this paper. 1Available at https://github.com/paddlepaddle/farm.
+1
+
+Under review as a conference paper at ICLR 2018
+
+2 RELATED WORK
+Our work is most closely related to that of Prabhavalkar et al. (2016), where low rank factored acoustic speech models are similarly trained by warmstarting from a truncated singular value decomposition (SVD) of pretrained weight matrices. This technique was also applied to speech recognition on mobile devices (McGraw et al., 2016; Xue et al., 2013). We build on this method by adding a variational form of trace norm regularization that was first proposed for collaborative prediction (Srebro et al., 2005) and also applied to recommender systems (Koren et al., 2009). The use of this technique with gradient descent was recently justified theoretically (Ciliberto et al., 2017). Furthermore, Neyshabur et al. (2015) argue that trace norm regularization could provide a sensible inductive bias for neural networks. To the best of our knowledge, we are the first to combine the training technique of Prabhavalkar et al. (2016) with variational trace norm regularization. Low rank factorization of neural network weights in general has been the subject of many other works (Denil et al., 2013; Sainath et al., 2013; Ba & Caruana, 2014; Kuchaiev & Ginsburg, 2017). Some other approaches for dense matrix compression include sparsity (LeCun et al., 1989; Narang et al., 2017), hash-based parameter sharing (Chen et al., 2015), and other parameter-sharing schemes such as circulant, Toeplitz, or more generally low-displacement-rank matrices (Sindhwani et al., 2015; Lu et al., 2016). Kuchaiev & Ginsburg (2017) explore splitting activations into independent groups. Doing so is akin to using block-diagonal matrices. The techniques for compressing convolutional models are different and beyond the scope of this paper. We refer the interested reader to, e.g., Denton et al. (2014); Han et al. (2016); Iandola et al. (2016) and references therein.
+
+3 TRAINING LOW RANK MODELS
+Low rank factorization is a well studied and effective technique for compressing large matrices. In Prabhavalkar et al. (2016), low rank models are trained by first training a model with unfactored weight matrices (we refer to this as stage 1), and then warmstarting a model with factored weight matrices from the truncated SVD of the unfactored model (we refer to this as stage 2). The truncation is done by retaining only as many singular values as required to explain a specified percentage of the variance. If the weight matrices from stage 1 had only a few nonzero singular values, then the truncated SVD used for warmstarting stage 2 would yield a much better or even error-free approximation of the stage 1 matrix. This suggests applying a sparsity-inducing 1 penalty on the vector of singular values during stage 1 training. This is known as trace norm regularization in the literature. Unfortunately, there is no known way of directly computing the trace norm and its gradients that would be computationally feasible in the context of large deep learning models. Instead, we propose to combine the two-stage training method of Prabhavalkar et al. (2016) with an indirect variational trace norm regularization technique (Srebro et al., 2005; Ciliberto et al., 2017). We describe this technique in more detail in Section 3.1 and report experimental results in Section 3.2.
+
+3.1 TRACE NORM REGULARIZATION
+
+First we introduce some notation. Let us denote by || · ||T the trace norm of a matrix, that is, the sum of the singular values of the matrix. The trace norm is also referred to as the nuclear norm or the Schatten 1-norm in the literature. Furthermore, let us denote by || · ||F the Frobenius norm of a matrix, defined as
+
+ ||A||F = TrAA =
+
+|Aij |2 .
+i,j
+
+(1)
+
+The Frobenius norm is identical to the Schatten 2-norm of a matrix, i.e. the 2 norm of the singular value vector of the matrix. The following lemma provides a variational characterization of the trace norm in terms of the Frobenius norm.
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Lemma 1 (Jameson (1987); Ciliberto et al. (2017)). Let W be an m × n matrix and denote by  its vector of singular values. Then
+
+min(m,n)
+
+||W ||T :=
+
+1 i(W ) = min 2
+
+||U ||F2 + ||V ||2F
+
+,
+
+i=1
+
+(2)
+
+where the minimum is taken over all U : m×min(m, n) and V : min(m, n)×n such that W = U V .
+
+Furthermore, if the choice U =
+
+WU~ =
+
+U~ V~  and V
+
+is =
+
+asinV~gul.ar
+
+value
+
+decomposition
+
+of
+
+W
+
+,
+
+then
+
+equality
+
+holds
+
+in
+
+(2)
+
+for
+
+The procedure to take advantage of this characterization is as follows. First, for each large GEMM in the model, replace the m × n weight matrix W by the product W = U V where U : m × min(m, n) and V : min(m, n) × n. Second, replace the original loss function (W ) by
+
+(U V ) + 1  2
+
+||U ||F2 + ||V ||2F
+
+.
+
+(3)
+
+where  is a hyperparameter controlling the strength of the approximate trace norm regularization. Proposition 1 in Ciliberto et al. (2017) guarantees that minimizing the modified loss equation (3) is equivalent to minimizing the actual trace norm regularized loss:
+
+(W ) + ||W ||T .
+
+(4)
+
+In Section 3.2.1 we show empirically that use of the modified loss (3) is indeed highly effective at reducing the trace norm of the weight matrices. To summarize, we propose the following basic training scheme:
+
+· Stage 1:
+­ For each large GEMM in the model, replace the m×n weight matrix W by the product W = U V where U : m × r, V : r × n, and r = min(m, n).
+­ Replace the original loss function (W ) by
+
+(U V ) + 1  2
+
+||U ||2F + ||V ||F2
+
+,
+
+(5)
+
+where  is a hyperparameter controlling the strength of the trace norm regularization. ­ Train the model to convergence.
+
+· Stage 2:
+
+­ For the trained model from stage 1, recover W = U V by multiplying the two trained matrices U and V .
+­ Train low rank models warmstarted from the truncated SVD of W . By varying the number of singular values retained, we can control the parameter versus accuracy trade-off.
+
+One modification to this is described in Section 3.2.3, where we show that it is actually not necessary to train the stage 1 model to convergence before switching to stage 2. By making the transition earlier, training time can be substantially reduced.
+
+3.2 EXPERIMENTS AND RESULTS
+We report here the results of our experiments related to trace norm regularization. Our baseline model is a forward-only Deep Speech 2 (Amodei et al., 2016) model with some small modifications such as growing GRU dimensions. More details are given in Appendix B. We train and evaluate on the widely used Wall Street Journal (WSJ) speech corpus. Since our work focuses only on compressing acoustic models and not language models, the error metric we report is the character error rate (CER) rather than word error rate (WER). As the size and latency constraints vary widely across devices, whenever possible we compare techniques by comparing their accuracy versus number of parameter trade-off curves.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+rec rec
+
+0.05 11 9.7 9.5 9.5 9.3 9.4 0.025 10 9.4 8.7 8.6 7.8 8.1
+0.01 8.7 7.7 7.4 7 7.2 7.7 0.005 8.4 7.3 7 6.7 7 7.3 0.002 7.9 7.4 6.9 7 7.2 9.6 0.001 7.8 7.1 6.9 6.7 10 10
+0.0 7.7 6.9 6.9 11 17 13
+
+0.05 11 9.3 7.9 7.7 8.1 8.9 0.025 9.9 8.3 7 7 7.9 8.7
+0.01 9.4 7.6 6.8 7 7.7 8.4 0.005 8.6 7.4 6.8 6.8 7.9 8.8 0.0025 8.3 7.2 6.8 7 8.2 9.1 0.001 8.3 7.6 7 7.1 8.4 9
+0.0 8.3 7.5 7 7.1 8.6 9.6
+
+0.0 0.005
+0.01 0.02 0.05 0.07 0.0 0.01 0.05 0.1 0.5 1.0
+
+nonrec
+
+nonrec
+
+Figure 1: CER dependence on rec and nonrec for trace norm regularization (left) and 2 regularization (right).
+
+3.2.1 STAGE 1 EXPERIMENTS
+
+In this section, we investigate the effects of training with the modified loss function in (3). For simplicity, we refer to this as trace norm regularization.
+
+As the WSJ corpus is relatively small at around 80 hours of speech, models tend to benefit substantially from regularization. To make comparisons more fair, we also trained unfactored models with an 2 regularization term and searched the hyperparameter space just as exhaustively.
+
+For both trace norm and 2 regularization, we found it beneficial to introduce separate rec and nonrec parameters for determining the strength of regularization for the recurrent and non-recurrent weight matrices, respectively. In addition to rec and nonrec in initial experiments, we also roughly tuned the learning rate. Since the same learning rate was found to be optimal for nearly all experiments, we just used that for all the experiments reported in this section. The dependence of final CER on rec and nonrec is shown in Figure 1. Separate rec and nonrec values are seen to help for both trace norm and 2 regularization. However, for trace norm regularization, it appears better to fix rec as a multiple of nonrec rather than tuning the two parameters independently. The first question we are interested in is whether our modified loss (3) is really effective at reducing the trace norm. As we are interested in the relative concentration of singular values rather than their absolute magnitudes, we introduce the following nondimensional metric.
+
+Definition 1. Let W be a nonzero m × n matrix with d = min(m, n)  2. Denote by  the d-dimensional vector of singular values of W . Then we define the nondimensional trace norm coefficient of W as follows:
+
+(W ) :=
+
+|||| 1
+|||| 2
+
+-1 .
+
+d-1
+
+(6)
+
+We show in Appendix A that  is scale-invariant and ranges from 0 for rank 1 matrices to 1 for maximal-rank matrices with all singular values equal. Intuitively, the smaller (W ), the better W can be approximated by a low rank matrix. As shown in Figure 2, trace norm regularization is indeed highly effective at reducing the nondimensional trace norm coefficient compared to 2 regularization. At very high regularization strengths, 2 regularization also leads to small  values. However, from Figure 1 it is apparent that this comes at the expense of relatively high CERs. As shown in Figure 3, this translates into requiring a much lower rank for the truncated SVD to explain, say, 90 % of the variance of the weight matrix for a given CER. Although a few 2-regularized models occasionally achieve low rank, we observe this only at relatively high CER's and only for some of the weights.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Rank at threshold 0.90  Rank at threshold 0.90 
+
+Trace norm 1.0
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+0.0 10-2
+
+10-1 nonrec
+
+2
+100
+
+1.0 0.8 0.6 0.4 0.2 0.0
+10-3
+
+Trace norm
+
+2
+
+10-2 rec
+
+Figure 2: Nondimensional trace norm coefficient versus strength of regularization by type of regularization used during training. On the left are the results for the non-recurrent weight of the third GRU layer, with rec = 0. On the right are the results for the recurrent weight of the third GRU layer, with nonrec = 0. The plots for the other weights are similar.
+
+Trace norm L2 Neither 600
+400
+200
+0 6.5 7.0 7.5 8.0 8.5 9.0 CER
+
+Trace norm L2 Neither 600
+400
+200
+0 6.5 7.0 7.5 8.0 8.5 9.0 CER
+
+Figure 3: The truncated SVD rank required to explain 90 % of the variance of the weight matrix versus CER by type of regularization used during training. Shown here are results for the nonrecurrent (left) and recurrent (right) weights of the third GRU layer. The plots for the other weights are similar.
+
+Parameters
+
+14 M 12 M 10 M
+
+Trace norm
+2
+Neither
+
+8M
+
+6M
+
+4M
+
+2M
+
+0M
+6 7 8 9 10 11 CER
+
+Figure 4: Number of parameters versus CER of stage 2 models colored by the type of regularization used for training the stage 1 model.
+
+5
+
+Under review as a conference paper at ICLR 2018
+3.2.2 STAGE 2 EXPERIMENTS In this section, we report the results of stage 2 experiments warmstarted from either trace norm or L2 regularized stage 1 models. For each regularization type, we took the three best stage 1 models (in terms of final CER) and used the truncated SVD of its weights to initialize the weights of stage 2 models. By varying the threshold of variance explained for the SVD truncation, each stage 1 model resulted into multiple stage 2 models. The stage 2 models were trained without regularization (i.e., rec = nonrec = 0) and with the initial learning rate set to three times the final learning rate of the stage 1 model. As shown in Figure 4, the best models from either trace norm or L2 regularization exhibit similar accuracy versus number of parameter trade-offs, but the trace norm models more consistently achieve better trade-off points. For comparison, we also warmstarted some stage 2 models from an unregularized stage 1 model. These models are seen to have significantly lower accuracies, accentuating the need for regularization on the WSJ corpus. 3.2.3 REDUCING TRAINING TIME In the previous sections, we trained the stage 1 models for 40 epochs to full convergence and then trained the stage 2 models for another 40 epochs, again to full convergence. Since the stage 2 models are drastically smaller than the stage 1 models, it takes less time to train them. Hence, shifting the stage 1 to stage 2 transition point to an earlier epoch could substantially reduce training time. In this section, we show that it is indeed possible to do so without hurting final accuracy. Specifically, we took the stage 1 trace norm and 2 models from Section 3.2.1 that resulted in the best stage 2 models in Section 3.2.2. In that section, we were interested in the parameters vs accuracy trade-off and used each stage 1 model to warmstart a number of stage 2 models of different sizes. In this section, we instead set a fixed target of 3 M parameters and a fixed overall training budget of 80 epochs but vary the stage 1 to stage 2 transition epoch. For each of the stage 2 runs, we initialize the learning rate with the learning rate of the stage 1 model at the transition epoch. So the learning rate follows the same schedule as if we had trained a single model for 80 epochs. As before, we disable all regularization for stage 2. The 2 stage 1 model has 21.7 M parameters, whereas the trace norm stage 1 model at 29.8 M parameters is slightly larger due to the factorization. Since the stage 2 models have roughly 3 M parameters and the training time is approximately proportional to the number of parameters, stage 2 models train about 7x and 10x faster, respectively, than the 2 and trace norm stage 1 models. Consequently, large overall training time reductions can be achieved by reducing the number of epochs spent in stage 1 for both 2 and trace norm. The results are shown in Figure 5. Based on the left panel, it is evident that we can lower the transition epoch number without hurting the final CER. In some cases, we even see marginal CER improvements. For transition epochs of at least 15, we also see slightly better results for trace norm than 2. In the right panel, we plot the convergence of CER when the transition epoch is 15. We find that the trace norm model's CER is barely impacted by the transition whereas the 2 models see a huge jump in CER at the transition epoch. Furthermore, the plot suggests that a total of 60 epochs may have sufficed. However, the savings from reducing stage 2 epochs are negligible compared to the savings from reducing the transition epoch.
+4 APPLICATION TO PRODUCTION-GRADE EMBEDDED SPEECH RECOGNITION
+With low rank factorization techniques similar2 to those described in Section 3, we were able to train large vocabulary continuous speech recognition (LVCSR) models with acceptable numbers of parameters and acceptable loss of accuracy compared to a production server model (baseline). Table 1 shows the baseline along with three different compressed models with much lower number of parameters. The tier-3 model employs the techniques of Sections B.4 and B.3. Consequently, it
+2This work was done prior to the development of our trace norm regularization. Due to long training cycles for the 10,000+ hours of speech used in this section, we started from pretrained models. However, the techniques in this section are entirely agnostic to such differences.
+6
+
+Under review as a conference paper at ICLR 2018
+
+Final CER CER
+
+7.50 7.25 7.00 6.75 6.50 6.25
+0
+
+Trace norm
+2
+
+10 20 30 Transition epoch
+
+40
+
+16 14 12 10
+8 6
+0
+
+Trace norm
+2
+
+20 40 60 Epoch
+
+80
+
+Figure 5: Left: CER versus transition epoch, colored by the type of regularization used for training the stage 1 model. Right: CER as training progresses colored by the type of regularization used in stage 1. The dotted line indicates the transition epoch.
+
+Table 1: WER of three tiers of low rank speech recognition models and a production server model on an internal test set. This table illustrates the effect of shrinking just the acoustic model. The same large server-grade language model was used for all rows.
+
+Model Parameters (M) WER
+
+% Relative
+
+baseline tier-1 tier-2 tier-3*
+
+115.5 14.9 10.9 14.7
+
+8.78 9.25 9.80 9.92
+
+0.0% -5.4% -11.6% -13.0%
+
+* The tier-3 model is larger but faster than the tier-2 model. See main text for details.
+
+runs significantly faster than the tier-1 model, even though they have a similar number of parameters. Unfortunately, this comes at the expense of some loss in accuracy.
+
+Although low rank factorization significantly reduces the overall computational complexity of our LVCSR system, we still require further optimization to achieve real-time inference on mobile or embedded devices. One approach to speeding up the network is to use low-precision 8-bit integer representations for weight matrices and matrix multiplications (the GEMM operation in BLAS terminology). This type of quantization reduces both memory as well as computation requirements of the network while only introducing 2% to 4% relative increase in WER.
+
+To perform low precision matrix multiplications, we originally used the gemmlowp library, which provides state-of-the-art low precision GEMMs using unsigned 8-bit integer values (Jacob & Warden, 2015­2017). However, gemmlowp's approach is not efficient for small batch sizes. Our application, LVCSR on embedded devices with single user, is dominated by low batch size GEMMs due to the sequential nature of recurrent layers and latency constraints. This can be demonstrated by looking at a simple RNN cell which has the form:
+
+ht = f (W xt + U ht-1)
+
+(7)
+
+This cell contains two main GEMMs: The first, U ht-1, is sequential and requires a GEMM with batch size 1. The second, W xt, can in principle be performed at higher batch sizes by batching across time. However, choosing a too large batch sizes can significantly delay the output, as the system needs to wait for more future context. In practice, we found that batch sizes higher than around 4 resulted in too high latencies, negatively impacting user experience.
+
+This motivated us to implement custom assembly kernels for the 64-bit ARM architecture (AArch64, also known as ARMv8 or ARM64) to further improve the performance of the GEMMs operations. We do not go through the methodological details in this paper. Instead, we are making the kernels and implementation details available at https://github.com/paddlepaddle/farm.
+
+Figure 6 compares the performance of our implementation (denoted by farm) with the gemmlowp library for matrix multiplication on iPhone 7, iPhone 6, and Raspberry Pi 3 Model B. The farm
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+GigaOps/s GigaOps/s GigaOps/s
+
+farm gemmlowp
+30 20 10
+0 1234 Batch size
+
+farm gemmlowp
+15 10
+5 0
+1234 Batch size
+
+farm 4
+
+gemmlowp
+
+2
+
+0
+1234 Batch size
+
+Figure 6: Comparison of our kernels (farm) and the gemmlowp library for matrix multiplication on iPhone 7 (left), iPhone 6 (middle), and Raspberry Pi 3 (right). The benchmark computes Ax = b where A is a random matrix with dimension 6144 × 320, and x is a random matrix with dimension 320× batch size. All matrices are in unsigned 8-bit integer format.
+
+Table 2: Embedded speech recognition models.
+
+Device GPU server iPhone 7 iPhone 6 Raspberry Pi 3
+
+Acoustic model baseline tier-1 tier-2 tier-3
+
+Language model
+size (MB)
+13 764 56 32 14
+
+WER
+8.78 10.50 11.19 12.08
+
+% Relative
+0.0% -19.6% -27.4% -37.6%
+
+Speedup over real-time 10.39x 2.21x 1.13x 1.08x
+
+% time spent in acoustic
+model
+70.8% 65.2% 75.5% 86.3%
+
+kernels are significantly faster than their gemmlowp counterparts for batch sizes 1 to 4. The peak single-core theoretical performance for iPhone 7, iPhone 6, and Raspberry Pi 3 are 56.16, 22.4 and 9.6 Giga Operations per Second, respectively. The gap between the theoretical and achieved values are mostly due to kernels being limited by memory bandwidth. For a more detailed analysis, we refer to the farm website. In addition to low precision representation and customized ARM kernels, we explored other approaches to speed up our LVCSR system. These techniques are described in Appendix B. Finally, by combining low rank factorization, some techniques from Appendix B, int8 quantization and the farm kernels, as well as using smaller language models, we could create a range of speech recognition models suitably tailored to various devices. These are shown in Table 2.
+5 CONCLUSION
+We worked on compressing and reducing the inference latency of LVCSR speech recognition models. To better compress models, we introduced a trace norm regularization technique and demonstrated its potential for faster and more consistent training of low rank models on the WSJ speech corpus. To reduce latency at inference time, we demonstrated the importance of optimizing for low batch sizes and released optimized kernels for the ARM64 platform. Finally, by combining the various techniques in this paper, we demonstrated an effective path towards production-grade on-device speech recognition on a range of embedded devices.
+ACKNOWLEDGMENTS We would like to thank Gregory Diamos, Christopher Fougner, Atul Kumar, Julia Li, Sharan Narang, Thuan Nguyen, Sanjeev Satheesh, Richard Wang, Yi Wang, and Zhenyao Zhu for their helpful comments and assistance with various parts of this paper.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Dario Amodei, Sundaram Ananthanarayanan, Rishita Anubhai, Jingliang Bai, Eric Battenberg, Carl Case, Jared Casper, Bryan Catanzaro, Qiang Cheng, Guoliang Chen, et al. Deep Speech 2: Endto-end speech recognition in English and Mandarin. In International Conference on Machine Learning, pp. 173­182, 2016.
+Jimmy Ba and Rich Caruana. Do deep nets really need to be deep? In Advances in neural information processing systems, pp. 2654­2662, 2014.
+Wenlin Chen, James Wilson, Stephen Tyree, Kilian Weinberger, and Yixin Chen. Compressing neural networks with the hashing trick. In International Conference on Machine Learning, pp. 2285­2294, 2015.
+Kyunghyun Cho, Bart van Merrie¨nboer, Dzmitry Bahdanau, and Yoshua Bengio. On the properties of neural machine translation: Encoder-decoder approaches. Syntax, Semantics and Structure in Statistical Translation, pp. 103, 2014.
+Junyoung Chung, Caglar Gulcehre, KyungHyun Cho, and Yoshua Bengio. Empirical evaluation of gated recurrent neural networks on sequence modeling. arXiv preprint arXiv:1412.3555, 2014.
+Carlo Ciliberto, Dimitris Stamos, and Massimiliano Pontil. Reexamining low rank matrix factorization for trace norm regularization. arXiv preprint arXiv:1706.08934, 2017.
+Misha Denil, Babak Shakibi, Laurent Dinh, Nando de Freitas, et al. Predicting parameters in deep learning. In Advances in Neural Information Processing Systems, pp. 2148­2156, 2013.
+Emily L Denton, Wojciech Zaremba, Joan Bruna, Yann LeCun, and Rob Fergus. Exploiting linear structure within convolutional networks for efficient evaluation. In Advances in Neural Information Processing Systems, pp. 1269­1277, 2014.
+Song Han, Huizi Mao, and William J Dally. Deep compression: Compressing deep neural networks with pruning, trained quantization and huffman coding. In International Conference on Learning Representations (ICLR), 2016.
+Forrest N Iandola, Song Han, Matthew W Moskewicz, Khalid Ashraf, William J Dally, and Kurt Keutzer. SqueezeNet: AlexNet-level accuracy with 50x fewer parameters and¡ 0.5 MB model size. arXiv preprint arXiv:1602.07360, 2016.
+Benoit Jacob and Pete Warden. gemmlowp: a small self-contained low-precision GEMM library. https://github.com/google/gemmlowp, 2015­2017.
+Graham James Oscar Jameson. Summing and nuclear norms in Banach space theory, volume 8. Cambridge University Press, 1987.
+Yehuda Koren, Robert Bell, and Chris Volinsky. Matrix factorization techniques for recommender systems. Computer, 42(8), 2009.
+Oleksii Kuchaiev and Boris Ginsburg. Factorization tricks for LSTM networks. arXiv preprint arXiv:1703.10722, 2017.
+Yann LeCun, John S Denker, Sara A Solla, Richard E Howard, and Lawrence D Jackel. Optimal brain damage. In Advances in Neural Information Processing Systems, pp. 598­605, 1989.
+Hairong Liu, Zhenyao Zhu, Xiangang Li, and Sanjeev Satheesh. Gram-CTC: Automatic unit selection and target decomposition for sequence labelling. arXiv preprint arXiv:1703.00096, 2017.
+Zhiyun Lu, Vikas Sindhwani, and Tara N Sainath. Learning compact recurrent neural networks. In Acoustics, Speech and Signal Processing (ICASSP), 2016 IEEE International Conference on, pp. 5960­5964. IEEE, 2016.
+Ian McGraw, Rohit Prabhavalkar, Raziel Alvarez, Montse Gonzalez Arenas, Kanishka Rao, David Rybach, Ouais Alsharif, Has¸im Sak, Alexander Gruenstein, Franc¸oise Beaufays, et al. Personalized speech recognition on mobile devices. In Acoustics, Speech and Signal Processing (ICASSP), 2016 IEEE International Conference on, pp. 5955­5959. IEEE, 2016.
+9
+
+Under review as a conference paper at ICLR 2018
+
+Sharan Narang, Gregory Diamos, Shubho Sengupta, and Erich Elsen. Exploring sparsity in recurrent neural networks. In International Conference on Learning Representations (ICLR), 2017.
+Behnam Neyshabur, Ryota Tomioka, and Nathan Srebro. In search of the real inductive bias: On the role of implicit regularization in deep learning. In Workshop track ICLR, 2015. arXiv preprint arXiv:1412.6614.
+Rohit Prabhavalkar, Ouais Alsharif, Antoine Bruguier, and Ian McGraw. On the compression of recurrent neural networks with an application to LVCSR acoustic modeling for embedded speech recognition. In Acoustics, Speech and Signal Processing (ICASSP), 2016 IEEE International Conference on, pp. 5970­5974. IEEE, 2016.
+Tara N Sainath, Brian Kingsbury, Vikas Sindhwani, Ebru Arisoy, and Bhuvana Ramabhadran. Lowrank matrix factorization for deep neural network training with high-dimensional output targets. In Acoustics, Speech and Signal Processing (ICASSP), 2013 IEEE International Conference on, pp. 6655­6659. IEEE, 2013.
+Vikas Sindhwani, Tara Sainath, and Sanjiv Kumar. Structured transforms for small-footprint deep learning. In Advances in Neural Information Processing Systems, pp. 3088­3096, 2015.
+Nathan Srebro, Jason Rennie, and Tommi S Jaakkola. Maximum-margin matrix factorization. In Advances in neural information processing systems, pp. 1329­1336, 2005.
+Jian Xue, Jinyu Li, and Yifan Gong. Restructuring of deep neural network acoustic models with singular value decomposition. In Interspeech, pp. 2365­2369, 2013.
+
+A NONDIMENSIONAL TRACE NORM COEFFICIENT
+
+In this section, we describe some of the properties of the non-dimensional trace norm coefficient defined in Section 3.1. Proposition 1. Let W, d,  be as in Definition 1. Then
+(i) (cW ) = (W ) for all scalars c  R \ {0}. (ii) 0  (W )  1. (iii) (W ) = 0 if and only if W has rank 1. (iv) (W ) = 1 if and only if W has maximal rank and all singular values are equal.
+
+Proof. Since we are assuming W is nonzero, at least one singular value is nonzero and hence |||| 2 = 0. Property (i) is immediate from the scaling property ||c|| = |c| · |||| satisfied by all norms.
+
+To establish the other properties, observe that we have
+
+(i + j )2  i2 + j2  2
+
+11 2 i + 2 j
+
+2
+.
+
+(8)
+
+The first inequality holds since singular values are nonnegative, and the inequality is strict unless i
+
+or j vanishes. The second inequality comes from an application of Jensen's inequality and is strict
+
+unless i = j. Thus, replacing (i, j) by (i + j, 0) preserves |||| 1 while increasing |||| 2
+
+unless |||| 1
+
+one of i or j is zero. while decreasing |||| 2
+
+Similarly, unless i
+
+replacing = j. By
+
+(asi,imjp)lebayrg(u21mien+t
+
+b21yjc,o12ntriad+ic12tionj ),
+
+preserves it follows
+
+that the minima occur for  = (1, 0, . . . , 0), in which case (W ) = 0 and the maxima occur for
+
+ = (1, . . . , 1), in which case (W ) = 1.
+
+We 2D
+
+can also obtain case visualized
+
+a better intuition about the minimum and maximum of (W ) by in Figure 7. For a fixed |||| 2 = , |||| 1 can vary from 
+
+tloooki2ng.atTthhee
+
+minimum |||| 1 happens when either 1 or 2 are zero. For these values |||| 2 = |||| 1 and as a
+
+result (W ) = 0. Similarly, the maximum |||| 1 happens for 1 = 2, resulting in (W ) = 1.
+
+10
+
+Under review as a conference paper at ICLR 2018
+
+Figure from 
+
+7: to
+
+Co2nto. urs
+
+of
+
+||||
+
+1
+
+and
+
+||||
+
+2.
+
+||||
+
+2
+
+is
+
+kept
+
+constant
+
+at
+
+.
+
+For
+
+this
+
+case,
+
+||||
+
+1
+
+can
+
+vary
+
+B MODEL DESIGN CONSIDERATIONS
+
+We describe here a few preliminary insights that informed our choice of baseline model for the experiments reported in Sections 3 and 4. Since the target domain is on-device streaming speech recognition with low latency, we chose to focus on Deep Speech 2 like models with forward-only GRU layers (Amodei et al., 2016).
+
+B.1 GROWING RECURRENT LAYER SIZES
+Across several data sets and model architectures, we consistently found that the sizes of the recurrent layers closer to the input could be shrunk without affecting accuracy much. A related phenomenon was observed in Prabhavalkar et al. (2016): When doing low rank approximations of the acoustic model layers using SVD, the rank required to explain a fixed threshold of explained variance grows with distance from the input layer. To reduce the number of parameters of the baseline model and speed up experiments, we thus chose to adopt growing GRU dimensions. Since the hope is that the compression techniques studied in this paper will automatically reduce layers to a near-optimal size, we chose to not tune these dimensions, but simply picked a reasonable affine increasing scheme of 768, 1024, 1280 for the GRU dimensions, and dimension 1536 for the final fully connected layer.
+
+B.2 PARAMETER SHARING IN THE LOW RANK FACTORIZATION
+
+For the recurrent layers, we employ the Gated Recurrent Unit (GRU) architecture proposed in Cho et al. (2014); Chung et al. (2014), where the hidden state ht is computed as follows:
+
+zt = (Wzxt + Uzht-1 + bz) rt = (Wrxt + Urht-1 + br) h~t = f (Whxt + rt · Uhht-1 + bh) ht = (1 - zt) · ht-1 + zt · h~t
+
+(9)
+
+where  is the sigmoid function, z and r are update and reset gates respectively, Uz, Ur, Uh are the three recurrent weight matrices, and Wz, Wr, Wh are the three non-recurrent weight matrices. We consider here three ways of performing weight sharing when doing low rank factorization of the 6 weight matrices.
+
+1. Completely joint factorization. Here we concatenate the 6 weight matrices along the first dimension and apply low rank factorization to this single combined matrix.
+
+11
+
+Under review as a conference paper at ICLR 2018
+
+Table 3: Performance of completely split versus partially joint factorization of recurrent weights.
+
+Completely split
+
+Partially joint
+
+SVD threshold Parameters (M) CER Parameters (M) CER
+
+0.50
+
+6.3 10.3
+
+5.5 10.3
+
+0.60
+
+8.7 10.5
+
+7.5 10.2
+
+0.70
+
+12.0 10.3 10.2
+
+9.9
+
+0.80
+
+16.4 10.1 13.7
+
+9.7
+
+2. Partially joint factorization. Here we concatenate the 3 recurrent matrices into a single matrix U and likewise concatenate the 3 non-recurrent matrices into a single matrix W . We then apply low rank factorization to each of U and W separately.
+3. Completely split factorization. Here we apply low rank factorization to each of the 6 weight matrices separately.
+In (Prabhavalkar et al., 2016; Kuchaiev & Ginsburg, 2017), the authors opted for the LSTM analog of completely joint factorization, as this choice has the most parameter sharing and thus the highest potential for compression of the model. However, we decided to go with partially joint factorization instead, largely for two reasons. First, in pilot experiments, we found that the U and W matrices behave qualitatively quite differently during training. For example, on large data sets the W matrices may be trained from scratch in factored form, whereas factored U matrices need to be either warmstarted via SVD from a trained unfactored model or trained with a significantly lowered learning rate. Second, the U and W split is advantageous in terms of computational efficiency. For the non-recurrent W GEMM, there is no sequential time dependency and thus its inputs x may be batched across time. Finally, we compared the partially joint factorization to the completely split factorization and found that the former indeed led to better accuracy versus number of parameters trade-offs. Some results from this experiment are shown in Table 3.
+B.3 MEL AND SMALLER CONVOLUTION FILTERS Switching from 161-dimensional linear spectrograms to 80-dimensional mel spectrograms reduces the per-timestep feature dimension by roughly a factor of 2. Furthermore, and likely owing to this switch, we could reduce the frequency-dimension size of the convolution filters by a factor of 2. In combination, this means about a 4x reduction in compute for the first and second convolution layers, and a 2x reduction in compute for the first GRU layer. On the WSJ corpus as well as an internal dataset of around 1,000 hours of speech, we saw little impact on accuracy from making this change, and hence we adopted it for all experiments in Section 3.
+B.4 GRAM-CTC AND INCREASED STRIDE IN CONVOLUTIONS Gram-CTC is a recently proposed extension to CTC for training models that output variable-size grams as opposed to single characters (Liu et al., 2017). Using Gram-CTC, we were able to increase the time stride in the second convolution layer by a factor of 2 with little to no loss in CER, though we did have to double the number of filters in that same convolution layer to compensate. The net effect is a roughly 2x speedup for the second and third GRU layers, which are the largest. This speed up more than makes up for the size increase in the softmax layer and the slightly more complex language model decoding when using Gram-CTC. However, for a given target accuracy, we found that Gram-CTC models could not be shrunk as much as CTC models by means of low rank factorization. That is, the net effect of this technique is to an increase model size for reduced latency.
+12
+
+Under review as a conference paper at ICLR 2018
+
+108
+
+baseline scaled baseline
+
+low rank (fast)
+
+low rank
+
+sparse
+
+Parameters
+
+107
+9.5 10.0 10.5 11.0 11.5 12.0 12.5 CER
+Figure 8: CER versus parameter on an internal dataset, colored by parameter reduction technique.
+B.5 LOW RANK FACTORIZATION VERSUS LEARNED SPARSITY Shown in Figure 8 is the parameter reduction versus relative CER increase trade-off for various techniques on an internal data set of around 1,000 hours of speech. The baseline model is a Deep Speech 2 model with three forward-GRU layers of dimension 2560, as described in Amodei et al. (2016). This is the same baseline model used in the experiments of Narang et al. (2017), from which paper we also obtained the sparse data points in the plot. Shown also are versions of the baseline model but with the GRU dimension scaled down to 1536 and 1024. Overall, models with low rank factorizations on all non-recurrent and recurrent weight matrices are seen to provide the best CER vs parameters trade-off. All the low rank models use growing GRU dimensions and the partially split form of low rank factorization, as discussed in Sections B.1 and B.2. The models labeled fast in addition use Gram-CTC as described in Section B.4 and mel features and reduced convolution filter sizes as described in Section B.3. As this was more of a preliminary comparison to some past experiments, the setup was not perfectly controlled and some models were, for example, trained for more epochs than others. We suspect that, given more effort and similar adjustments like growing GRU dimensions, the sparse models could be made competitive with the low rank models. Even so, given the computational advantage of the low rank approach over unstructured sparsity, we chose to focus only on the former going forward. This does not, of course, rule out the potential usefulness of other, more structured forms of sparsity in the embedded setting.
+
+13
+
+

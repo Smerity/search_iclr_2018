@@ -1,0 +1,941 @@
+Under review as a conference paper at ICLR 2018
+NOISY NETWORKS FOR EXPLORATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We introduce NoisyNet, a deep reinforcement learning agent with parametric noise added to its weights, and show that the induced stochasticity of the agent's policy can be used to aid efficient exploration. The parameters of the noise are learned with gradient descent along with the remaining network weights. NoisyNet is straightforward to implement and adds little computational overhead. We find that replacing the conventional exploration heuristics for A3C, DQN and Dueling agents (entropy reward and -greedy respectively) with NoisyNet yields substantially higher scores for a wide range of Atari games, in some cases advancing the agent from sub to super-human performance.
+1 INTRODUCTION
+Despite the wealth of research into efficient methods for exploration in Reinforcement Learning (RL) (Kearns & Singh, 2002; Jaksch et al., 2010), most exploration heuristics rely on random perturbations of the agent's policy, such as -greedy (Sutton & Barto, 1998) or entropy regularisation (Williams, 1992), to induce novel behaviours. However such local `dithering' perturbations are unlikely to lead to the large-scale behavioural patterns needed for efficient exploration in many environments (Osband et al., 2017).
+Optimism in the face of uncertainty is a common exploration heuristic in reinforcement learning. Various forms of this heuristic often come with theoretical guarantees on agent performance (Azar et al., 2017; Lattimore et al., 2013; Jaksch et al., 2010; Auer & Ortner, 2007; Kearns & Singh, 2002). However, these methods are often limited to small state-action spaces or to linear function approximations and are not easily applied with more complicated function approximators such as neural networks (except from work by (Geist & Pietquin, 2010a;b) but it doesn't come with convergence guarantees). A more structured approach to exploration is to augment the environment's reward signal with an additional intrinsic motivation term (Singh et al., 2004) that explicitly rewards novel discoveries. Many such terms have been proposed, including learning progress (Oudeyer & Kaplan, 2007), compression progress (Schmidhuber, 2010), variational information maximisation (Houthooft et al., 2016) and prediction gain (Bellemare et al., 2016). One problem is that these methods separate the mechanism of generalisation from that of exploration; the metric for intrinsic reward, and­importantly­its weighting relative to the environment reward, must be chosen by the experimenter, rather than learned from interaction with the environment. Without due care, the optimal policy can be altered or even completely obscured by the intrinsic rewards; furthermore, dithering perturbations are usually needed as well as intrinsic reward to ensure robust exploration (Ostrovski et al., 2017). Exploration in the policy space itself, for example, with evolutionary or black box algorithms (Moriarty et al., 1999; Fix & Geist, 2012; Salimans et al., 2017), usually requires many prolonged interactions with the environment. Although these algorithms are quite generic and can apply to any type of parametric policies (including neural networks), they are usually not data efficient and require a simulator to allow many policy evaluations.
+We propose a simple alternative approach, called NoisyNet, where learned perturbations of the network weights are used to drive exploration. The key insight is that a single change to the weight vector can induce a consistent, and potentially very complex, state-dependent change in policy over multiple time steps ­ unlike dithering approaches where decorrelated (and, in the case of -greedy, state-independent) noise is added to the policy at every step. The perturbations are sampled from a noise distribution. The variance of the perturbation is a parameter that can be considered as the energy of the injected noise. These variance parameters are learned using gradients from the reinforcement learning loss function, along side the other parameters of the agent. The approach differs from
+1
+
+Under review as a conference paper at ICLR 2018
+
+parameter compression schemes such as variational inference (Hinton & Van Camp, 1993; Bishop, 1995) and flat minima search (Hochreiter & Schmidhuber, 1997) since we do not maintain an explicit distribution over weights during training but simply inject noise in the parameters and tune its intensity automatically. It also differs from variational inference (Graves, 2011; Blundell et al., 2015) or Thompson sampling (Thompson, 1933; Lipton et al., 2016) as the distribution on the parameters of our agents does not necessarily converge to an approximation of a posterior distribution.
+At a high level our algorithm induces a randomised network for exploration, with care exploration via randomised value functions can be provably-efficient with suitable linear basis (Osband et al., 2014). Previous attempts to extend this approach to deep neural networks required many duplicates of sections of the network (Osband et al., 2016). By contrast our NoisyNet approach requires only one extra parameter per weight and applies to policy gradient methods such as A3C out of the box (Mnih et al., 2016). Most recently (and independently of our work) Plappert et al. (2017) presented a similar technique where constant Gaussian noise is added to the parameters of the network. Our method thus differs by the ability of the network to adapt the noise injection with time and it is not restricted to Gaussian noise distributions. We need to emphasise that the idea of injecting noise to improve the optimisation process have been thoroughly studied in the literature of supervised learning and optimisation under different names (e.g., Neural diffusion process (Mobahi, 2016) and graduated optimisation (Hazan et al., 2016)). Though these methods often rely on a non-trainable noise of vanishing size as opposed to NoisyNet which tunes the parameter of noise by gradient descent.
+NoisyNet can also be adapted to any deep RL algorithm and we demonstrate this versatility by providing NoisyNet versions of DQN (Mnih et al., 2015), Dueling (Wang et al., 2016) and A3C (Mnih et al., 2016) algorithms. Experiments on 57 Atari games show that NoisyNet-DQN and NoisyNetDueling achieve striking gains when compared to the baseline algorithms without significant extra computational cost, and with less hyper parameters to tune. Also the noisy version of A3C provides some improvement over the baseline.
+
+2 BACKGROUND
+
+This section provides mathematical background for Markov Decision Processes (MDPs) and deep RL with Q-learning, dueling and actor-critic methods.
+
+2.1 MARKOV DECISION PROCESSES AND REINFORCEMENT LEARNING
+
+MDPs model stochastic, discrete-time and finite action space control problems (Bellman & Kalaba, 1965; Bertsekas, 1995; Puterman, 1994). An MDP is a tuple M = (X , A, R, P, ) where X is the state space, A the action space, R the reward function,  ]0, 1[ the discount factor and P a stochastic kernel modelling the one-step Markovian dynamics (P (y|x, a) is the probability of transitioning to
+state y by choosing action a in state x). A stochastic policy  maps each state to a distribution over actions (·|x) and gives the probability (a|x) of choosing action a in state x. The quality of a policy  is assessed by the action-value function Q defined as:
+
++
+
+Q(x, a) = E
+
+tR(xt, at) ,
+
+t=0
+
+(1)
+
+where E is the expectation over the distribution of the admissible trajectories (x0, a0, x1, a1, . . . ) obtained by executing the policy  starting from x0 = x and a0 = a. Therefore, the quantity Q(x, a) represents the expected -discounted cumulative reward collected by executing the policy  starting
+from x and a. A policy is optimal if no other policy yields a higher return. The action-value function of the optimal policy is Q (x, a) = arg max Q(x, a).
+
+The value function V  for a policy is defined as V (x) = Ea (·|x)[Q(x, a)], and represents the expected -discounted return collected by executing the policy  starting from state x.
+
+2.2 DEEP REINFORCEMENT LEARNING
+Deep Reinforcement Learning uses deep neural networks as function approximators for RL methods. Deep Q-Networks (DQN) (Mnih et al., 2015), Dueling architecture (Wang et al., 2016), Asynchronous
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Advantage Actor-Critic (A3C) (Mnih et al., 2016), Trust Region Policy Optimisation (Schulman et al., 2015), Deep Deterministic Policy Gradient (Lillicrap et al., 2015) and distributional RL (C51) (Bellemare et al., 2017) are examples of such algorithms. They frame the RL problem as the minimisation of a loss function L(), where  represents the parameters of the network. In our experiments we shall consider the DQN, Dueling and A3C algorithms.
+
+DQN (Mnih et al., 2015) uses a neural network as an approximator for the action-value function of the optimal policy Q (x, a). DQN's estimate of the optimal action-value function, Q(x, a), is found by minimising the following loss with respect to the neural network parameters :
+
+L() = E(x,a,r,y)D
+
+2
+r +  max Q(y, b; -) - Q(x, a; ) ,
+bA
+
+(2)
+
+where D is a distribution over transitions e = (x, a, r = R(x, a), y  P (·|x, a)) drawn from a replay buffer of previously observed transitions. Here - represents the parameters of a fixed and separate target network which is updated (-  ) regularly to stabilise the learning. An -greedy policy is used to pick actions greedily according to the action-value function Q or, with probability , a random action is taken.
+
+The Dueling DQN (Wang et al., 2016) is an extension of the DQN architecture. The main difference
+is in using Dueling network architecture as opposed to the Q network in DQN. Dueling network
+estimates the action-value function using two parallel sub-networks, the value and advantage sub-
+network, sharing a convolutional layer. Let conv, V , and A be, respectively, the parameters of the convolutional encoder f , of the value network V , and of the advantage network A; and  = {conv, V , A} is their concatenation. The output of these two networks are combined as follows for every (x, a)  X × A:
+
+Q(x, a; ) = V (f (x; conv), V ) + A(f (x; conv); A) -
+
+b A(f (x; conv), b; A) . Nactions
+
+(3)
+
+The Dueling algorithm then makes use of the the double-DQN update rule (van Hasselt et al., 2016) to optimise :
+
+L() = E(x,a,r,y)D r + Q(y, b(y); -) - Q(x, a; ) 2 , s.t. b(y) = arg max Q(y, b; ),
+bA
+
+(4) (5)
+
+where the definition distribution D and the target network parameter set - is identical to DQN.
+
+In contrast to DQN and Dueling, A3C (Mnih et al., 2016) is a policy gradient algorithm. A3C's
+network directly learns a policy  and a value function V of its policy. The gradient of the loss on the A3C policy at step t for the roll-out (xt+i, at+i  (·|xt+i; ), rt+i)ik=0 is:
+
+kk
+
+L() = -E
+
+ log((at+i|xt+i; ))A(xt+i, at+i; ) +  H((·|xt+i; )) .
+
+i=0 i=0
+(6)
+H[(·|xt; )] denotes the entropy of the policy  and  is a hyper parameter that trades off be-
+tween optimising the advantage function and the entropy of the policy. The advantage function
+
+A(xt+i, at+i; ) is the difference between observed returns and estimates of the return produced
+
+by A3C's value network: A(xt+i, at+i; ) =
+
+k-1 j=i
+
+ j -i rt+j
+
++
+
+k-iV
+
+(xt+k ;
+
+)
+
+-
+
+V
+
+(xt+i;
+
+),
+
+rt+j
+
+being the reward at step t + j and V (x; ) being the agent's estimate of value function of state x.
+
+Parameters of the value function are found to match on-policy returns: LV () =
+
+E
+
+k i=0
+
+(Q^i
+
+-
+
+V
+
+(xt+i;
+
+))2
+
+where Q^i is the return obtained by executing policy  starting
+
+in state xt+i: Q^i =
+
+k-1 j=i
+
+ j -i rt+j
+
++
+
+k-iV (xt+k; ).
+
+The overall A3C loss is then L()
+
+=
+
+L() + LV () where  balances optimising the policy loss relative to the baseline value function
+
+loss.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+3 NOISYNETS FOR REINFORCEMENT LEARNING
+
+NoisyNets are neural networks whose weights and biases are perturbed by a parametric function of the noise. These parameters are adapted with gradient descent. More precisely, let y = f(x) be a neural network parameterised by the vector of noisy parameters  which takes the input x and outputs y. We represent the noisy parameters  as  d=ef µ +  , where  d=ef (µ, ) is a set of vectors of learnable parameters,  is a vector of zero-mean noise with fixed statistics and represents element-wise multiplication. The usual loss of the neural network is wrapped by expectation over the noise : L¯() d=ef E [L()]. Optimisation now occurs with respect to the set of parameters .
+
+Consider a linear layer of a neural network with p inputs and q outputs, represented by
+
+y = wx + b,
+
+(7)
+
+where x  Rp is the layer input, w  Rq×p the weight matrix, and b  Rq the bias. The corresponding
+
+noisy linear layer is defined as:
+
+y d=ef (µw + w w)x + µb + b b,
+
+(8)
+
+where µw + w w and µb + b b replace w and b in Eq. (7), respectively. The parameters µw  Rq×p, µb  Rq, w  Rq×p and b  Rq are learnable whereas w  Rq×p and b  Rq are noise random variables (the specific choices of this distribution are described below).
+
+We now turn to explicit instances of the noise distributions for linear layers in a noisy network. We explore two options:
+
+(a) Independent Gaussian noise: the noise applied to each weight and bias is independent, where each entry wi,j (respectively each entry jb) of the random matrix w (respectively of the random vector b) is drawn from a unit Gaussian distribution. This means that for each noisy linear layer,
+there are pq + q noise variables (for p inputs to the layer and q outputs).
+
+(b) Factorised Gaussian noise reduces the number of random variables in the network from one per weight, to one per input and one per output of each noisy linear layer. By factorising iw,j, we can use p unit Gaussian variables i for noise of the inputs and and q unit Gaussian variables j for
+noise of the outputs (thus p + q unit Gaussian variables in total). Each wi,j and bj can then be written as:
+
+wi,j = f (i)f (j ),
+
+(9)
+
+jb = f (j),
+
+(10)
+
+where f is a real-valued function. In our experiments we used f (x) = sgn(x) |x|.
+
+Since the loss of a noisy network, L¯() = E [L()], is an expectation over the noise, the gradients are straightforward to obtain:
+
+L¯() = E [L()] = E [µ,L(µ +  )] .
+
+(11)
+
+We use a Monte Carlo approximation to the above gradients, taking a single sample  at each step of
+
+optimisation:
+
+L¯()  µ,L(µ +  ).
+
+(12)
+
+3.1 DEEP REINFORCEMENT LEARNING WITH NOISYNETS
+We now turn to our application of noisy networks to exploration in deep reinforcement learning. Noise drives exploration in many methods for reinforcement learning, providing a source of stochasticity external to the agent and the RL task at hand. Either the scale of this noise is manually tuned across a wide range of tasks (as is the practice in general purpose agents such as DQN or A3C) or it can be manually scaled per task. Here we propose automatically tuning the level of noise added to an agent for exploration, using the noisy networks training to drive down (or up) the level of noise injected into the parameters of a neural network, as needed.
+A noisy network agent samples a new set of parameters after every step of optimisation. Between optimisation steps, the agent acts according to a fixed set of parameters (weights and biases). This ensures that the agent always acts according to parameters that are drawn from the current noise distribution.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Deep Q-Networks (DQN) and Dueling. We apply the following modifications to both DQN and Dueling: first, -greedy is no longer used, but instead the policy greedily optimises the (randomised) action-value function. Secondly, the fully connected layers of the value network are parameterised as a noisy network, where the parameters are drawn from the noisy network parameter distribution after every replay step. We used factorised Gaussian noise as explained in (b) from Sec. 3. For replay, the current noisy network parameter sample is held fixed across the batch. Since DQN and Dueling take one step of optimisation for every action step, the noisy network parameters are re-sampled before every action. We call the new adaptations of DQN and Dueling, NoisyNet-DQN and NoisyNet-Dueling, respectively.
+We now provide the details of the loss function that our variant of DQN is minimising. When replacing the linear layers by noisy layers in the network (respectively in the target network), the parameterised action-value function Q(x, a, ; ) (respectively Q(x, a,  ; -)) can be seen as a random variable and the DQN loss becomes the NoisyNet-DQN loss:
+
+L¯() = E
+
+E(x,a,r,y)D [r
+
++
+
+
+
+max
+bA
+
+Q(y,
+
+b,
+
+
+
+;
+
+-)
+
+-
+
+Q(x,
+
+a,
+
+;
+
+ )]2
+
+,
+
+(13)
+
+where the outer expectation is with respect to distribution of the noise variables  for the noisy value function Q(x, a, ; ) and the noise variable  for the noisy target value function Q(y, b,  ; -). Computing an unbiased estimate of the loss is straightforward as we only need to compute, for each transition in the replay buffer, one instance of the target network and one instance of the online network. Concerning the action choice, we sample from the online network and we act greedily with respect to the output action-value function. The algorithm is provided in Sec. C.1.
+
+Similarly the loss function for NoisyNet-Dueling is defined as:
+L¯() = E E(x,a,r,y)D[r + Q(y, b(y),  ; -) - Q(x, a, ; )]2 s.t. b(y) = arg max Q(y, b(y),  ; ).
+bA
+
+(14) (15)
+
+The algorithm is provided in Sec. C.2.
+
+Asynchronous Advantage Actor Critic (A3C). A3C is modified in a similar fashion to DQN: firstly, the entropy bonus of the policy loss is removed. Secondly, the fully connected layers of the policy network are parameterised as a noisy network. We used independent Gaussian noise as explained in (a) from Sec. 3. In A3C, there is no explicit exploratory action selection scheme (such as -greedy); and the chosen action is always drawn from the current policy. For this reason, an entropy bonus of the policy loss is often added to discourage updates leading to deterministic policies. However, when adding noisy weights to the network, sampling these parameters corresponds to choosing a different current policy which naturally favours exploration. As a consequence of direct exploration in the policy space, the artificial entropy loss on the policy can thus be omitted. New parameters of the policy network are sampled after each step of optimisation, and since A3C uses n step returns, optimisation occurs every n steps. We call this modification of A3C, NoisyNet-A3C.
+
+Indeed, when replacing the linear layers by noisy linear layers (the parameters of the noisy network are now noted ), we obtain the following estimation of the return via a roll-out of size k:
+
+k-1
+Q^i = j-irt+j + k-iV (xt+k; , i).
+j=i
+
+(16)
+
+As A3C is an on-policy algorithm the gradients are unbiased when noise of the network is consistent for the whole roll-out. Consistency among action value functions Q^i is ensured by letting letting the noise be the same throughout each rollout, i.e., i, i = . Additional details are provided in the
+Appendix Sec. A.2 and the algorithm is given in Sec. C.3.
+
+4 RESULTS
+We evaluated the performance of noisy network agents on 57 Atari games (Bellemare et al., 2015) and compared to baselines that, without noisy networks, rely upon the original exploration methods
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+(a) Improvement in percentage of NoisyNet-DQN over DQN (Mnih et al., 2015)
+
+(b) Improvement in percentage of NoisyNet-Dueling over Dueling (Wang et al., 2016)
+
+(c) Improvement in percentage of NoisyNet-A3C over A3C (Mnih et al., 2016)
+Figure 1: Comparison of NoisyNet agent versus the baseline according to Eq. (18). The maximum score is truncated at 250%.
+
+(-greedy and entropy bonus). We used the random start no-ops scheme for training and evaluation as described the original DQN paper (Mnih et al., 2015). The mode of evaluation is identical to those of Mnih et al. (2016) where randomised restarts of the games are used for evaluation after training has happened. The raw average scores of the agents are evaluated during training, every 1M frames in the environment, by suspending learning and evaluating the latest agent for 500K frames. Episodes are truncated at 108K frames (or 30 minutes of simulated play) (van Hasselt et al., 2016).
+We consider three baseline agents: DQN (Mnih et al., 2015), duel clip variant of Dueling algorithm (Wang et al., 2016) and A3C (Mnih et al., 2016). In each case, we used the neural network architecture from the corresponding original papers for both the baseline and NoisyNet variant. For the NoisyNet variants we used the same hyper parameters as in the respective original paper for the baseline.
+We compared absolute performance of agents using the human normalised score:
+
+100 × Scoreagent - ScoreRandom , ScoreHuman - ScoreRandom
+
+(17)
+
+where human and random scores are the same as those in Wang et al. (2016). Note that the human normalised score is zero for a random agent and 100 for human level performance. Per-game maximum scores are computed by taking the maximum raw scores of the agent and then averaging over three seeds. However, for computing the human normalised scores in Figure 2, the raw scores
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+are evaluated every 1M frames and averaged over three seeds. The overall agent performance is measured by both mean and median of the human normalised score across all 57 Atari games.
+The aggregated results across all 57 Atari games are reported in Table 1, while the individual scores for each game are in Table 2 from the Appendix. The median human normalised score is improved in all agents by using NoisyNet, adding at least 18 (in the case of A3C) and at most 48 (in the case of DQN) percentage points to the median human normalised score. The mean human normalised score is also significantly improved for all agents. Interestingly the Dueling case, which relies on multiple modifications of DQN, demonstrates that NoisyNet is orthogonal to several other improvements made to DQN. We also compared relative performance of NoisyNet agents to the respective baseline agent
+
+Baseline
+
+NoisyNet Improvement
+
+Mean Median Mean Median (On median)
+
+DQN 319 83 379 123 Dueling 524 132 633 172
+A3C 293 80 347 94
+
+48% 30% 18%
+
+Table 1: Comparison between the baseline DQN, Dueling and A3C and their NoisyNet version in terms of median and mean human-normalised scores defined in Eq. (17). We report on the last column the percentage improvement on the baseline in terms of median human-normalised score.
+
+without noisy networks:
+
+100 ×
+
+ScoreNoisyNet - ScoreBaseline
+
+.
+
+max(ScoreHuman, ScoreBaseline) - ScoreRandom
+
+(18)
+
+As before, the per-game score is computed by taking the maximum performance for each game and then averaging over three seeds. The relative human normalised scores are shown in Figure 1. As can be seen, the performance of NoisyNet agents (DQN, Dueling and A3C) is better for the majority of games relative to the corresponding baseline, and in some cases by a considerable margin. Also as it is evident from the learning curves of Fig. 2 NoisyNet agents produce superior performance compare to their corresponding baselines throughout the learning process. This improvement is especially significant in the case of NoisyNet-DQN and NoisyNet-Dueling. Also in some games, NoisyNet agents provide an order of magnitude improvement on the performance of the vanilla agent; as can be seen in Table 2 in the Appendix with detailed breakdown of individual game scores. More information is provided in the learning curves plots from Figs 4, 5 and 6, for DQN, Dueling and A3C, respectively.
+
+Figure 2: Comparison of the learning curves of NoisyNet agent versus the baseline according to the median human normalised score.
+4.1 ANALYSIS OF LEARNING IN NOISY LAYERS
+In this subsection, we try to provide some insight on how noisy networks affect the learning process and the exploratory behaviour of the agent. In particular, we focus on analysing the evolution of the noise weights w and b throughout the learning process. We first note that, as L() is a positive and continuous function of , there always exists a deterministic optimiser for the loss L() (defined in
+7
+
+Under review as a conference paper at ICLR 2018
+
+Eq. (13)). Therefore, one may expect that, to obtain the deterministic optimal solution, the neural network may learn to discard the noise entries by eventually pushing ws and b towards 0.
+
+Tthoetietshtwtheiisghhyt poof tahensoiissywleaytrearc.kWtheethcehnandgeefisnien¯,wthsethmroeuagnh-aobustotlhueteleoafrnthinegpiwrsocoefsas.nLoiestyliwaydeer,naoste
+
+¯ = 1 Nweights
+
+i
+
+|iw |.
+
+(19)
+
+Intuitively speaking ¯ provides some measure of the stochasticity of the Noisy layers. We report the learning curves of ¯ in Fig. 3 for a selection of Atari games in NoisyNet-DQN agent. We observe that ¯ of the last layer of the network decreases as the learning proceeds in all cases, whereas in the case of the penultimate layer this only happens for 2 games out of 5 (Pong and Beam rider) and in the remaining 3 games ¯ in fact increases. This shows that in the case of NoisyNet-DQN the agent does not necessarily evolve towards a deterministic solution as one might have expected. Another interesting observation is that the way ¯ evolves significantly differs from one game to another. This suggests that NoisyNet produces a problem-specific exploration strategy for each domain as opposed to fixed exploration strategy used in standard DQN.
+
+Figure 3: Comparison of the learning curves of the average noise parameter ¯ across five Atari games in NoisyNet-DQN. The results are averaged across 3 seeds.
+5 CONCLUSION
+We have presented a general method for exploration in deep reinforcement learning that shows significant performance improvements across many Atari games in three different agent architectures. In particular, we observe that in games such as Beam rider, Asteroids and Freeway that the standard DQN, Dueling and A3C perform poorly compared with the human player, NoisyNet-DQN, NoisyNetDueling and NoisyNet-A3C achieve super human performance, respectively. Our method eliminates the need for -greedy and the entropy bonus commonly used in Q-learning-style and policy gradient methods, respectively. Instead we show that better exploration is possible by relying on perturbations in weight space to drive exploration. Another advantage of NoisyNet is that the amount of noise injected in the network is tuned automatically by the RL algorithm. This alleviates the need for any hyper parameter tuning (required with standard entropy bonus and -greedy types of exploration). This is also in contrast to many other methods that add intrinsic motivation signals that may destabilise learning or change the optimal policy. Another interesting feature of the NoisyNet approach is that the degree of exploration is contextual and varies from state to state based upon per-weight variances. While more gradients are needed, the gradients on the mean and variance parameters are related to one another by a computationally efficient affine function, thus the computational overhead is marginal. Automatic differentiation makes implementation of our method a straightforward adaptation of many existing methods. A similar randomisation technique can also be applied to LSTM units (Fortunato et al., 2017) and is easily extended to reinforcement learning, we leave this as future work.
+Note NoisyNet exploration strategy is not restricted to the baselines considered in this paper. In fact, this idea can be applied to any deep RL algorithms that can be trained with gradient descent, including DDPG (Lillicrap et al., 2015), TRPO (Schulman et al., 2015) or distributional RL (C51) (Bellemare et al., 2017). As such we believe this work is a step towards the goal of developing a universal exploration strategy.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Peter Auer and Ronald Ortner. Logarithmic online regret bounds for undiscounted reinforcement learning. Advances in Neural Information Processing Systems, 19:49, 2007.
+Mohammad Gheshlaghi Azar, Ian Osband, and Rémi Munos. Minimax regret bounds for reinforcement learning. arXiv preprint arXiv:1703.05449, 2017.
+Marc Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning environment: An evaluation platform for general agents. In Twenty-Fourth International Joint Conference on Artificial Intelligence, 2015.
+Marc Bellemare, Sriram Srinivasan, Georg Ostrovski, Tom Schaul, David Saxton, and Remi Munos. Unifying count-based exploration and intrinsic motivation. In Advances in Neural Information Processing Systems, pp. 1471­1479, 2016.
+Marc G Bellemare, Will Dabney, and Rémi Munos. A distributional perspective on reinforcement learning. In International Conference on Machine Learning, pp. 449­458, 2017.
+Richard Bellman and Robert Kalaba. Dynamic programming and modern control theory. Academic Press New York, 1965.
+Dimitri Bertsekas. Dynamic programming and optimal control, volume 1. Athena Scientific, Belmont, MA, 1995.
+Chris M Bishop. Training with noise is equivalent to Tikhonov regularization. Neural computation, 7 (1):108­116, 1995.
+Charles Blundell, Julien Cornebise, Koray Kavukcuoglu, and Daan Wierstra. Weight uncertainty in neural networks. In Proceedings of The 32nd International Conference on Machine Learning, pp. 1613­1622, 2015.
+Jeremy Fix and Matthieu Geist. Monte-Carlo swarm policy search. In Swarm and Evolutionary Computation, pp. 75­83. Springer, 2012.
+Meire Fortunato, Charles Blundell, and Oriol Vinyals. Bayesian recurrent neural networks. arXiv preprint arXiv:1704.02798, 2017.
+Matthieu Geist and Olivier Pietquin. Kalman temporal differences. Journal of artificial intelligence research, 39:483­532, 2010a.
+Matthieu Geist and Olivier Pietquin. Managing uncertainty within value function approximation in reinforcement learning. In Active Learning and Experimental Design workshop (collocated with AISTATS 2010), Sardinia, Italy, volume 92, 2010b.
+Alex Graves. Practical variational inference for neural networks. In Advances in Neural Information Processing Systems, pp. 2348­2356, 2011.
+Elad Hazan, Kfir Yehuda Levy, and Shai Shalev-Shwartz. On graduated optimization for stochastic non-convex problems. In International Conference on Machine Learning, pp. 1833­1841, 2016.
+Geoffrey E Hinton and Drew Van Camp. Keeping the neural networks simple by minimizing the description length of the weights. In Proceedings of the sixth annual conference on Computational learning theory, pp. 5­13. ACM, 1993.
+Sepp Hochreiter and Jürgen Schmidhuber. Flat minima. Neural Computation, 9(1):1­42, 1997.
+Rein Houthooft, Xi Chen, Yan Duan, John Schulman, Filip De Turck, and Pieter Abbeel. VIME: Variational information maximizing exploration. In Advances in Neural Information Processing Systems, pp. 1109­1117, 2016.
+Thomas Jaksch, Ronald Ortner, and Peter Auer. Near-optimal regret bounds for reinforcement learning. Journal of Machine Learning Research, 11(Apr):1563­1600, 2010.
+9
+
+Under review as a conference paper at ICLR 2018
+Michael Kearns and Satinder Singh. Near-optimal reinforcement learning in polynomial time. Machine Learning, 49(2-3):209­232, 2002.
+Tor Lattimore, Marcus Hutter, and Peter Sunehag. The sample-complexity of general reinforcement learning. In Proceedings of The 30th International Conference on Machine Learning, pp. 28­36, 2013.
+Timothy P Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. arXiv preprint arXiv:1509.02971, 2015.
+Zachary C Lipton, Jianfeng Gao, Lihong Li, Xiujun Li, Faisal Ahmed, and Li Deng. Efficient exploration for dialogue policy learning with BBQ networks & replay buffer spiking. arXiv preprint arXiv:1608.05081, 2016.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015.
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In International Conference on Machine Learning, pp. 1928­1937, 2016.
+Hossein Mobahi. Training recurrent neural networks by diffusion. arXiv preprint arXiv:1601.04114, 2016.
+David E Moriarty, Alan C Schultz, and John J Grefenstette. Evolutionary algorithms for reinforcement learning. Journal of Artificial Intelligence Research, 11:241­276, 1999.
+Ian Osband, Benjamin Van Roy, and Zheng Wen. Generalization and exploration via randomized value functions. arXiv preprint arXiv:1402.0635, 2014.
+Ian Osband, Charles Blundell, Alexander Pritzel, and Benjamin Van Roy. Deep exploration via bootstrapped DQN. In Advances In Neural Information Processing Systems, pp. 4026­4034, 2016.
+Ian Osband, Daniel Russo, Zheng Wen, and Benjamin Van Roy. Deep exploration via randomized value functions. arXiv preprint arXiv:1703.07608, 2017.
+Georg Ostrovski, Marc G Bellemare, Aaron van den Oord, and Remi Munos. Count-based exploration with neural density models. arXiv preprint arXiv:1703.01310, 2017.
+Pierre-Yves Oudeyer and Frederic Kaplan. What is intrinsic motivation? A typology of computational approaches. Frontiers in neurorobotics, 1, 2007.
+Matthias Plappert, Rein Houthooft, Prafulla Dhariwal, Szymon Sidor, Richard Y Chen, Xi Chen, Tamim Asfour, Pieter Abbeel, and Marcin Andrychowicz. Parameter space noise for exploration. arXiv preprint arXiv:1706.01905, 2017.
+Martin Puterman. Markov decision processes: discrete stochastic dynamic programming. John Wiley & Sons, 1994.
+Tim Salimans, J. Ho, X. Chen, and I. Sutskever. Evolution Strategies as a Scalable Alternative to Reinforcement Learning. ArXiv e-prints, 2017.
+Jürgen Schmidhuber. Formal theory of creativity, fun, and intrinsic motivation (1990­2010). IEEE Transactions on Autonomous Mental Development, 2(3):230­247, 2010.
+J. Schulman, S. Levine, P. Abbeel, M. Jordan, and P. Moritz. Trust region policy optimization. In Proc. of ICML, pp. 1889­1897, 2015.
+Satinder P Singh, Andrew G Barto, and Nuttapong Chentanez. Intrinsically motivated reinforcement learning. In NIPS, volume 17, pp. 1281­1288, 2004.
+Richard S Sutton and Andrew G Barto. Reinforcement learning: An introduction. Cambridge Univ Press, 1998.
+10
+
+Under review as a conference paper at ICLR 2018 Richard S. Sutton, David A. McAllester, Satinder P. Singh, and Yishay Mansour. Policy gradient
+methods for reinforcement learning with function approximation. In Proc. of NIPS, volume 99, pp. 1057­1063, 1999. William R Thompson. On the likelihood that one unknown probability exceeds another in view of the evidence of two samples. Biometrika, 25(3/4):285­294, 1933. Hado van Hasselt, Arthur Guez, and David Silver. Deep reinforcement learning with double qlearning. In Proc. of AAAI, pp. 2094­2100, 2016. Ziyu Wang, Tom Schaul, Matteo Hessel, Hado van Hasselt, Marc Lanctot, and Nando de Freitas. Dueling network architectures for deep reinforcement learning. In Proceedings of The 33rd International Conference on Machine Learning, pp. 1995­2003, 2016. Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine learning, 8(3-4):229­256, 1992.
+11
+
+Under review as a conference paper at ICLR 2018
+
+A ALGORITHM DESCRIPTIONS
+
+A.1 NOISYNET-DQN IMPLEMENTATION DETAILS
+
+DQN (Mnih et al., 2015) is an approximate value iteration technique that uses a deep convolutional neural network to represent the Q-function as Q(x, a; ), where  are the parameters of the network. We used the network architecture from (Mnih et al., 2015) and also the same set up for interacting with the Atari games. We note, however, that we did not use -greedy technique, instead relied solely upon NoisyNet for exploration. In DQN, the neural network is trained by minimising the following loss:
+
+L()
+
+=
+
+E(x,a,r,y)D
+
+[r
+
++
+
+
+
+max
+bA
+
+Q(y,
+
+b;
+
+-
+
+)
+
+-
+
+Q(x,
+
+a;
+
+)]2
+
+.
+
+where D is a distribution over transitions e = (x, a, r = R(x, a), y  P (·|x, a)). Here - represents the parameters of the target network which is updated (-  ) regularly and stabilises the learning. The distribution D is generated by constructing a replay buffer were training examples are uniformly sampled from previous experience tuples et = (xt, at, rt, xt+1). We now provide the details of the loss function that our variant of DQN with noisy network is minimising. When replacing the linear layers by noisy layers (the parameters are now noted ) in the network (respectively in the target network), the parameterised action-value function Q(x, a, ; ) (respectively Q(x, a,  ; -)) can be seen as a random variable and the DQN loss becomes the NoisyNet-DQN loss:
+
+L¯() = E
+
+E(x,a,r,y)D [r
+
++
+
+
+
+max
+bA
+
+Q(y,
+
+b,
+
+
+
+;
+
+-)
+
+-
+
+Q(x,
+
+a,
+
+;
+
+ )]2
+
+.
+
+(20)
+
+The goal of NoisyNet-DQN is to optimise the loss L¯() in terms of .
+
+A.2 NOISYNET-A3C IMPLEMENTATION DETAILS
+
+In contrast with value-based algorithms, policy-based methods such as A3C (Mnih et al., 2016)
+parameterise the policy (a|x; ) directly and update the parameters  by performing a gradient ascent on the mean value-function ExD[V (·|·;)(x)] (also called the expected return) (Sutton et al., 1999). A3C uses a deep neural network with weights  =  V to parameterise the policy  and the value V . The network has one softmax output for the policy-head (·|·; ) and one linear output for the value-head V (·; V ), with all non-output layers shared. The parameters  (resp. V ) are relative
+to the shared layers and the policy head (resp. the value head). A3C is an asynchronous and online
+algorithm that uses roll-outs of size k + 1 of the current policy to perform a policy improvement step.
+
+In A3C, there is no explicit exploratory action selection scheme (such as -greedy); and the chosen action is always drawn from the current policy. For this reason, an entropy loss on the policy is often added to discourage updates leading to deterministic policies. However, when using noisy weights in the network, sampling corresponds to choosing a different current policy which naturally favours exploration. As a consequence of direct exploration in the policy space, the artificial entropy loss on the policy can thus be omitted.
+
+For simplicity, here we present the A3C version with only one thread. For a multi-thread implementa-
+tion, refer to the pseudo-code C.3 or to the original A3C paper (Mnih et al., 2016). In order to train
+the policy-head, an approximation of the policy-gradient is computed for each state of the roll-out (xt+i, at+i  (·|xt+i; ), rt+i)ki=0:
+
+ log((at+i|xt+i; ))[Q^i - V (xt+i; V )],
+
+(21)
+
+where Q^i is an estimation of the return Q^i =
+
+k-1 j=i
+
+ j -i rt+j
+
++
+
+k-iV
+
+(xt+k; V
+
+).
+
+The
+
+gradients
+
+are then added to obtain the cumulative gradient of the roll-out:
+
+k
+ log((at+i|xt+i; ))[Q^i - V (xt+i; V )].
+i=0
+
+(22)
+
+A3C trains the value-head by minimising the error between the estimated return and the value
+
+k i=0
+
+(Q^i
+
+-
+
+V
+
+(xt+i;
+
+V
+
+))2.
+
+Therefore, the network parameters (, V ) are updated after each
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+roll-out as follows:
+
+k
+   +   log((at+i|xt+i; ))[Q^i - V (xt+i; V )],
+i=0
+k
+V  V - V V [Q^i - V (xt+i; V )]2,
+i=0
+
+(23) (24)
+
+where (, V ) are hyper-parameters. As mentioned previously, in the original A3C algorithm, it
+
+is recommended to add an entropy term 
+
+k i=0
+
+
+
+H
+
+((·|xt+i;
+
+
+
+))
+
+to
+
+the
+
+policy
+
+update,
+
+where
+
+H((·|xt+i; )) = - aA (a|xt+i; ) log((a|xt+i; )). Indeed, this term encourages ex-
+
+ploration as it favours policies which are uniform over actions. When replacing the linear layers in
+
+the value and policy heads by noisy layers (the parameters of the noisy network are now  and V ),
+
+we obtain the following estimation of the return via a roll-out of size k:
+
+k-1
+Q^i = j-irt+j + k-iV (xt+k; V , i).
+j=i
+
+(25)
+
+We would like Q^i to be a consistent estimate of the return of the current policy. To do so, we should force i, i = . As A3C is an on-policy algorithm, this involves fixing the noise of the network for the whole roll-out so that the policy produced by the network is also fixed. Hence, each update of the
+parameters (, V ) is done after each roll-out with the noise of the whole network held fixed for the duration of the roll-out:
+
+k
+   +   log((at+i|xt+i; , ))[Q^i - V (xt+i; V , )],
+i=0
+k
+V  V - V V [Q^i - V (xt+i; V , )]2.
+i=0
+
+(26) (27)
+
+B INITIALISATION OF NOISY NETWORKS
+
+In the case of an unfactorised noisy networks, the parameters µ and  are initialised as follows. Each
+
+element µi,j is sampled from independent uniform distributions U [-
+
+3 p
+
+,
+
++
+
+3 p
+
+],
+
+where
+
+p
+
+is
+
+the
+
+number of inputs to the corresponding linear layer, and each element i,j is simply set to 0.017 for all parameters.
+
+For factorised noisy networks, each element µi,j was initialised by a sample from an independent
+
+uniform
+
+distributions
+
+U
+
+[-
+
+1 p
+
+,
+
++
+
+1 p
+
+]
+
+and
+
+each
+
+element
+
+i,j
+
+was
+
+initialised
+
+to
+
+a
+
+constant
+
+0 p
+
+.
+
+The
+
+hyperparameter 0 is set to 0.5.
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+C ALGORITHMS
+C.1 NOISYNET-DQN
+
+Algorithm 1: NoisyNet-DQN
+
+Input :Env Environment; Nf maximum length of list x;  set of random variables of the network Input :B empty replay buffer;  initial network parameters; - initial target network parameters Input :NB replay buffer size; NT training batch size; N - target network replacement frequency Output :Q(., ; ) action-value function
+
+1 for episode e  {1, . . . , M } do
+
+/* x is a list of states 2 x[]
+
+*/
+
+3 Initialise state sequence x0  Env 4 x[0]  x0 5 for t  {1, . . . } do
+
+/* l[-1] is the last element of the list l 6 Set x  x[-1]
+
+*/
+
+7 Sample a noisy network   
+
+8 Select an action a  argmaxbA Q(x, b, ; ) 9 Sample next state y  P (·|x, a), receive reward r  R(x, a) and append x: x[-1]  y
+
+10 if |x| > Nf then 11 Delete oldest element from x
+
+12 end
+
+13 Add transition (x, a, r, y) to the replay buffer B[-1]  (x, a, r, y)
+
+14 if |B| > NB then 15 Delete oldest transition from B
+
+16 end
+
+/* D is a distribution over the replay, it can be uniform or
+
+implementing prioritised replay 17 Sample a minibatch of NT transitions ((xj, aj, rj, yj)  D)Nj=T1
+
+*/
+
+/* Construction of the target values. 18 for j  {1, . . . , NT } do
+19 Sample a noisy network j  
+20 Sample a noisy target network j  
+
+*/
+
+21 if yj is a terminal state then
+
+22 Q  rj 23 else
+
+24 Q  rj +  maxbA Q(yj , b, j ; -)
+
+25 Do a gradient step with loss (Q - Q(xj, aj, j; ))2
+
+26 end
+
+27 if t  0 (mod N -) then 28 Update the target network: -  
+
+29 end
+
+30 end
+
+31 end
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+C.2 NOISYNET-DUELING
+
+Algorithm 2: NoisyNet-Dueling
+
+Input :Env Environment; Nf maximum length of list x;  set of random variables of the network Input :B empty replay buffer;  initial network parameters; - initial target network parameters Input :NB replay buffer size; NT training batch size; N - target network replacement frequency Output :Q(., ; ) action-value function
+
+1 for episode e  {1, . . . , M } do
+
+/* x is a list of states 2 x[]
+
+*/
+
+3 Initialise state sequence x0  Env 4 x[0]  x0 5 for t  {1, . . . } do
+
+/* l[-1] is the last element of the list l 6 Set x  x[-1]
+
+*/
+
+7 Sample a noisy network   
+
+8 Select an action a  argmaxbA Q(x, b, ; ) 9 Sample next state y  P (·|x, a), receive reward r  R(x, a) and append x: x[-1]  y
+
+10 if |x| > Nf then 11 Delete oldest element from x
+
+12 end
+
+13 Add transition (x, a, r, y) to the replay buffer B[-1]  (x, a, r, y)
+
+14 if |B| > NB then 15 Delete oldest transition from B
+
+16 end
+
+/* D is a distribution over the replay, it can be uniform or
+
+implementing prioritised replay 17 Sample a minibatch of NT transitions ((xj, aj, rj, yj)  D)jN=T1
+
+*/
+
+/* Construction of the target values. 18 for j  {1, . . . , NT } do
+19 Sample a noisy network j  
+20 Sample a noisy target network j  
+
+*/
+
+21 if yj is a terminal state then
+
+22 Q  rj
+23 else 24 b(yj ) = arg maxbA Q(yj , b, j ; )
+
+25 Q  rj + Q(yj , b(yj ), j ; -)
+
+26 Do a gradient step with loss (Q - Q(xj, aj, j; ))2
+
+27 end
+
+28 if t  0 (mod N -) then 29 Update the target network: -  
+
+30 end
+
+31 end
+
+32 end
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+C.3 NOISYNET-A3C
+
+Algorithm 3: NoisyNet-A3C for each actor-learner thread
+
+Input :Environment Env, Global shared parameters (, V ), global shared counter T and maximal time Tmax.
+Input :Thread-specific parameters (, V ), Set of random variables , thread-specific counter t and roll-out size tmax.
+Output :(·; , ) the policy and V (·; V , ) the value.
+
+1 Initial thread counter t  1
+
+2 repeat
+
+3 Reset cumulative gradients: d  0 and dV  0. 4 Synchronise thread-specific parameters:    and V  V . 5 counter  0.
+
+6 Get state xt from Env 7 Choice of the noise:   
+
+/* r is a list of rewards 8 r[]
+
+*/
+
+/* a is a list of actions 9 a[]
+
+*/
+
+/* x is a list of states 10 x  [ ] and x[0]  xt
+11 repeat
+
+*/
+
+12 Policy choice: at  (·|xt; ; ) 13 a[-1]  at
+14 Receive reward rt and new state xt+1 15 r[-1]  rt and x[-1]  xt+1 16 t  t + 1 and T  T + 1
+
+17 counter = counter + 1
+
+18 until xt terminal or counter == tmax + 1 19 if xt is a terminal state then 20 Q = 0
+
+21 else
+
+22 Q = V (xt; V , ) 23 for i  {counter - 1, . . . , 0} do
+
+24 Update Q: Q  r[i] + Q.
+
+25 Accumulate policy-gradient: d  d +  log((a[i]|x[i]; , ))[Q - V (x[i]; V , )]. 26 Accumulate value-gradient: dV  dV + V [Q - V (x[i]; V , )]2. 27 end
+
+28 Perform asynchronous update of :    + d 29 Perform asynchronous update of V : V  V - V dV
+
+30 until T > Tmax
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+Games
+alien amidar assault asterix asteroids atlantis bank heist battle zone beam rider berzerk bowling boxing breakout centipede chopper command crazy climber defender demon attack double dunk enduro fishing derby freeway frostbite gopher gravitar hero ice hockey jamesbond kangaroo krull kung fu master montezuma revenge ms pacman name this game phoenix pitfall pong private eye qbert riverraid road runner robotank seaquest skiing solaris space invaders star gunner surround tennis time pilot tutankham up n down venture video pinball wizard of wor yars revenge zaxxon
+
+Human 7127.70 1719.50 742.00 8503.30 47388.70 29028.10 753.10 37187.50 16926.50 2630.40 160.70
+12.10 30.50 12017.00 7387.80 35829.40 18688.90 1971.00 -16.40 860.50 -38.70 29.60 4334.70 2412.50 3351.40 30826.40 0.90 302.80 3035.00 2665.50 22736.30 4753.30 6951.60 8049.00 7242.60 6463.70 14.60 69571.30 13455.00 17118.00 7845.00 11.90 42054.70 -4336.90 12326.70 1668.70 10250.00 6.50 -8.30 5229.20 167.60 11693.20 1187.50 17667.90 4756.50 54576.90 9173.30
+
+Random
+227.80 5.80
+222.40 210.00 719.10 12580.00 14.20 2360.00 363.90 123.70 23.10
+0.10 1.70 2090.90 811.00 10780.50 2874.50 152.10 -18.60 0.00 -91.70 0.00 65.20 257.60 173.00 1027.00 -11.20 29.00 52.00 1598.00 258.50 0.00 307.30 2292.30 761.40 -229.40 -20.70 24.90 163.90 1338.50 11.50 2.20 68.40 -17098.10 1263.30 148.00 664.00 -10.00 -23.80 3568.00 11.40 533.40 0.00 16256.90 563.50 3092.90 32.50
+
+DQN
+2404.38 923.85 3594.81 6253.26 1823.74 876000.00 454.95 28980.78 10564.08 634.26 61.86 87.34 396.01 6439.62 7271.46 116479.82 18303.00 12696.35 -5.57 835.13
+4.15 31.21 999.80 11825.18 366.29 15176.39 -1.97 908.53 8166.25 8343.45 30443.56 2.42 2674.37 8179.15 9703.78 0.00 19.65 2361.08 11241.37 7240.70 37909.81 54.58 4163.48 -12630.41 4055.22 1282.57 40934.15 -6.11 7.58 6166.77 217.81 11652.21 319.47 429936.09 3600.57 20648.09 4805.64
+
+NoisyNet-DQN
+2402.66 1610.47 5510.49 14327.85 3455.14 923733.33 1067.89 36785.57 20792.79 905.30
+71.46 88.77 515.55 4268.56 8893.07 118305.30 20525.47 36149.69 1.33 1239.58 10.51 32.00 753.08 14573.73 447.44 6246.10 -2.76 1235.28 10944.22 8804.65 36309.99 3.03 2721.74 8181.27 16028.18 0.00 21.00 3711.62 15545.29 9425.32 45993.30 51.44 2282.06 -14762.60 6087.56 2185.52 47133.45 -0.52 0.00 7035.02 232.01 14254.52 96.55 322507.40 9197.92 23915.30 6920.22
+
+A3C
+2026.59 904.49 2878.91 6822.22 2544.01 422700.00 1295.56 16410.71 9214.00 1022.15 36.73 91.31 495.89 5350.46 5284.57 134783.33 52916.67 37085.00
+2.67 0.00 -7.30 0.11 288.21 7991.67 378.53 30791.28 -2.25 508.93 1166.37 9422.08 37422.22 14.44 2435.81 7168.33 9475.56 0.00 7.39 3780.58 18585.56 8135.24 45315.38 5.78 1744.00 -12972.25 12380.00 1034.27 49155.56 -8.28 -6.00 10293.65 213.08 89066.67 0.00 229402.17 8953.33 21596.32 16544.44
+
+NoisyNet-A3C
+1898.79 490.55 3060.40 32477.78 4541.31 465700.00 1033.41 17871.43 11237.33 1235.41 42.14 99.75 373.74 8282.01 7560.51 139950.00 55491.67 37880.00
+2.67 300.00 -37.92 18.11 260.56 12439.29 313.82 8471.06 -2.75 188.25 1603.70 22848.70 55790.00
+3.55 3400.80 8798.33 50338.33
+0.00 12.50 100.00 17895.83 7877.64 30454.25 36.33 942.67 -15970.28 10426.67 1126.40 45008.33 1.33 0.00 11124.17 164.33 103556.67 0.00 294724.33 12723.33 61754.60 1324.36
+
+Dueling
+5933.93 2118.39 7010.75 9932.47 2220.17 902741.67 1417.82 40481.15 15561.57 1121.83
+71.97 98.56 190.84 4166.43 7346.01 163334.56 35236.63 56382.22 16.93 2064.43 34.20 33.99 2807.41 22328.36 1630.96 35866.91 -0.06 1666.70 14847.31 10732.98 29130.95 0.00 3649.81 9918.70 8214.84 0.00 21.00 227.07 19819.19 18009.62 62878.71 60.06 17756.02 -7988.88 3423.08 1157.19 68340.88 0.90 0.00 13845.90 279.62 90265.42 1433.31 800657.23 6461.22 27148.06 13461.85
+
+NoisyNet-Dueling
+5777.88 3537.32 11231.06 28349.78 86700.31 972175.00 1318.42 52261.55 18500.60 1896.23
+68.46 99.66 263.29 7595.75 11477.20 171171.06 42252.75 69311.25 1.00 2012.75 56.84 33.98 2923.44 38908.72 2208.70 31532.73 2.50 4682.10 15226.88 10753.76 41671.58 57.43 5545.57 12210.96 10378.86 0.00 21.00 278.64 27120.72 23133.61 234352.03 63.75 16753.99 -7549.53 6521.88 5909.03 75867.17 9.66 0.00 17300.64 268.58 61326.33 814.78 870953.52 9148.82 86100.96 14874.04
+
+Table 2: Raw scores across all games with random starts.
+
+17
+
+Under review as a conference paper at ICLR 2018
+Figure 4: Training curves for all Atari games comparing DQN and NoisyNet-DQN. 18
+
+Under review as a conference paper at ICLR 2018
+Figure 5: Training curves for all Atari games comparing Duelling and NoisyNet-Dueling. 19
+
+Under review as a conference paper at ICLR 2018
+Figure 6: Training curves for all Atari games comparing A3C and NoisyNet-A3C. 20
+
+

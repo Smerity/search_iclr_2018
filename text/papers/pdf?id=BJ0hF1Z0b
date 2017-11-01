@@ -1,0 +1,852 @@
+Under review as a conference paper at ICLR 2018
+LEARNING DIFFERENTIALLY PRIVATE RECURRENT LANGUAGE MODELS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We demonstrate that it is possible to train large recurrent language models with user-level differential privacy guarantees with only a negligible cost in predictive accuracy. Our work builds on recent advances in the training of deep networks on user-partitioned data and privacy accounting for stochastic gradient descent. In particular, we add user-level privacy protection to the federated averaging algorithm, which makes "large step" updates from user-level data. Our work demonstrates that given a dataset with a sufficiently large number of users (a requirement easily met by even small internet-scale datasets), achieving differential privacy comes at the cost of increased computation, rather than in decreased utility as in most prior work. We find that our private LSTM language models are quantitatively and qualitatively similar to un-noised models when trained on a large dataset.
+1 INTRODUCTION
+Deep recurrent models like long short-term memory (LSTM) recurrent neural networks (RNNs) have become a standard building block in modern approaches to language modeling, with applications in speech recognition, input decoding for mobile keyboards, and language translation. Because language usage varies widely by problem domain and dataset, training a language model on data from the right distribution is critical. For example, a model to aid typing on a mobile keyboard is better served by training data typed in mobile apps rather than from scanned books or transcribed utterances. However, language data can be uniquely privacy sensitive. In the case of text typed on a mobile phone, this sensitive information might include passwords, text messages, and search queries. In general, language data may identify a speaker--explicitly by name or implicitly, for example via a rare or unique phrase--and link that speaker to secret or sensitive information.
+Ideally, a language model's parameters would encode patterns of language use common to many users without memorizing any individual user's unique input sequences. However, we know convolutional NNs can memorize arbitrary labelings of the training data (Zhang et al., 2017), and anecdotally, recurrent language models also appear capable of memorizing unique patterns in the training data. Recent attacks on neural networks such as those of Shokri et al. (2017) underscore the implicit risk. The main goal of our work is to provide a strong guarantee that the trained model protects the privacy of individuals' data without undue sacrifice in model quality.
+We are motivated by the problem of training models for next-word prediction in a mobile keyboard, and use this as a running example. This problem is well suited to the techniques we introduce, as differential privacy may allow for training on data from the true distribution (actual mobile usage) rather than on proxy data from some other source that would produce inferior models. However, to facilitate reproducibility and comparison to non-private models, our experiments are conducted on a public dataset as is standard in differential privacy research. The remainder of this paper is structured around the following contributions:
+1. We apply differential privacy to model training using the notion of user-adjacent datasets, leading to formal guarantees of user-level privacy, rather than privacy for single examples.
+2. We introduce a noised version of the federated averaging algorithm (McMahan et al., 2016) in §2, which satisfies user-adjacent differential privacy via use of the moments accountant (Abadi et al., 2016a) first developed to analyze differentially private stochastic gradient descent (SGD) for
+1
+
+Under review as a conference paper at ICLR 2018
+example-level privacy. The federated averaging approach groups multiple SGD updates together, enabling large-step model updates.
+3. We demonstrate the first high quality LSTM language model trained with strong privacy guarantees in §3, showing no significant decrease in model accuracy given a large enough dataset. For example, on a dataset of 763,430 users, baseline (non-private) training achieves an accuracy of 17.5% in 4120 rounds of training, where we use the data from 100 random users on each round. We achieve this same level of accuracy with (4.6, 10-9)-differential privacy in 4980 rounds, processing on average 5000 users per round--maintaining the same level of accuracy at a significant computational cost of roughly 60×.1 Running the same computation on a larger dataset with 108 users would improve the privacy guarantee to (1.2, 10-9). We guarantee privacy and maintain utility despite the complex internal structure of the LSTM--with per-word embeddings as well as dense state transitions--by using the federated averaging algorithm. We demonstrate that the noised model's metrics and qualitative behavior (with respect to head words) does not differ significantly from the non-private model. To our knowledge, our work represents the most sophisticated machine learning model, judged by the size and the complexity of the model, ever trained with privacy guarantees, and the first such model trained with user-level privacy.
+4. In extensive experiments in §3, we offer guidelines for parameter tuning when training complex models with differential privacy guarantees. We show that a small number of experiments can narrow the parameter space into a regime where we pay for privacy not in terms of a loss in utility but in terms of an increased computational cost.
+We now introduce a few preliminaries. Differential privacy (DP) (Dwork et al., 2006; Dwork, 2011; Dwork and Roth, 2014) provides a well-tested formalization for the release of information derived from private data. Applied to machine learning, a differentially private training mechanism allows the public release of model parameters with a strong guarantee: adversaries are severely limited in what they can learn about the original training data based on analyzing the parameters, even when they have access to arbitrary side information. Formally, it says:
+Definition 1. Differential Privacy: A randomized mechanism M : D  R with a domain D (e.g., possible training datasets) and range R (e.g., all possible trained models) satisfies ( , )-differential privacy if for any two adjacent datasets d, d  D and for any subset of outputs S  R it holds that Pr[M(d)  S]  e Pr[M(d )  S] + .
+The definition above leaves open the definition of adjacent datasets which will depend on the application. Most prior work on differentially private machine learning (e.g. Chaudhuri et al. (2011); Bassily et al. (2014); Abadi et al. (2016a); Wu et al. (2017); Papernot et al. (2017)) deals with example-level privacy: two datasets d and d are defined to be adjacent if d can be formed by adding or removing a single training example from d. We remark that while the recent PATE approach of (Papernot et al., 2017) can be adapted to give user-level privacy, it is not suited for a language model where the number of classes (possible output words) is large.
+For problems like language modeling, protecting individual examples is insufficient--each typed word makes its own contribution to the RNN's training objective, so one user may contribute many thousands of examples to the training data. A sensitive word or phrase may be typed several times by an individual user, but it should still be protected.2 In this work, we therefore apply the definition of differential privacy to protect whole user histories in the training set. This user-level privacy is ensured by using an appropriate adjacency relation:
+Definition 2. User-adjacent datasets: Let d and d be two datasets of training examples, where each example is associated with a user. Then, d and d are adjacent if d can be formed by adding or removing all of the examples associated with a single user from d.
+Model training that satisfies differential privacy with respect to datasets that are user-adjacent satisfies the intuitive notion of privacy we aim to protect for language modeling: the presence or absence of any specific user's data in the training set has an imperceptible impact on the (distribution over)
+1The additional computational cost could be mitigated by initializing by training on a public dataset, rather than starting from random initialization as we do in our experiments.
+2Differential privacy satisfies a property known as group privacy that can allow translation from examplelevel privacy to user-level privacy at the cost of an increased . In our setting, such a blackbox approach would incur a prohibitive privacy cost. This forces us to directly address user-level privacy.
+2
+
+Under review as a conference paper at ICLR 2018
+
+the parameters of the learned model. It follows that an adversary looking at the trained model cannot infer whether any specific user's data was used in the training, irrespective of what auxiliary information they may have. In particular, differential privacy rules out memorization of sensitive information in a strong information theoretic sense.
+
+2 ALGORITHMS FOR USER-LEVEL DIFFERENTIALLY PRIVATE TRAINING
+
+Our private algorithm is based on FederatedAveraging (or FedAvg). This algorithm was introduced by McMahan et al. (2016) for federated learning, where the goal is to train a shared model while leaving the training data on each user's mobile device. Instead, devices download the current model and compute an update by performing local computation on their dataset. It is worthwhile to perform extra computation on each user's data to minimize the number of communication rounds required to train a model, due to the significantly limited bandwidth when training data remains decentralized on mobile devices. We observe, however, that FedAvg is of interest even in the datacenter when DP is applied: larger updates are more resistant to noise, and fewer rounds of training can imply less privacy cost. Most importantly, the algorithm naturally forms per-user updates based on a single user's data, and these updates are then averaged to compute the final update applied to the shared model on each round. As we will see, this structure makes it possible to extend the algorithm to provide a user-level differential privacy guarantee.
+We also evaluate the FederatedSGD algorithm, essentially large-batch SGD where each minibatch is composed of "microbatches" that include data from a single distinct user. In some datacenter applications FedSGD might be preferable to FedAvg, since fast networks make it more practical to run more iterations. However, those additional iterations come at a privacy cost. Further, the privacy benefits of federated learning are nicely complementary to those of differential privacy, and FedAvg can be applied in the datacenter as well, so we focus on this algorithm while showing that our results also extend to FedSGD.
+Both FedAvg and FedSGD are iterative procedures, and in both cases we make the following modifications to the non-private versions in order to achieve differential privacy:
+A) We use random-sized batches where we select users independently with probability q, rather than always selecting a fixed number of users.
+B) We enforce clipping of per-user updates so the total update has bounded L2 norm. C) We use different estimators for the average update (introduced next). D) We add Gaussian noise to the final average update.
+The pseudocode for DP-FedAvg and DP-FedSGD is given in Figure 1. In the remainder of this section, we introduce estimators for C) and then different clipping strategies for B). Adding the sampling procedure from A) and noise added in D) allows us to apply the moments accountant to bound the total privacy loss of the algorithm, given in Theorem 1. Finally, we consider the properties of the moments accountant that make training on large datasets particular attractive.
+
+Bounded-sensitivity estimators for weighted average queries Randomly sampling users (or training examples) by selecting each independently with probability q is crucial for proving low privacy loss through the use of the moments accountant (Abadi et al., 2016a). However, this procedure produces variable-sized samples C, and when the quantity to be estimated f (C) is an average rather than a sum (as in computing the weighted average update in FedAvg or the average loss on a minibatch in SGD with example-level DP), this has ramifications for the sensitivity of the query f .
+
+Specifically, we consider weighted databases d where each row k  d is associated with a particular
+
+user, and has an associated weight wk  [0, 1]. This weight captures the desired influence of the
+
+row on the final outcome. For example, we might think of row k containing nk different training
+
+examples all generated by user k, with weight wk proportional to nk. We are then interested in a
+
+bounded-sensitivity estimate of f (C) =
+
+kC wk k kC wk
+
+for per-user vectors k,
+
+for example to estimate
+
+the weighted-average user update in FedAvg. Let W = k wk. We consider two such estimators:
+
+f~f (C) =
+
+kC wkk , qW
+
+and
+
+f~c(C)
+
+=
+
+kC wkk
+
+.
+
+max(qWmin, kC wk)
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Main training loop:
+parameters user selection probability q  (0, 1] per-user example cap w^  R+ noise scale z  R+ estimator f~f , or f~c with param Wmin UserUpdate (for FedAvg or FedSGD)
+ClipFn (FlatClip or PerLayerClip)
+
+Initialize model 0, moments accountant M
+
+wk = min
+
+nk w^
+
+,
+
+1
+
+for all users k
+
+W = kd wk
+
+for each round t = 0, 1, 2, . . . do
+
+Ct  (sample users with probability q)
+
+for each user k  Ct in parallel do
+
+tk+1  UserUpdate(k, t, ClipFn)
+
+ kCt wk k
+
+ t+1 =
+
+qW kCt wk k
+
+
+
+max(qWmin, kCt wk )
+
+for f~f for f~c
+
+S  (bound on k for ClipFn)
+
+
+
+zS qW
+
+for f~f
+
+or
+
+2zS qWmin
+
+for f~c
+
+t+1  t + t+1 + N (0, I2)
+
+M.accum priv spending(z)
+
+print M.get privacy spent()
+
+FlatClip(): parameter S return (, S) // See Eq. (1).
+
+PerLayerClip():
+
+parameters S1, . . . Sm
+
+S=
+
+j Sj2
+
+for each layer j  {1, . . . , m} do
+
+ (j) = ((j), Sj) return 
+
+UserUpdateFedAvg(k, 0 , ClipFn):
+parameters B, E,    0
+B  (user k's data split into size B batches)
+for each local epoch i from 1 to E do
+for batch b  B do
+   -  (; b)   0 + ClipFn( - 0) return update k =  - 0 // Already clipped.
+
+UserUpdateFedSGD(k, 0 , ClipFn): parameters B,  select a batch b of size B from k's examples return update k = ClipFn(- (; b))
+
+Algorithm 1: The main loop for DP-FedAvg and DP-FedSGD, the only difference being in the
+user update function (UserUpdateFedAvg or UserUpdateFedSGD). The calls on the moments accountant M refer to the API of Abadi et al. (2016b).
+
+Note f~f is an unbiased estimator, since E[ kC wk] = qW . On the other hand, f~c matches f exactly as long as we have sufficient weight in the sample. For privacy protection, we need to control the
+
+sensitivity of our query function f~, defined as S(f~) = maxC,k f~(C  {k}) - f~(C) 2, where the added user k can have arbitrary data. The lower-bound qWmin on the denominator of f~c is necessary to control sensitivity. Assuming each wkk has bounded norm, we have:
+
+Lemma 1. If for all users k we have wkk 2  S, then the sensitivity of the two estimators is
+
+bounded as S(f~f ) 
+
+S qW
+
+and S(f~c) 
+
+.2S
+qWmin
+
+A proof is given in Appendix §A.
+
+Clipping strategies for multi-layer models Unfortunately, when the user vectors k are gradients (or sums of gradients) from a neural network, we will generally have no a priori bound3 S such
+that k  S. Thus, we will need to "clip" our updates to enforce such a bound before applying f~f or f~c. For a single vector , we can apply a simple L2 projection when necessary:
+
+(, S) d=ef  · min 1, S . 
+
+(1)
+
+However, for deep networks it is more natural to treat the parameters of each layer as a separate vector. The updates to each of these layers could have vastly different L2 norms, and so it can be preferable to clip each layer separately.
+
+Formally, suppose each update k contains m vectors k = (k(1), . . . , k(m)). We consider the following clipping strategies, both of which ensure the total update has norm at most S:
+
+1. Flat clipping Given an overall clipping parameter S, we clip the concatenation of all the layers as k = (k, S).
+3To control sensitivity, Lemma 1 only requires that wkk is bounded. For simplicity, we only apply clipping to the updates k, using the fact wk  1, leaving as future work the investigation of weight-aware clipping schemes.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Table 1: Privacy for different total numbers of users K (all with equal weight), expected number of
+
+users
+
+sampled
+
+per
+
+round
+
+C~,
+
+and
+
+the
+
+number
+
+of
+
+rounds
+
+of training.
+
+For
+
+each
+
+row,
+
+we
+
+set 
+
+=
+
+1 K 1.1
+
+and report the value of for which ( , )-differential privacy holds after 1 to 106 rounds. For large
+
+datasets, additional rounds of training incur only a minimal additional privacy loss.
+
+users
+K
+105 106 106 106 106 109
+
+sample C~
+102 101 103 104 103 103
+
+noise z
+1.0 1.0 1.0 1.0 3.0 1.0
+
+Upper bound on privacy after 1, 10, . . . 106 rounds
+
+100 101 102 103 104 105
+
+106
+
+0.97 0.98 1.00 1.07 1.18 2.21 7.50
+
+0.68 0.69 0.69 0.69 0.69 0.72 0.73 1.17 1.17 1.20 1.28 1.39 2.44 8.13 1.73 1.92 2.08 3.06 8.49 32.38 187.01
+
+0.47 0.47 0.48 0.48 0.49 0.67 0.84 0.84 0.84 0.85 0.88 0.88
+
+1.95 0.88
+
+2. Per-layer clipping Given a per-layer clipping parameter Sj for each layer, we set k(j) =
+
+(k(j), Sj). Let S =
+
+m j=1
+
+Sj2
+
+.
+
+The simplest model-independent choice is to take
+
+Sj
+
+=
+
+S m
+
+for
+
+all
+
+j,
+
+which
+
+we
+
+use
+
+in
+
+experiments.
+
+We remark here that clipping itself leads to additional bias, and ideally, we would choose the clipping parameter to be large enough that nearly all updates are smaller than the clip value. On the other hand, a larger S will require more noise in order to achieve privacy, potentially slowing training. We treat S as a hyper-parameter and tune it.
+
+A privacy guarantee Once the sensitivity of the chosen estimator is bounded, we may add Gaussian noise scaled to this sensitivity to obtain a privacy guarantee. A simple approach is to use an ( , )-DP bound for this Gaussian mechanism, and apply the privacy amplification lemma and the advanced composition theorem to get a bound on the total privacy cost. We instead use the Moments Accountant of Abadi et al. (2016a) to achieve much tighter privacy bounds. The moments accountant for the sampled Gaussian mechanism upper bounds the total privacy cost of T steps of the Gaussian mechanism with noise N (0, 2) for  = z · S, where z is a parameter, S is the sensitivity of the query, and each row is selected with probability q. Given a  > 0, the accountant gives an for which this mechanism satisfies ( , )-DP. The following theorem is a slight generalization of the results in Abadi et al. (2016a); see §A for a proof sketch.
+Theorem 1. For the estimator (f~f ,f~c), the moments accountant of the sampled Gaussian mechanism correctly computes the privacy loss with the noise scale of z = /S and steps T , where S = S/qW for (f~f ) and 2S/qWmin for (f~c).
+
+Differential privacy for large datasets We use the implementation of the moments accountant from Abadi et al. (2016b). The moments accountant makes strong use of amplification via sampling, which means increasing dataset size makes achieving high levels of privacy significantly easier. Table 1 summarizes the privacy guarantees offered as we vary some of the key parameters. The takeaway from this table is that as long as we can afford the cost in utility of adding noise proportional to z times the sensitivity of the updates, we can get reasonable privacy guarantees over a large range of parameters. The size of the dataset has a modest impact on the privacy cost of a single query (1 round column), but a large effect on the number of queries that can be run without significantly increasing the privacy cost (compare the 106 round column). For example, on a dataset with 109 users, the privacy upper bound is nearly constant between 1 and 106 calls to the mechanism (that is, rounds of the optimization algorithm).
+There is only a small cost in privacy for increasing the expected number of (equally weighted) users C~ = qW = qK selected on each round as long as C~ remains a small fraction of the size of the total dataset. Since the sensitivity of an average query decreases like 1/C~ (and hence the amount of noise we need to add decreases proportionally), we can increase C~ until we arrive at a noise level that does not adversely effect the optimization process. We show empirically that such a level exists in the experiments.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+0.18
+
+Accuracy of noised models vs baseline
+
+Table 2: Privacy ( at  = 10-9) and accuracy after 5000 rounds of training for models with dif-
+
+0.17 ferent  and S from Figure 1. The 's are strict
+
+upper bounds on the true privacy loss given the 0.16 dataset size K and C~; AccuracyTop1 (AccT1) is
+
+AccuracyTop1
+
+0.15 estimated from a model trained with the same 
+
+0.14 0.13 0.12 0.11
+0
+
+baseline
+
+as discussed in the text.
+
+¾ = 0.012, S=20
+
+¾ = 0.006, S=10 ¾ = 0.003, S=15
+
+model
+
+data
+
+¾ = 0.006, S=15 ¾ = 0.012, S=15 ¾ = 0.024, S=15
+
+ S users K
+
+C~
+
+0.000  763430 100
+
+AccT1  17.62%
+
+1000
+
+2000
+
+3000
+
+communication rounds
+
+4000
+
+5000 0.003 15 763430 5000 4.634 17.49% 0.006 10 763430 1667 2.314 17.04%
+
+0.012 15 763430 1250 2.038 16.33%
+
+Figure 1: Noised training versus the non-private baseline. The model with  = 0.003 nearly matches the baseline.
+
+0.003 15 0.006 10 0.012 15
+
+108 5000 1.152 17.49% 108 1667 0.991 17.04% 108 1250 0.987 16.33%
+
+3 EXPERIMENTAL RESULTS
+In this section, we evaluate DP-FedAvg while training an LSTM RNN tuned for language modeling in a mobile keyboard. We vary noise, clipping, and the number of users per round to develop an intuition of how privacy affects model quality in practice.
+We defer our experimental results on FedSGD as well as on models with larger dictionaries to Appendix §D. To summarize, they show that FedAvg gives better privacy-utility trade-offs than FedSGD, and that our empirical conclusions extend to larger dictionaries with relatively little need for additional parameter tuning despite the significantly larger models. Some less important plots are deferred to §C.
+Model structure The goal of a language model is to predict the next word in a sequence st from the preceding words s0...st-1. The neural language model architecture used here is a variant of the LSTM recurrent neural network (Hochreiter and Schmidhuber, 1997) trained to predict the next word (from a fixed dictionary) given the current word and a state vector passed from the previous time step. LSTM language models are competitive with traditional n-gram models (Sundermeyer et al., 2012) and are a standard baseline for a variety of ever more advanced neural language model architectures (Grave et al., 2016; Merity et al., 2016; Gal and Ghahramani, 2016). Our model uses a few tricks to decrease the size for deployment on mobile devices (total size is 1.35M parameters), but is otherwise standard. We evaluate using AccuracyTop1, the probability that the word to which the model assigns highest probability is correct . Details on the model and evaluation metrics are given in §B. All training began from a common random initialization, though for real-world applications pre-training on public data is likely preferable (see §B for additional discussion).
+Dataset We use a large public dataset of Reddit posts, as described by Al-Rfou et al. (2016). Critically for our purposes, each post in the database is keyed by an author, so we can group the data by these keys in order to provide user-level privacy. We preprocessed the dataset to K = 763, 430 users each with 1600 tokens. Thus, we take wk = 1 for all users, so W = K. We write C~ = qK = qW for the expected number of users sampled per round. See §B for details on the dataset and preprocessing. To allow for frequent evaluation, we use a relatively small test set of 75122 tokens formed from random held-out posts. We evaluate accuracy every 20 rounds and plot metrics smoothed over 5 evaluations (100 rounds).
+Building towards DP: sampling, estimators, clipping, and noise Recall achieving differential privacy for FedAvg required a number of changes (§2, items A­D). In this section, we examine the impact of each of these changes, both to understand the immediate effects and to enable the selection of reasonable parameters for our final DP experiments. This sequence of experiments also provides a general road-map for applying differentially private training to new models and datasets. For these experiments, we use the FedAvg algorithm with a fixed learning rate of 6.0, which we verified was
+6
+
+Under review as a conference paper at ICLR 2018
+
+AccuracyTop1 AccuracyTop1
+
+0.18 0.16 0.14 0.12 0.10 0.08 0.06 0.04
+
+Effect of clipping updates
+3000 rounds, flat clip 3000 rounds, per-layer 500 rounds, flat clip 500 rounds, per-layer 100 rounds, flat clip 100 rounds, per-layer
+
+0.31
+
+1.25
+
+5.00
+
+20.00
+
+S, total bound on L2 norm of updates
+
+0.18 0.16 0.14 0.12 0.10 0.08 0.06 0.04 0.02
+
+Effect of noising updates
+
+3000 rounds, flat clip 3000 rounds, per-layer clip 500 rounds, flat clip 500 rounds, per-layer clip 100 rounds, flat clip 100 rounds, per-layer clip
+
+0.0015 0.0060 0.0240 ¾, noise std dev
+
+0.0960
+
+Figure 2: The effect of update clipping on the Figure 3: The effect of different levels of noise
+
+convergence of FedAvg, after 100, 500, and  for flat and per-layer clipping at S = 20. The
+
+3000 rounds of training.
+
+vertical dashed red line is  = 0.2.
+
+a reasonable choice in preliminary experiments.4 In all FedAvg experiments, we used a local batch size of B = 8, an unroll size of 10 tokens, and made E = 1 passes over the local dataset; thus FedAvg processes 80 tokens per batch, processing a user's 1600 tokens in 20 batches per round.
+First, we investigate the impact of changing the estimator used for the average per-round update, as well as replacing a fixed sample of C = 100 users per round to a variable-sized sample formed by selecting each user with probability q = 100/763430 for an expectation of C~ = 100 users. None of these changes significantly impacted the convergence rate of the algorithm (see Figure 5 in §C). In particular, the fixed denominator estimator f~f works just as well as the higher-sensitivity clipped-denominator estimator f~c. Thus, in the remaining experiments we focus on estimator f~f .
+Next, we investigate the impact of flat and per-layer clipping on the convergence rate of FedAvg. The model has 11 parameter vectors, and for per-layer clipping we simply chose to distribute the clipping budget equally across layers with Sj = S/ 11. Figure 2 shows that choosing S  [10, 20] has at most a small effect on convergence rate.
+Finally, Figure 3 shows the impact of various levels of per-coordinate Gaussian noise N (0, 2) added to the average update. Early in training, we see almost no loss in convergence for a noise of  = 0.024; later in training noise has a larger effect, and we see a small decrease in convergence past  = 0.012. These experiments, where we sample only an expected 100 users per round, are not sufficient to provide a meaningful privacy guarantee. We have S = 20.0 and C~ = qW = 100, so the sensitivity of estimator f~f is 20/100.0 = 0.2. Thus, to use the moments accountant with z = 1, we would need to add noise  = 0.2 (dashed red vertical line), which destroys accuracy.
+Estimating the accuracy of private models for large datasets Continuing the above example, if instead we choose q so C~ = 1250, set the L2 norm bound S = 15.0, then we have sensitivity 15/1250 = 0.012, and so we add noise  = 0.012 and can apply the moments account with noise scale z = 1. The computation is now significantly more computationally expensive, but will give a guarantee of (1.97, 10-9)-differential privacy after 3000 rounds of training. Because running such experiments is so computationally expensive, for experimental purposes it is useful to ask: does using an expected 1250 users per round produce a model with different accuracy than a model trained with only 100 expected users per round? If the answer is no, we can train a model with C~ = 100 and a particular noise level , and use that model to estimate the utility of a model trained with a much larger q (and hence a much better privacy guarantee). We can then run the moments accountant (without actually training) to numerically upper bound the privacy loss. To test this, we trained two models, both with S = 15 and  = 0.012, one with C~ = 100 and one with C~ = 1250; recall the first model achieves a vacuous privacy guarantee, while the second achieves (1.97, 10-9)-
+4The proper choice of for the clipping parameters may depend on the learning rate, so if the learning rate is changed, clipping parameter choices will also need to be re-evaluated.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+0.172 0.170
+
+Effect of different noise vs. clipping tradeoffs
+
+Clients 100
+
+Accuracy Top1 0.162
+
+Noise 0.0120
+
+n=10
+
+Corpus top n
+
+n=50
+
+n=100
+
+0.168
+
+1250
+
+0.156
+
+0.0120
+
+AccuracyTop1
+
+0.166 0.164
+
+1250 1250 1250
+
+0.076 0.115 0.156
+
+0.0120 0.0120 0.0120
+
+0.162
+
+100
+
+0.151
+
+0.0000
+
+0.160 0.158 0.156
+
+4885 + 6000 rounds 4885 + 1000 rounds 2000 rounds
+¾=0.001 S=1.67
+
+¾=0.005 S=8.33
+
+¾=0.01 S=16.67
+
+100
+
+0.151
+
+0.0004
+
+100
+
+0.150
+
+0.0015
+
+100
+
+0.151
+
+0.0060
+
+100
+
+0.142
+
+0.0240
+
+100
+
+0.086
+
+0.0960
+
+Table 3: Count histograms recording how many Figure 4: Different noise/clipping tradeoffs (all of a model's (row's) top 10 predictions are found of equal privacy cost), for initial training (red) in the n = 10, 50, or 100 most frequent words and adjusted after 4885 rounds (green and blue). in the corpus. Models that predict corpus top-n Solid lines use flat clipping, dashed are per-layer. more frequently have more mass to the right.
+
+differential privacy after 3000 rounds. Figure 7 in §C shows the two models produce almost identical accuracy curves during training. Using this observation, we can use the accuracy of models trained with C~ = 100 to estimate the utility of private models trained with much larger C~. See also Figure 6 in §C, which also shows diminishing returns for larger C for the standard FedAvg algorithm.
+Figure 1 compares the true-average fixed-sample baseline model (see Figure 5 in §C) with models that use varying levels of clipping S and noise  at C~ = 100. Using the above approach, we can use these experiments to estimate the utility of LSTMs trained with differential privacy for different sized datasets and different values of C~. Table 2 shows representative values setting C~ so that z = 1. For example, the model with  = 0.003 and S = 15 is only worse than the baseline by an additive -0.13% in AccuracyTop1 and achieves (4.6, 10-9)-differential privacy when trained with C~ = 5000 expected users per round. As a point of comparison, we have observed that training on a different corpus can cost an additive -2.50% in AccuracyTop1.5
+
+Adjusting noise and clipping as training progresses Figure 1 shows that as training progresses, each level of noise eventually becomes detrimental (the line drops somewhat below the baseline). This suggests using a smaller  and correspondingly smaller S (thus fixing z so the privacy cost of each round is unchanged) as training progresses. Figure 4 (and Figure 8 in §C) shows this can be effective. We indeed observe that early in training (red), S in the 10 ­ 12.6 range works well ( = 0.006 ­ 0.0076). However, if we adjust the clipping/noise tradeoff after 4885 rounds of training and continue for another 6000, switching to S = 7.9 and  = 0.0048 performs better.
+
+Comparing DP and non-DP models While noised training with DP-FedAvg has only a small effect on predictive accuracy, it could still have a large qualitative effect on predictions. We hypothesized that noising updates might bias the model away from rarer words (whose embeddings get less frequent actual updates and hence are potentially more influenced by noise) and toward the common "head" words. To evaluate this hypothesis, we computed predictions on a sample of the test set using a variety of models. At each st we intersect the top 10 predictions with the most frequent 10, 50, 100 words in the dictionary. So for example, an intersection of size two in the top 50 means two of the model's top 10 predictions are in the 50 most common words in the dictionary. Table 3 gives histograms of these counts. We find that better models (higher AccuracyTop1) tend to use fewer head words, but see little difference from changing C~ or the noise  (until, that is, enough noise has been added to compromise model quality, at which point the degraded model's bias toward the head matches models of similar quality with less noise).
+5This experiment was performed on different datasets, comparing training on a dataset of public social media posts to training on a proprietary dataset which is more representative of mobile keyboard usage, and evaluating on a held-out sample of the same representative dataset. Absolute AccuracyTop1 was similar to the values we report here for the Reddit dataset.
+
+8
+
+Under review as a conference paper at ICLR 2018
+4 CONCLUSIONS
+In this work, we introduced an algorithm for user-level differentially private training of large neural networks, in particular a complex sequence model for next-word prediction. We empirically evaluated the algorithm on a realistic dataset and demonstrated that such training is possible at a negligible loss in utility, instead paying a cost in additional computation. Such private training, combined with federated learning (which leaves the sensitive training data on device rather than centralizing it), shows the possibility of training models with significant privacy guarantees for important real world applications. Much future work remains, for example designing private algorithms that automate and make adaptive the tuning of the clipping/noise tradeoff, and the application to a wider range of model families and architectures, for example GRUs and character-level models. Our work also highlights the open direction of reducing the computational overhead of differentially private training of non-convex models.
+REFERENCES
+Martin Abadi, Andy Chu, Ian Goodfellow, Brendan McMahan, Ilya Mironov, Kunal Talwar, and Li Zhang. Deep learning with differential privacy. In 23rd ACM Conference on Computer and Communications Security (ACM CCS), 2016a.
+Martin Abadi, Andy Chu, Ian Goodfellow, Brendan McMahan, Ilya Mironov, Kunal Talwar, Li Zhang, and Xin Pan. Source code for "deep learning with differential privacy". github, October 2016b. http://github. com/tensorflow/models/tree/master/differential_privacy.
+Rami Al-Rfou, Marc Pickett, Javier Snaider, Yun-Hsuan Sung, Brian Strope, and Ray Kurzweil. Conversational contextual cues: The case of personalization and history for response ranking. CoRR, abs/1606.00372, 2016. URL http://arxiv.org/abs/1606.00372.
+R. Bassily, K. Nissim, U. Stemmer, and A. Thakurta. Practical locally private heavy hitters. ArXiv e-prints, July 2017. URL https://arxiv.org/abs/1707.04982.
+Raef Bassily, Adam Smith, and Abhradeep Thakurta. Private empirical risk minimization: Efficient algorithms and tight error bounds. In Proceedings of the 2014 IEEE 55th Annual Symposium on Foundations of Computer Science, FOCS '14, pages 464­473, Washington, DC, USA, 2014. IEEE Computer Society. ISBN 9781-4799-6517-5. doi: 10.1109/FOCS.2014.56. URL http://dx.doi.org/10.1109/FOCS.2014. 56.
+T-H Hubert Chan, Mingfei Li, Elaine Shi, and Wenchang Xu. Differentially private continual monitoring of heavy hitters from distributed streams. In International Symposium on Privacy Enhancing Technologies Symposium, pages 140­159. Springer, 2012.
+Kamalika Chaudhuri, Claire Monteleoni, and Anand D. Sarwate. Differentially private empirical risk minimization. J. Mach. Learn. Res., 12, July 2011.
+Cynthia Dwork. A firm foundation for private data analysis. Commun. ACM, 54(1):86­95, January 2011. ISSN 0001-0782. doi: 10.1145/1866739.1866758. URL http://doi.acm.org/10.1145/1866739. 1866758.
+Cynthia Dwork and Aaron Roth. The Algorithmic Foundations of Differential Privacy. Foundations and Trends in Theoretical Computer Science. Now Publishers, 2014.
+Cynthia Dwork, Frank McSherry, Kobbi Nissim, and Adam Smith. Calibrating noise to sensitivity in private data analysis. In TCC, pages 265­284. Springer, 2006.
+Yarin Gal and Zoubin Ghahramani. A theoretically grounded application of dropout in recurrent neural networks. In Advances in Neural Information Processing Systems, pages 1019­1027, 2016.
+Edouard Grave, Armand Joulin, and Nicolas Usunier. Improving neural language models with a continuous cache. arXiv preprint arXiv:1612.04426, 2016.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Long short-term memory. Neural computation, 9(8):1735­1780, 1997.
+H. Brendan McMahan, Eider Moore, Daniel Ramage, and Blaise Aguera y Arcas. Federated learning of deep networks using model averaging, 2016.
+9
+
+Under review as a conference paper at ICLR 2018
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. arXiv preprint arXiv:1609.07843, 2016.
+Nicolas Papernot, Mart´in Abadi, U´ lfar Erlingsson, Ian Goodfellow, and Kunal Talwar. Semi-supervised knowledge transfer for deep learning from private training data. In Proceedings of the International Conference on Learning Representations, 2017. URL https://arxiv.org/abs/1610.05755.
+Reddit Comments Dataset. Reddit comments dataset. BigQuery, 2016. https://bigquery.cloud. google.com/dataset/fh-bigquery.
+Reza Shokri, Marco Stronati, Congzheng Song, and Vitaly Shmatikov. Membership inference attacks against machine learning models. In IEEE Symposium on Security and Privacy, Oakland, 2017. To Appear.
+Martin Sundermeyer, Ralf Schlu¨ter, and Hermann Ney. LSTM neural networks for language modeling. In Interspeech, pages 194­197, 2012.
+Xi Wu, Fengan Li, Arun Kumar, Kamalika Chaudhuri, Somesh Jha, and Jeffrey F. Naughton. Bolt-on differential privacy for scalable stochastic gradient descent-based analytics. In Proceedings of SIGMOD, 2017.
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding deep learning requires rethinking generalization. 2017. URL https://arxiv.org/abs/1611.03530.
+10
+
+Under review as a conference paper at ICLR 2018
+
+A ADDITIONAL PROOFS
+
+Proof of Lemma 1. For the first bound, observe the numerator in the estimator f~f can change by
+at most S between neighboring databases, by assumption. The denominator is a constant. For the second bound, the estimator f~c can be thought of as the sum of the vectors wkk divided by max(qWmin, kC k). Writing Num(C) for the numerator kC wkk, and Den(C) for the
+denominator max(qWmin, kC wk), the following are immediate for any C and C d=ef C  {k}:
+
+Num(C ) - Num(C) = wkk  S. Den(C ) - Den(C)  1.
+
+Den(C )  qWmin.
+
+It follows that
+
+f~c(C ) - f~c(C)
+
+=
+
+Num(C ) - Num(C) Den(C ) Den(C)
+
+=
+
+Num(C ) - Num(C) Den(C )
+
++
+
+Num(C)
+
+1 -1 Den(C ) Den(C)
+
+
+
+wk k Den(C )
+
++
+
+Num(C) Den(C)
+
+Den(C) - Den(C ) Den(C )
+
+S+ qWmin
+
+f~c(C)
+
+1 qWmin
+
+
+
+2S .
+
+qWmin
+
+Here in the last step, we used the fact that f~c(C)  S. The claim follows.
+
+Proof of Theorem 1. It suffices to verify that 1. the moments (of the privacy loss) at each step are correctly bounded; and, 2. the composability holds when accumulating the moments of multiple steps.
+At each step, users are selected randomly with probability q. If in addition the L2-norm of each user's update is upper-bounded by S, then the moments can be upper-bounded by that of the sampled Gaussian mechanism with sensitivity 1, noise scale /S, and sampling probability q.
+Our algorithm, as described in Figure 1, uses a fixed noise variance and generates the i.i.d. noise independent of the private data. Hence we can apply the composability as in Theorem 2.1 in Abadi et al. (2016a).
+We obtain the theorem by combining the above and the sensitivity bounds f~f and f~c.
+
+B EXPERIMENT DETAILS
+Model The first step in training a word-level recurrent language model is selecting the vocabulary of words to model, with remaining words mapped to a special "UNK" (unknown) token. Training a fully differentially private language model from scratch requires a private mechanism to discover which words are frequent across the corpus, for example using techniques like distributed heavyhitter estimation (Chan et al., 2012; Bassily et al., 2017). For this work, we simplified the problem by pre-selecting a dictionary of the most frequent 10,000 words (after normalization) in a large corpus of mixed material from the web and message boards (but not our training or test dataset).
+Our recurrent language model works as follows: word st is mapped to an embedding vector et  R96 by looking up the word in the model's vocabulary. The et is composed with the state emitted by the model in the previous time step st-1  R256 to emit a new state vector st and an "output embedding" ot  R96. The details of how the LSTM composes et and st-1 can be found in Hochreiter and Schmidhuber (1997). The output embedding is scored against the embedding of each item in the vocabulary via inner product, before being normalized via softmax to compute a probability distribution over the vocabulary. Like other standard language modeling applications,
+
+11
+
+Under review as a conference paper at ICLR 2018
+we treat every input sequence as beginning with an implicit "BOS" (beginning of sequence) token and ending with an implicit "EOS" (end of sequence) token. Unlike standard LSTM language models, our model uses the same learned embedding for the input tokens and for determining the predicted distribution on output tokens from the softmax. This reduces the size of the model by about 40% for a small decrease in model quality, an advantageous tradeoff for mobile applications. Another change from many standard LSTM RNN approaches is that we train these models to restrict the word embeddings to have a fixed L2 norm of 1.0, a modification found in earlier experiments to improve convergence time. In total the model has 1.35M trainable parameters.
+Initialization and personalization For many applications public proxy data is available, e.g., for next-word prediction one could use public domain books, Wikipedia articles, or other web content. In this case, an initial model trained with standard (non-private) algorithms on the public data (which is likely drawn from the wrong distribution) can then be further refined by continuing with differentially-private training on the private data for the precise problem at hand. Such pre-training is likely the best approach for practical applications. However, since training models purely on private data (starting from random initialization) is a strictly harder problem, we focus on this scenario for our experiments. Our focus is also on training a single model which is shared by all users. However, we note that our approach is fully compatible with further on-device personalization of these models to the particular data of each user. It is also possible to give the central model some ability to personalize simply by providing information about the user as a feature vector along with the raw text input. LSTMs are well-suited to incorporating such additional context.
+Accuracy metrics We evaluate using AccuracyTop1, the probability that the word to which the model assigns highest probability is correct (after some minimal normalization). We always count it as a mistake if the true next word is not in the dictionary, even if the model predicts UNK, in order to allow fair comparisons of models using different dictionaries. In our experiments, we found that our model architecture is competitive on AccuracyTop1 and related metrics (Top3, Top5, and perplexity) across a variety of tasks and corpora.
+Dataset The Reddit dataset can be accessed through Google BigQuery (Reddit Comments Dataset). Since our goal is to limit the contribution of any one author to the final model, it is not necessary to include all the data from users with a large number of posts. On the other hand, processing users with too little data slows experiments (due to constant per-user overhead). Thus, we use a training set where we have removed all users with fewer than 1600 tokens (words), and truncated the remaining K = 763, 430 users to have exactly 1600 tokens. We intentionally chose a public dataset for research purposes, but carefully chose one with a structure and contents similar to private datasets that arise in real-world language modeling task such as predicting the next-word in a mobile keyboard. This allows for reproducibility, comparisons to nonprivate models, and inspection of the data to understand the impact of differential privacy beyond coarse aggregate statistics (as in Table 3).
+12
+
+Under review as a conference paper at ICLR 2018
+
+C SUPPLEMENTARY PLOTS
+
+0.18
+
+Comparison of estimators and sampling strategies
+
+0.16
+
+0.175
+
+AccuracyTop1
+
+0.14
+
+0.173
+
+0.12
+
+0.171 2500 3000 3500 4000
+
+0.10 0.08
+0
+
+true average, fixed sample fixed denominator, variable sample true average, variable sample clipped denominator, variable sample
+500 1000 1500 2000 2500 3000 3500 4000 communication rounds
+
+Figure 5: Comparison of sampling strategies and estimators. Fixed sample is exactly C = 100 users per round, and variable sample selects uniformly with probability q for C~ = 100. The true average corresponds to f , fixed denominator is f~f , and clipped denominator is f~c.
+
+0.18
+
+Varying the number of clients per round
+
+Comparison of private training on 100 and 1250 clients, ¾ = 0: 012 0.16
+
+AccuracyTop1
+
+0.17 0.16 0.15 0.14 0.13 0.12
+1
+
+0.14
+
+AccuracyTop1
+
+0.12
+
+12000 rounds 6000 rounds 3000 rounds 1500 rounds 500 rounds
+
+2 4 8 16 32 64 128 C (clients trained per round for FedAvg)
+
+256
+
+0.10 0.08 0.06
+0
+
+100 clients 1250 clients
+
+500
+
+1000
+
+1500
+
+communication rounds
+
+2000
+
+Figure 6: The effect of C for FedAvg using the exact estimator and without noise or clipping.
+
+Figure 7: Training with (expected) 100 vs 1250 users per round, both with flat-clipping at S = 15.0 and per-coordinate noise with  = 0.012.
+
+AccuracyTop1
+
+0.16 0.14 0.12 0.10 0.08
+0
+
+Training with different noise vs. clipping tradeoffs
+
+1000
+
+0.172
+
+0.168
+
+0.164
+
+0.160
+
+3000 3500 4000 4500
+
+2000
+
+3000
+
+communication rounds
+
+4000
+
+5000
+
+AccuracyTop1
+
+0.172 0.170 0.168 0.166
+
+Continuing training with different tradeoffs S = 1.2, ¾ = 0.0008 S = 2.5, ¾ = 0.0015 S = 5.0, ¾ = 0.0030 S = 7.9, ¾ = 0.0048 S = 10.0, ¾ = 0.0060 S = 12.6, ¾ = 0.0076 S = 15.9, ¾ = 0.0095 S = 20.0, ¾ = 0.0120 S = 30.0, ¾ = 0.0180
+
+0.164
+
+0.162
+
+0.160
+
+0.158 2000
+
+4000
+
+6000
+
+8000
+
+communication rounds
+
+10000
+
+Figure 8: The effect of different noise vs. clipping tradeoffs on convergence. Both plots use the same legend, where we vary S and  together to maintain the same z = 0.06 with 100 users (actually used), or z = 1 with 1667 users. We take S = 20 and  = 0.012 (black line) as a baseline; the lefthand plot shows training from a randomly initialized model, and includes two different runs with S = 20, showing only mild variability. For the right-hand plot, we took a snapshot of the S = 20 model after 4885 initial rounds of training, and resumed training with different tradeoffs.
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+0.18
+
+Effect of clipping updates (Federated SGD)
+
+0.18 0.16
+
+Effect of noising updates (Federated SGD)
+
+0.16
+
+0.14
+
+AccuracyTop1
+
+AccuracyTop1
+
+0.14
+
+0.12 0.10
+
+20000 rounds, flat clip 20000 rounds, per-layer 5000 rounds, flat clip 5000 rounds, per-layer 1000 rounds, flat clip 1000 rounds, per-layer
+
+100
+
+101
+
+S, total bound on L2 norm of updates
+
+Figure 9: Effect of clipping on FedSGD with C~ = 50 users per round and a learning rate of
+ = 6. A much smaller clipping level S can be
+used compared to FedAvg.
+
+0.12 0.10 0.08 0.06
+10-4
+
+20000 rounds, flat clip 20000 rounds, per-layer 5000 rounds, flat clip 5000 rounds, per-layer 1000 rounds, flat clip 1000 rounds, per-layer
+
+10-3
+
+10-2
+
+¾, noise std dev
+
+10-1
+
+Figure 10: Effect of noised updates on FedSGD with S = 20 (based on Figure 9, a smaller value would actually be better when doing private training). FedSGD is more sensitive to noise than FedAvg, likely because the updates are smaller in magnitude.
+
+AccuracyTop1
+
+0.18 0.16 0.14 0.12 0.10 0.08 0.06 0.04
+
+Effect of clipping updates (20k & 30k dict models) 2500 rounds 500 rounds
+100 rounds
+
+30k dict, flat clip 30k dict, per-layer 20k dict, flat clip 20k dict, per-layer
+
+100
+
+101
+
+102
+
+S, total bound on L2 norm of updates
+
+AccuracyTop1
+
+0.18
+
+Effect of noising updates (20k & 30k dict models) 3000 rounds
+
+0.16 0.14
+
+500 rounds
+
+0.12 0.10
+
+100 rounds
+
+0.08 0.06 0.0140-4
+
+30k dict, flat clip 30k dict, per-layer clip 20k dict, flat clip 20k dict, per-layer clip
+
+10-3
+
+10-2 ¾, noise std dev
+
+10-1
+
+Figure 11: Effect of clipping on models with Figure 12: Effect of noised updates on models larger dictionaries (20000 and 30000 tokens). with larger dictionaries, when clipped at S = 20.
+
+D ADDITIONAL EXPERIMENTS
+Experiments with SGD We ran experiments using FedSGD taking B = 1600, that is, computing the gradient on each user's full local dataset. To allow more iterations, we used C~ = 50 rather than 100. Examining Figures 9 and 10, we see S = 2 and  = 2 · 10-3 are reasonable values, which suggests for private training we would need in expectation qW = S/ = 1500 users per round, whereas for FedAvg we might choose S = 15 and  = 10-2 for C~ = qW = 1000 users per round. That is, the relative effect of the ratio of the clipping level to noise is similar between FedAvg and FedSGD. However, FedSGD takes a significantly larger number of iterations to reach equivalent accuracy. Fixing z = 1, C~ = 5000 (the value that produced the best accuracy for a private model in Table 2) and total of 763,430 users gives (3.81, 10-9)-DP after 3000 rounds and (8.92, 10-9)-DP after 20000 rounds, so there is indeed a significant cost in privacy to these additional iterations.
+Models with larger dictionaries We repeated experiments on the impact of clipping and noise on models with 20000 and 30000 token dictionaries, again using FedAvg training with  = 6, equally weighted users with 1600 tokens, and C~ = 100 expected users per round. The larger dictionaries give only a modest improvement in accuracy, and do not require changing the clipping and noise parameters despite having significantly more parameters. Results are given in Figures 11 and 12.
+Other experiments We experimented with adding an explicit L2 penalty on the model updates (not the full model) on each user, hoping this would decrease the need for clipping by preferring updates with a smaller L2 norm. However, we saw no positive effect from this.
+
+14
+
+

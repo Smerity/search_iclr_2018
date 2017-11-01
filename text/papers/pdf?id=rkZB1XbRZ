@@ -1,0 +1,1344 @@
+Under review as a conference paper at ICLR 2018
+SCALABLE PRIVATE LEARNING WITH PATE
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Recently, there has been increased attention to the privacy concerns raised by machine learning (ML) models trained on highly sensitive data, such as medical records or personal information. To resolve those concerns, one attractive approach is the Private Aggregation of Teacher Ensembles (PATE), which has shown that knowledge from an ensemble's aggregated answers can be transferred to train models with strong differential-privacy guarantees. Yet, while promising, PATE applications have so far been limited to simple classification tasks like MNIST; its scalability to other tasks was unclear because of inherent limitations of the noise distributions proposed and its dependency on accurate aggregation and voting. In this work, we enable scalable applications of PATE. For this, we leverage two key insights: aggregation mechanisms with concentrated noise may mitigate these limitations and an ensemble of teachers designed to answer only questions on which they generally agree can still successfully transfer their knowledge to the student. Intuitively, such consensus answers also ought to incur lower privacy costs. With new noisy mechanisms and tighter privacy analyses, we utilize these insights to greatly improve PATE's tradeoffs thereby leading to better scalability. In experiments, we improve the state-of-the-art on privacy-preserving ML benchmarks, and we also demonstrate the successful application of PATE with our new ideas to a real-world task with imbalanced and partly mislabeled data involving hundreds of classes.
+1 INTRODUCTION
+Many applications of machine learning often involve directly or indirectly data that is considered sensitive--because it contains private information contributed by individuals. This is the case with developments of ML in healthcare. For instance, algorithms designed to solve pattern recognition tasks are now also used to identify medical conditions potentially indicative of cancer (Liu et al., 2017) and diabetic retinopathy (Gulshan et al., 2016). Hence, protecting the privacy of individuals whose data is analyzed to build these systems is important.
+In the following, we revisit an approach for learning with privacy named PATE, which stands for the private aggregation of teacher ensembles (Papernot et al., 2017). We chose to revisit this particular approach among the many available (see Appendix B) because it is generic with respect to the underlying ML technique used. It is thus applicable to ML tasks where modifications of the learning procedure, e.g., optimizing with the differentially-private SGD of Abadi et al. (2016), is challenging.
+The PATE approach involves an ensemble of teacher models with access to the sensitive training data, whose predictions are aggregated to supervise the training of a student model. Since teachers are each independently trained on partitions of the training data, intuitively their aggregated predictions cannot be influenced by specific training points and are thus intuitively private in an informal way. In fact, teachers may precisely control sensitive information the student has access to through the addition of carefully calibrated noise to the predictions--during the aggregation step. In turn, this allows one to prove rigorous guarantees of differential privacy--a gold standard of privacy (Dwork et al., 2006b). In this work, we improve PATE to scale its application to real-world datasets.
+First, we leverage the synergy between privacy and utility, which contrary to the popular belief are not necessarily conflicting, to make better use of the privacy budget spent when transfering knowledge from teachers to the student. We introduce two aggregation mechanisms that explicitly leverage this alignment between accurate and private predictions. They are designed to choose not
+1
+
+Under review as a conference paper at ICLR 2018
+to label inputs queried by the student when there is either (a) a lack of consensus among teachers, or (b) an already overwhelming agreement between the student's prediction and the teacher votes.
+Second, we demonstrate that sampling from a Gaussian distribution rather than a Laplace distribution, as is the case in the original PATE proposal, facilitates the aggregation of teacher votes in tasks with large number of output classes, as well as ensembles with many teachers. This is explained by the fact that the Gaussian distribution is more concentrated. However, it requires a privacy analysis from scratch which we detail in Appendix C.
+Third, while this is not the main focus of our paper, we show as a by-product of our experiments that adversarial training techniques support semi-supervised learning on tasks with many output classes. In particular, we find that the virtual adversarial training (VAT) of Miyato et al. (2017) outperforms the semi-supervised application of generative adversarial networks found in Salimans et al. (2016) and used by the original PATE proposal. With VAT, unlabeled training points are used to regularize the student by ensuring that its predictions remain constant in adversarial1 directions.
+Our proposed aggregation mechanisms significantly improve the state-of-the-art established by the first instantiation of PATE on the SVHN dataset. We also successfuly apply PATE to a large-scale character recognition problem for the first time. This involves training data that is class imbalanced and contains erroneously labeled points. While both experimental setups involve computer vision, this is not a limitation of our evaluation: the performance of PATE was previously validated on medical records and census data respectively with the UCI Diabetes (Strack et al., 2014) and Adult (Kohavi, 1996) datasets.
+In short, our contributions are:
+· We refine the aggregation step of the PATE framework--as well as the corresponding privacy analysis--to use the Gaussian mechanism in Section 3.1. At no cost in privacy, the accuracy of the aggregation is improved for tasks with a large number of classes.
+· We enable aggregation mechanisms to only answer a subset of queries; when teachers agree on the prediction or the student model already correctly predicts the label with confidence.
+· Our mechanisms improve the state-of-the-art tradeoff between privacy and utility on SVHN to a test accuracy of 91.7% with an (, )-differential privacy guarantee of (5.34, 10-6). In comparison, Papernot et al. (2017) achieved 82.72% (90.7%) accuracy with  = 5.04 (8.19) for  = 10-6. We increase privacy at a fixed utility; and utility at a fixed privacy.
+· We then demonstrate the performance of our ideas on real-world data: we consider a pattern-recognition task with hundreds of classes, mislabeled data, and class imbalance. In Section 4.3, we highlight the very strong privacy (  1.0) provided by PATE augmented with our new aggregation mechanisms in conjunction with high student utility.
+2 OVERVIEW
+We introduce essential components of our approach towards a generic and flexible framework for machine learning with provable privacy guarantees for training data.
+2.1 THE PATE FRAMEWORK
+The PATE framework (see Figure 7 in Appendix A) due to Papernot et al. (2017) comprises three principal components: (1) an ensemble of teachers, (2) an aggregation mechanism, and (3) a student.
+Teachers. Each teacher is a model trained independently on a subset of the data whose privacy one wishes to protect. The data is partitioned to ensure no pair of teachers will have trained on overlapping data. Any learning technique suitable for the data can be used for any teacher.
+Aggregation Mechanism. The role of this mechanism is to be the intermediary between the student, who is never directly exposed to sensitive data, and the teachers, each of which has unfettered access to a data partition. This is where privacy is enforced, and the privacy budget (see below) is tracked.
+1In this context, the adversarial component refers to the phenomenon commonly referred to as adversarial examples (Biggio et al., 2013; Szegedy et al., 2013) and not to the adversarial training approach taken in GANs.
+2
+
+Under review as a conference paper at ICLR 2018
+
+Student. The student is another ML model trained on public unlabeled data using labels provided by the aggregation mechanism. During learning, the student queries the aggregator with public data and receives privacy-preserving labels. Each of these labels increases the exposure of the teacher' sensitive training data. Hence, the student and aggregator are designed to minimize the number of queries needed to transfer knowledge from the teachers to the student.
+
+2.2 DIFFERENTIAL PRIVACY AND RE´ NYI DIFFERENTIAL PRIVACY
+
+Differential privacy, introduced by Dwork et al. (2006b), is a leading standard of privacy for statistical algorithms. Loosely speaking, the definition limits the sensitivity of the distribution of an algorithm's output to small perturbations of its input. The following variant of the definition introduced by Dwork et al. (2006a) captures this intuition formally:
+Definition 1. A randomized mechanism M with domain D and range R satisfies (, )-differential privacy if for any two adjacent inputs D, D  D and for any subset of outputs S  R it holds that:
+
+Pr[M(D)  S]  e · Pr[M(D )  S] + .
+
+(1)
+
+For our application of differential privacy to ML, adjacent inputs are defined as two datasets that only differ by one training example. Composition theorems for differential privacy (Dwork & Roth, 2014) lead to the following natural interpretation of the parameters from its definition:  is an upper bound on the loss of privacy that accumulates over time and with each query to the dataset ("the privacy budget"), and  is the probability with which this guarantee may not hold.
+
+To better facilitate tracking privacy budget across multiple queries, we use Re´nyi Differential Privacy (RDP) recently introduced by Mironov (2017). RDP is closely related to (zero)-Concentrated Differential Privacy (Dwork & Rothblum, 2016; Bun & Steinke, 2016) and the moments accountant (Abadi et al., 2016)--also used by Papernot et al. (2017) in the original PATE proposal.
+
+2.3 AGGREGATION MECHANISMS
+The aggregation mechanism is a crucial component of the PATE framework. It is designed to enable semi-supervised knowledge transfer from the teacher ensemble to the student while enforcing privacy. We improve the mechanism used by Papernot et al. (2017)--which added Laplace noise to aggregate teacher votes and outputs the class with the highest votes--in a few ways. We add Gaussian noise with an accompanying privacy analysis in the RDP framework to reduce the noise needed to achieve the same privacy cost per student query.
+The aggregation mechanism is now designed to be selective: to use teacher votes to decide which student queries are worth answering. This takes into account both the privacy cost of each query and its payout in improving the student's utility. Surprisingly, our analysis shows that these two metrics are not at odds and in fact align with each other: the privacy cost is the smallest when teachers agree, and when teachers agree, the label is more likely to be correct thus being more useful to the student.
+We also propose and study an interactive mechanism that takes into account not only teacher votes on a queried example but possible student predictions on that query. Now, queries worth answering are those where the teachers agree on a class but the student is not confident in its prediction on that class. This aligns the two metrics discussed above even further: queries where the student already agrees with the consensus of teachers are not worth expending our privacy budget on but queries where the student is less confident are useful and answered at a small privacy cost. The simple mechanism can be used to start training a student when it can make no meaningful predictions and training can be finished off with the interactive mechanism after the student gains some proficiency.
+
+2.4 DATA-DEPENDENT PRIVACY
+A direct privacy analysis of the aggregation mechanism, for reasonable values of the noise parameter, allows answering only few queries before the privacy cost becomes prohibitive. The original PATE proposal used a data-dependent analysis, exploiting the fact that when the teachers have large agreement, the privacy cost is usually much smaller than the data-dependent bound would suggest.
+In our work, we perform a data-dependent privacy analysis of the aggregation mechanism with Gaussian noise. This turns out be technically much more challenging than the Laplace noise case
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+and we defer the details to Appendix C. This increased complexity of the analysis however does not make the algorithm any more complicated yet allows us to improve the privacy-utility tradeoff.
+An additional challenge with data-dependent privacy analyses arises from the fact that the privacy cost itself is now a function of the private data and therefore must also be sanitized. The datadependent bound on the privacy cost has large global sensitivity (a metric used in differential privacy to calibrate the noise injected) and we use the smoothed-sensitivity framework to sanitize this function. This consideration also affects the choice of bound in our data-dependent privacy analysis of the aggregators built on the Gaussian mechanism: we chose a bound that is tight enough to be useful, but still allows us to prove a small smoothed sensitivity bound.
+
+3 IMPROVED AGGREGATION MECHANISMS
+
+The guarantees provided by the PATE framework stem from the design and analysis of the aggregation step. This section details our improvements to the mechanism used by Papernot et al. (2017). First, we replace the Laplace noise added to teacher votes with Gaussian noise, adapting and revisiting data-dependent privacy analysis. The next two sections, as outlined in Section 2, describe the Confident Aggregator and Interactive Aggregator mechanisms that are designed to select useful queries worth answering with and without taking into account student predictions respectively.
+
+3.1 THE GNMAX AGGREGATOR AND ITS PRIVACY GUARANTEE
+
+This section uses the following notation. For a sample x and classes 1 to m, let fj(x)  [m] denote the j-th teacher model's prediction on x and ni(x) denote the vote count for the i-th class (i.e., ni(x) = |{j : fj(x) = i}|). We define a Gaussian NoisyMax (GNMax) aggregation mechanism as:
+A(x) := argmax ni(x) + N (0, 2) ,
+i
+where N (µ, 2) denotes the Gaussian distribution with mean µ and variance 2. The aggregator outputs the class with noisy plurality after adding Gaussian noise to each vote count.
+The Gaussian distribution is more concentrated than the Laplace distribution used by Papernot et al. (2017), which directly improves the aggregation's utility when the number of classes m is large. The GNMax mechanism satisfies (, /2)-RDP (see Lemma 8 in Appendix C) which holds for all inputs and all   1. A straightforward application of composition theorems leads to loose privacy bounds. (In Section 4.3, we report privacy costs for various experiments and as an example, the standard advanced composition theorem applied to the experiments run in rows 5 and 6 in Figure 5 would give us  = 8.42 and  = 10.14 respectively at  = 10-8 for the Glyph dataset.)
+To refine our privacy guarantees, we work out a careful data-dependent privacy analysis that yields 's that are close to 1 for the same . The following theorem takes standard RDP guarantees for higher orders and translates them into a data-dependent RDP guarantee for a smaller order . Its precise statement and the proof appear in Appendix C. We use this result in conjunction with Lemma 3 to bound the privacy cost of each query to the GNMax algorithm as a function of q~, the probability that the most common answer will not be output by the mechanism.
+
+Theorem 2 (informal). Let M be a randomized algorithm with (µ1, 1)-RDP and (µ2, 2)RDP guarantees and suppose that given a dataset D, there exists a likely outcome i such that Pr [M(D) = i]  q~. Then the data-dependent Re´nyi differential privacy for M of order   µ1, µ2 at D is bounded by a function of q~, µ1, 1, µ2, 2, which approaches 0 as q~  0.
+
+The new bound improves on the data-independent privacy for  as long as the distribution of the
+algorithm's output on that input has a strong peak (i.e., q~ 1). When q~ is close to 1, this could result in a looser bound. Therefore, in practice we take the minimum between this bound and /2
+(the data-independent one). The theorem generalizes Theorem 3 from Papernot et al. (2017), where it was shown for a mechanism satisfying -differential privacy (i.e., µ1 = µ2 =  and 1 = 2).
+
+The final step in our analysis uses the following lemma to bound the probability q~ when i corresponds to the class with the true plurality of teacher votes.
+
+Lemma 3.
+
+For any i  [m], we have Pr [A(D) = i] 
+
+1 2
+
+i=i erfc
+
+ni -ni 2
+
+.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 Confident Aggregator
+Input: input x, threshold T , noise parameters 1 and 2 1: if maxi{nj(x)} + N (0, 12)  T then 2: return argmaxj nj(x) + N (0, 22) 3: else 4: return  5: end if
+
+Privately check for consensus Run the usual max-of-Gaussian
+
+In Appendix C, we detail how these results translate to privacy bounds. In short, for each query to the GNMax aggregator, given teacher votes ni and the class i with maximal support, Lemma 3 gives us the value of q~ to use in Theorem 2. We optimize over µ1 and µ2 to get a data-dependent RDP guarantee for any order . Finally, we use composition properties of RDP to analyze a sequence of queries, and translate the RDP bound back to an (, )-DP bound.
+Expensive queries. This data-dependent privacy analysis leads us to consider the concept of an expensive query in terms of its privacy cost. When teacher votes largely disagree, some ni - ni values may be small leading to a large value for q~: i.e., the lack of consensus amongst teachers indicates that the aggregator is likely to output the wrong label. Consequently, the bound derived from Theorem 2 is often poorer than a data-independent bound. Thus expensive queries from a privacy perspective are often bad for training too (they are likely to be wrong). Conversely, queries with strong consensus have vanishing q~ values that enable very tight privacy bounds. This motivates the aggregation mechanisms discussed in the following sections aim to avoid answering too many expensive queries while maximizing answers to queries with overwhelming consensus.
+3.2 THE CONFIDENT AGGREGATOR
+In this section, we propose a refinement of the GNMax aggregator that enables us to filter out queries for which teachers do not have a sufficiently strong consensus. This enables the teachers to avoid answering expensive queries. We also take note to do this selection step itself in a private manner.
+The proposed Confident Aggregator is described in Algorithm 1. To select queries with overwhelming consensus, the algorithm checks if the plurality vote crosses a threshold T . To enforce privacy in this step, the comparison is done after adding Gaussian noise with a large deviation 1. Then, for queries that pass this noisy threshold check, the aggregator proceeds with the usual GNMax mechanism with a different deviation 2. For queries that do not pass the noisy threshold check, the aggregator simply returns  and the student discards this example in its training.
+In practice, we often choose significantly higher values for 1 compared to 2. We pick T so that queries where the plurality gets less than half the votes (often very expensive) are unlikely to pass the threshold after adding noise, but we still have a high enough yield amongst the queries with a strong consensus. This leads us to look for T 's between 0.6 to 0.8 times the number of teachers.
+The privacy cost of this confident aggregator is intuitive: we pay for the threshold check for every query, and for the GNMax step only for queries that pass the check. In the work of Papernot et al. (2017), the mechanism paid a privacy cost for every query, expensive or otherwise. In comparison, the Confident Aggregator expends a much smaller privacy cost per query when checking against a threshold, and by answering a significantly smaller fraction of expensive queries that may cross the threshold, it expends a lower privacy cost overall.
+3.3 THE INTERACTIVE AGGREGATOR
+While the Confident Aggregator exclude expensive queries, it ignores the possibility that the student might receive labels that contribute little to learning; and in turn to its utility. By incorporating the student's current predictions for its public training data, we design an Interactive Aggregator that discards queries where the student already confidently predicts the same label as the teachers.
+Given a set of queries, the Interactive Aggregator (see Algorithm 2) selects queries to answer by comparing student predictions to teacher votes for each class. Similar to Step 1 in the Confident Aggregator, queries where the plurality of these differences (with some noise) crosses a threshold
+5
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 2 Interactive Protocol
+
+Input: input x, confidence , threshold T , noise parameters 1 and 2, total number of teachers M
+
+1: Ask the student to provide prediction scores p(x)
+
+2: if maxj{nj(x) - M pj(x)} + N (0, 12)  T then 3: return argmaxj{nj(x) + N (0, 22)}
+
+Student does not agree with teachers Teachers provide new label
+
+4: else if max{pi(x)} >  then
+
+Student agrees with teachers and is confident
+
+5: return arg maxj pj(x)
+
+Reinforce student's prediction
+
+6: else
+
+7: return 
+
+No output given for this label
+
+8: end if
+
+are answered with GNMax mechanism. Student predictions can be considered public information as the student is trained in a differentially private manner on data as needed. Thus, the noisy threshold check suffices to enforce privacy of the first step.
+For queries that fail this check, the mechanism reinforces the predicted student label if the student is confident enough and does this without looking at teacher votes. This limited form of supervision comes at a small privacy cost. Moreover, the order of the checks ensures that a student falsely confident in its predictions on a query is not accidentlly reinforced if it disagrees with the teacher consensus. The privacy accounting is identical to the Confident Aggregator except in considering the difference between teachers and the student instead of only the teachers votes.
+In practice, we incorporate both the Confident and the Interactive Aggregators--using the former to start training and switching to the latter when the student starts to predict reasonably well.
+4 EXPERIMENTAL EVALUATION
+Our goal is to show that the improved aggregators introduced in Section 3 enable the application of PATE to real-world ML problems. We address two aspects left open by Papernot et al. (2017): (a) the performance of PATE on a task with a larger number of classes (the framework was only evaluated on datasets with at most 10 classes) and (b) the privacy-utility trade-offs offered by PATE on uncurated data (departing from previous results on tasks with balanced and well-separated classes).
+In Section 4.3, we evaluate the performance of PATE with both Confident and Interactive Aggregators on the datasets described below. With the right teacher and student training, both mechanisms achieve high accuracy with very tight privacy bounds. We validate our Confident Aggregator design: the threshold checking step significantly reduces the privacy costs of queries answered. Further, the Interactive Aggregator achieves these results with fewer queries answered. As a precursor, in Section 4.2, we evaluate the improvements given by the GNMax aggregator over the Laplace NoisyMax (LNMax) to demonstrate the necessity of the Gaussian mechanism for our tasks.
+4.1 EXPERIMENTAL SETUP
+SVHN. We use the Street View House Numbers (Netzer et al., 2011) dataset for comparative analysis of the utility-privacy trade-off achieved with our confident aggregator and the one originally used in PATE. We leverage the code and teacher votes made available by Papernot et al. (2017) to replicate their experimental setup. Teachers are convolutional networks trained on partitions of the extended training set. The test set is split in two halves: the first is used as unlabeled inputs to simulate the student's public data and the second is used as a hold out to evaluate test performance. The SVHN student is trained using semi-supervised learning with GANs a` la Salimans et al. (2016).
+Glyph. This optical character recognition task has an order of magnitude more classes than all previous applications of PATE. The Glyph dataset also posesses many characteristics shared by realworld datasets: e.g., it is imbalanced and some inputs are mislabeled. Each input is a 28 × 28 grayscale image containing a single glyph generated synthetically from a collection of over 500K
+6
+
+Under review as a conference paper at ICLR 2018
+Ga P uy 4 , '+ (
+Figure 1: Some example inputs from the Glyph dataset along with the class they are labeled as. Note the ambiguity (between the comma and apostrophe) and the mislabeled input.
+computer fonts.2 Samples representative of the difficulties raised by the data are depicted in Figure 2. The task is to classify inputs as one of the 150 UTF8 symbols used to generate them.
+This set of 150 classes results from pre-processing efforts. We discarded additional classes that had few samples; some classes had at least 50 times fewer inputs than the most popular classes, and these were almost exclusively incorrectly labeled inputs. We also merged classes that were too ambiguous for even a human to differentiate them. Nevertheless, we some classes remain 5 times more frequent, and mislabeled inputs represent at least 10% of the data (this is a conservative estimate derived from a manual inspection of samples grouped by classes--favorably to the human observer).
+To simulate the availability of private and public data (see Section A), we split data originally marked as the training set (about 65M points) into partitions given to the teachers. Each teacher is a ResNet (He et al., 2016) made of 32 leaky ReLU layers.3 We train on batches of 100 inputs for 40K steps with the Momentum algorithm. The learning rate, initially set to 0.1, is decayed after 10K steps to 0.01 and again after 20K steps to 0.001. These parameters were found with a grid search.
+We split holdout data in two subsets of 100K and 400K samples: the first acts as public data to train the student and the second as its testing data. The student architecture is the convolutional network found in Miyato et al. (2017), and it is learned in a semi-supervised fashion with virtual adversarial training (VAT): it minimizes an unsupervised term to encourage predictions on training points and their adversarial examples to remain identical. Indeed, we found that GANs did not yield as much utility for Glyph than for SVHN. We train with Adam for 400 epochs and a learning rate of 6 · 10-5.
+4.2 COMPARING THE LAPLACE AND GAUSSIAN MECHANISMS
+Section 3.1 introduces the GNMax mechanism and the accompanying privacy analysis. With a Gaussian distribution, whose tail diminishes more rapidly than the Laplace distribution, we expect better utility when using the new mechanism (albeit with a more involved privacy analysis).
+To study the trade-off between privacy and accuracy with the two mechanisms, we run experiments training several ensembles of M teachers for M  {100, 500, 1000, 5000}. Recall that 65 million training inputs are partitioned and distributed among the M teachers with each teacher receiving between 650K and 13K inputs for the values of M above. The test data is used to query the teacher ensemble and the resulting labels (after the Laplace and Gaussian mechanisms) are compared with the ground truth labels provided in the dataset. This predictive performance of the teacher ensemble is essential to good student training with accurate labels and is a useful proxy for training utility.
+For each mechanism, we compute (, )-differential privacy guarantees. As is common in literature, for a dataset on the order of 108 samples, we choose  = 10-8 and denote the corresponding  as the privacy cost. This is calculated on a subset of 4,000 queries, which is representative of the number of labels needed by a student for accurate training (see Section 4.3). We visualize in Figure 2 the tradeoff between privacy costs and label accuracy for both mechanisms for varying levels of noise.
+Observations. For every value of M , the GNMax outperforms the LNMax mechanism in terms of privacy cost. Even when aggregation test accuracy improves rapidly when M is large, the Gaussian mechanism reaches the same accuracy at a lower privacy cost. This can be explained as follows. (Recall some of the notation from Section 3.1.) For both the GNMax and the LNMax mechanisms, the data dependent privacy cost scales linearly with q~, the likelihood of an answer other than the true plurality. This value q~ falls of as e-x2 for GNMax and e-x for LNMax, where x is the ratio
+2Glyph data is not public but similar data is available publicly as part of the notMNIST dataset. 3It is available in the TensorFlow models library at https://github.com/tensorflow/models.
+7
+
+Under review as a conference paper at ICLR 2018
+(ni - ni)/. Thus, when ni - ni is (say) 4, LNMax would have q~  e-4 = 0.018..., whereas GNMax would have q~  e-16  10-7, thereby leading to a much higher likelihood of returning the true plurality. Moreover, this reduced q~ translates to a smaller privacy cost for a given  leading to a better utility-privacy trade-off.
+Increasing the number of teachers makes the trade-off better, as long as each teacher still gets sufficient data to learn a good-enough model. It decreases the privacy cost of labeling each data point as we can tolerate a larger . Thus, fixing the mechanism and the accuracy, we achieve lower privacy costs with a larger number of teachers.
+Data dependent vs. independent analysis. The data-dependent analysis introduces an interesting twist into the standard privacy-accuracy trade-off, which is usually monotone. Consider Figure 3, which exhibits a characteristic elbow: there is a point where accuracy lowers and the privacy cost increases. This is due to the nature of the differential privacy bound provided by our analysis: it is defined as the minimum of the data-independent and data-dependent bounds. There are three regimes illustrated in Figure 3: (1) the data-dependent bound decreases as more noise is injected and it is lower than the data-independent bound, (2) the data-dependent bound starts trending up, and (3) the data-dependent bound is overtaken by the data-independent analysis.
+4.3 STUDENT TRAINING WITH NEW AGGREGATION MECHANISMS
+We train a student model on public data in a semi-supervised fashion where a subset of the student training data is labeled by the teachers (see Section 2 and Appendix A). We take advantage of PATE's flexibility and apply the technique that performs best on each dataset: Generative Adversarial Networks (Goodfellow et al., 2014; Salimans et al., 2016) for SVHN and Virtual Adversarial Training (Miyato et al., 2017) for Glyph. In addition to evaluating the total privacy cost associated with training the student model, we compare its utility to a non-private baseline obtained by training on the sensitive data (used to train teachers in PATE): we use the baseline of 92.8% reported by Papernot et al. (2017) for SVHN, and we measure a 82.2% baseline accuracy for Glyph.
+Confident Aggregator. With 12,000 samples to learn from, the student submits queries to the teacher ensemble running the Confident Aggregator from Section 3.2. A grid search over a small range of plausible values for parameters T , 1 and 2 yielded two data points of results (see rows 4, 5 of Figure 5) illustrating the utility and privacy achieved. We additionally measure the number of queries selected by the teachers to be answered and compare student utility to a non-private baseline.
+Despite the imbalance of classes as well as a non-trivial fraction of mislabeled data (as is evidenced by the baseline), the Confident Aggregator achieves 73.5% accuracy (compared to the baseline of 82.2%) with a privacy cost of just ( = 1.02,  = 10-8). Roughly two-thirds of queries are answered which indicate several costly queries that were successfully avoided. By being less permissive with the noisy threshold check, we can slightly improve accuracy to 75.5% at a much larger privacy cost (doubling  at the same  value). This supports our thesis in Section 4.2 where there exists a regime of very limited improvement in accuracy while continuing to expend significant privacy costs.
+Interactive Aggregator. We evaluate the utility and privacy afforded by the interactive aggregator designed in Section 3.3 by implementing a training routine that completes in two rounds. Round one runs student training with a Confident Aggregator mechanism. A grid search targeting the best privacy for roughly 3,400 answered queries (out of 6,000)--sufficient to bootstrap a student--led us to setting (T, 1, 2) = (3500, 1500, 100). The privacy cost expended was   0.65 at  = 10-8.
+This student was then trained with 10,000 more queries with the Interactive Aggregator mechanism. Once again, through a grid search of plausible values of the parameters, we computed the resulting (total) privacy cost and utility at two exemplar data points. With just over 4,000 answered queries in total at a privacy cost of  = 0.93, the trained student was able to achieve 72.7% accuracy. With a more permissive threshold checking step (setting 2 = 2000) and answering a few hundred more queries, the student achieved 73.2% accuracy with privacy cost  = 0.99. Note that these students required fewer answered queries compared to the Confident Aggregator and the results are written up in rows 6, 7 of Figure 5. Finally, we note that the best privacy costs in the table, at  = 0.93 occurred when the privacy costs for the first and second rounds of training were roughly the same. (We note here that each step had a privacy cost of   0.65 at  = 10-8, the total cost is less than
+8
+
+Under review as a conference paper at ICLR 2018
+
+100
+
+80
+
+Aggregation test accuracy (%)
+Privacy  at  = 10-8
+
+60
+
+Non-private model baseline
+
+40
+
+100 teachers (Gaussian) 500 teachers (Gaussian)
+
+1000 teachers (Gaussian)
+
+5000 teachers (Gaussian)
+
+20 100 teachers (Laplace)
+
+500 teachers (Laplace)
+
+1000 teachers (Laplace)
+
+5000 teachers (Laplace)
+
+0 0 Priva5cy cost of 400100 queries (eps1il5on at delta=1200e-7) 25
+
+Figure 2: Trade-off between utility and privacy for the Laplacian and Gaussian variants of the aggregation mechanism: smaller privacy cost values and higher test accuracy are better.
+
+2.5
+All 2.0 Confident
+1.5
+
+1.0
+
+0.5
+
+0.0 0 5000 10000 15000
+Answered queries
+
+Figure 3: Interaction between the data-
+
+independent and data-dependent bounds. Figure 4: Privacy cost of answering all vs only
+
+Shaded areas identify areas of different trade-offs inexpensive queries, keeping the number of an-
+
+between privacy and accuracy.
+
+swered queries fixed.
+
+Dataset 
+SVHNo 5.04 SVHNo 8.19
+
+T
+­ ­
+
+1 2 Aggreg
+­ ­ Lap ­ ­ Lap
+
+T Ans.
+500 1000
+
+S Ans. Baseline Student
+­ 92.8% 82.7% ­ 92.8% 90.7%
+
+SVHN 5.34 300 200 40 Conf
+
+3464
+
+­ 92.8% 91.7%
+
+Glyph 1.02 3000 1500 100 Conf Glyph 2.03 1000 500 100 Conf
+
+7824 10762
+
+­ 82.2% 73.5% ­ 82.2% 75.5%
+
+Glyph 0.93 3500 1500 200 Int (2) 3393 + 670 6330 Glyph 0.99 3500 2000 200 Int (2) 3308 + 1033 6081
+
+82.2% 82.2%
+
+72.7% 73.2%
+
+Figure 5: Utility and privacy of the students. The first two rows, with superscript o, refer to the original results in Papernot et al. (2017). It is the only one using LNMax; all of our results use the GNMax. For SVHN, we use the labels of a 250 teacher ensemble published by Papernot et al. (2017) and set  = 10-6 to compute values of . All Glyph results use an ensemble of 5000 teachers and  is computed for  = 10-8. Aggregation mechanism parameters (T, 1, 2) for the Interactive Aggregator refer to round two training only. "T Ans." and "S Ans." indicate the number of queries returned by the aggregator based on teacher votes and student predictions.
+
+9
+
+Under review as a conference paper at ICLR 2018
+Figure 6: Performance of the noisy threshold checking: Teacher votes, the highest line represents the plurality values of teacher votes. Moderate check, the middle line shows the histogram for (t, 1) = (3500, 1500). Aggressive check, the bottom line shows the histogram for (t, 1) = (5000, 1500).
+1.3 because of the interactions of Theorems 6 and 7. We posit this to be a good rule of thumb in training students with both aggregators.) Baseline. Note that the Glyph student's accuracy remains 7 percent points below the non-private model's accuracy achieved by training on the 65M sensitive inputs. We hypothesize that is due to the real-world characteristics of the data considered. Indeed, the class imbalance naturally requires more queries to return labels from the less represented classes. For instance, a student trained on 200K queries is only 77% accurate on test data. In addition, the large fraction of mislabeled inputs are likely to have a large privacy cost: these inputs are sensitive because they are outliers of the distribution, which is reflected by the weak consensus among teachers on these inputs.
+4.4 NOISY THRESHOLD CHECK AND PRIVACY COSTS In Sections 3.1 and 3.2, we motivated the need for a noisy threshold checking step before the teachers answer queries: it prevents us from consuming most of our privacy budget on a few queries that are expensive and also likely to be false. We implicitly evaluated this intuition through the privacy, accuracy, and number of answered queries reported in Section 4.3. Here, we dedicate additional experiments to evaluate the effect of the noisy threshold on the privacy costs of answered queries. To do this, we considered the Glyph dataset with the votes of M = 5000 teachers from Section 4.1. For two illustrative parameters (in this case, only T and 1) we plot in Figure 6 a histogram of the number of teacher votes for the class with the plurality of votes (ni in the notation of Section 3.1) across 25,000 student queries. The smaller the values, the less consensus there is among the teachers on those queries, and the more expensive the queries get. We compare this histogram to the corresponding histogram on only those queries that pass the noisy threshold check. A moderate check. When (T, 1) = (3500, 1500) we observe that we capture a significant fraction, if not almost all queries where teachers have a strong consensus (roughly > 4000 votes) while managing to filter out many queries with poor consensus. This moderate check ensures that although many queries with plurality votes between 2,500 and 3,500 are answered (i.e., only 50­70% of teachers agree on a label) the expensive ones are most likely discarded. An aggressive check. For (T, 1) = (5000, 1500), notice that any query with a poor consensus is completely culled out. This comes at the expense of a noticeable drop for queries that might have had a strong consensus and little-to-no privacy cost. Thus the resulting queries, though fewer, stem
+10
+
+Under review as a conference paper at ICLR 2018
+from a significantly higher consensus between teachers. They may be answered with very strong privacy guarantees. We reiterate that this threshold checking step itself is done in a private manner. Emperically in our Interactive Aggregator experiments, we expend about a third to a half of our privacy budget on this step, which still yields a very small cost per query across 6,000 queries.
+5 CONCLUSIONS
+The key insight motivating the addition of a noisy thresholding step to the two aggregation mechanisms proposed in our work is that there is a form of synergy between the privacy and accuracy of labels output by the aggregation: labels that come at a small privacy cost also happen to be more likely to be correct. As a consequence, we are able to provide more quality supervision to the student by choosing not to output labels when the consensus among teachers is too low to provide an aggregated prediction at a small cost in privacy. This observation was further confirmed in some of our experiments where we observed that if we trained the student on either private or non-private labels, the former almost always gave better performance than the latter--for a fixed number of labels.
+Complimentary with these aggregation mechanisms is the use of a Gaussian (rather than Laplace) distribution to perturb teacher votes. In our experiments with Glyph data, this proved essential to preserve the accuracy of the aggregated labels--because of the large number of classes. The analysis presented in Appendix 3 details the delicate but necessary adaptation of analog results for the Laplace NoisyMax.
+As was the case for the original PATE proposal, semi-supervised learning was instrumental to ensure the student achieves strong utility given a limited set of labels from the aggregation mechanism. However, we found that virtual adversarial training outperform the approach from Salimans et al. (2016) for the Glyph dataset. Thus, future work may continue to investigate other techniques for learning the student in these particular settings with restricted supervision.
+REFERENCES
+Mart´in Abadi, Andy Chu, Ian Goodfellow, H Brendan McMahan, Ilya Mironov, Kunal Talwar, and Li Zhang. Deep learning with differential privacy. In Proceedings of the 2016 ACM SIGSAC Conference on Computer and Communications Security, pp. 308­318. ACM, 2016.
+Charu C Aggarwal. On k-anonymity and the curse of dimensionality. In Proceedings of the 31st international conference on Very large data bases, pp. 901­909. VLDB Endowment, 2005.
+Raef Bassily, Adam Smith, and Abhradeep Thakurta. Private empirical risk minimization: Efficient algorithms and tight error bounds. In Proceedings of the 2014 IEEE 55th Annual Symposium on Foundations of Computer Science, FOCS '14, pp. 464­473, 2014. ISBN 978-1-4799-6517-5.
+Raghav Bhaskar, Srivatsan Laxman, Adam Smith, and Abhradeep Thakurta. Discovering frequent patterns in sensitive data. In Proceedings of the 16th ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 503­512. ACM, 2010.
+Battista Biggio, Igino Corona, Davide Maiorca, Blaine Nelson, Nedim S rndic´, Pavel Laskov, Giorgio Giacinto, and Fabio Roli. Evasion attacks against machine learning at test time. In Joint European Conference on Machine Learning and Knowledge Discovery in Databases, pp. 387­ 402. Springer, 2013.
+Vincent Bindschaedler, Reza Shokri, and Carl A Gunter. Plausible deniability for privacy-preserving data synthesis. Proceedings of the VLDB Endowment, 10(5), 2017.
+Mark Bun and Thomas Steinke. Concentrated differential privacy: Simplifications, extensions, and lower bounds. In Theory of Cryptography Conference, pp. 635­658. Springer, 2016.
+Kamalika Chaudhuri, Claire Monteleoni, and Anand D Sarwate. Differentially private empirical risk minimization. Journal of Machine Learning Research, 12(Mar):1069­1109, 2011.
+David Cohn, Les Atlas, and Richard Ladner. Improving generalization with active learning. Machine learning, 15(2):201­221, 1994.
+11
+
+Under review as a conference paper at ICLR 2018
+Cynthia Dwork and Aaron Roth. The algorithmic foundations of differential privacy. Foundations and Trends in Theoretical Computer Science, 9(3­4):211­407, 2014.
+Cynthia Dwork and Guy N Rothblum. Concentrated differential privacy. arXiv preprint arXiv:1603.01887, 2016.
+Cynthia Dwork, Krishnaram Kenthapadi, Frank McSherry, Ilya Mironov, and Moni Naor. Our data, ourselves: Privacy via distributed noise generation. In Eurocrypt, volume 4004, pp. 486­503. Springer, 2006a.
+Cynthia Dwork, Frank McSherry, Kobbi Nissim, and Adam Smith. Calibrating noise to sensitivity in private data analysis. In TCC, volume 3876, pp. 265­284. Springer, 2006b.
+Cynthia Dwork, Guy N Rothblum, and Salil Vadhan. Boosting and differential privacy. In The 51st Annual IEEE Symposium on Foundations of Computer Science (FOCS), pp. 51­60, 2010.
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural information processing systems, pp. 2672­2680, 2014.
+Varun Gulshan, Lily Peng, Marc Coram, Martin C Stumpe, Derek Wu, Arunachalam Narayanaswamy, Subhashini Venugopalan, Kasumi Widner, Tom Madams, Jorge Cuadros, et al. Development and validation of a deep learning algorithm for detection of diabetic retinopathy in retinal fundus photographs. JAMA, 316(22):2402­2410, 2016.
+Jihun Hamm, Yingjun Cao, and Mikhail Belkin. Learning privately from multiparty data. In International Conference on Machine Learning, pp. 555­563, 2016.
+Steve Hanneke. Theory of disagreement-based active learning. Foundations and Trends in Machine Learning, 7(2-3):131­309, 2014.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770­778, 2016.
+Ron Kohavi. Scaling up the accuracy of Naive-Bayes classifiers: A decision-tree hybrid. In KDD, volume 96, pp. 202­207, 1996.
+Yun Liu, Krishna Gadepalli, Mohammad Norouzi, George E Dahl, Timo Kohlberger, Aleksey Boyko, Subhashini Venugopalan, Aleksei Timofeev, Philip Q Nelson, Greg S Corrado, et al. Detecting cancer metastases on gigapixel pathology images. arXiv preprint arXiv:1703.02442, 2017.
+H Brendan McMahan, Daniel Ramage, Kunal Talwar, and Li Zhang. Learning differentially private language models without losing accuracy. arXiv preprint arXiv:1710.06963, 2017.
+Frank McSherry and Kunal Talwar. Mechanism design via differential privacy. In Foundations of Computer Science, 2007. FOCS'07. 48th Annual IEEE Symposium on, pp. 94­103. IEEE, 2007.
+Ilya Mironov. Re´nyi differential privacy. In Proceedings of 30th IEEE Computer Security Foundations Symposium, 21-25 August 2017, Santa Barbara, CA, pp. 263­275, 2017.
+Takeru Miyato, Shin-ichi Maeda, Masanori Koyama, and Shin Ishii. Virtual adversarial training: a regularization method for supervised and semi-supervised learning. arXiv preprint arXiv:1704.03976, 2017.
+Arvind Narayanan and Vitaly Shmatikov. Robust de-anonymization of large sparse datasets. In Security and Privacy, 2008. SP 2008. IEEE Symposium on, pp. 111­125. IEEE, 2008.
+Yuval Netzer, Tao Wang, Adam Coates, Alessandro Bissacco, Bo Wu, and Andrew Y Ng. Reading digits in natural images with unsupervised feature learning. In NIPS workshop on deep learning and unsupervised feature learning, volume 2011, pp. 5, 2011.
+12
+
+Under review as a conference paper at ICLR 2018
+Nicolas Papernot, Mart´in Abadi, U´ lfar Erlingsson, Ian Goodfellow, and Kunal Talwar. Semisupervised knowledge transfer for deep learning from private training data. In Proceedings of the 5th International Conference on Learning Representations, 2017.
+Manas Pathak, Shantanu Rane, and Bhiksha Raj. Multiparty differential privacy via aggregation of locally trained classifiers. In Advances in Neural Information Processing Systems, pp. 1876­1884, 2010.
+Tim Salimans, Ian Goodfellow, Wojciech Zaremba, Vicki Cheung, Alec Radford, and Xi Chen. Improved techniques for training gans. In Advances in Neural Information Processing Systems, pp. 2234­2242, 2016.
+Shuang Song, Kamalika Chaudhuri, and Anand D Sarwate. Stochastic gradient descent with differentially private updates. In Global Conference on Signal and Information Processing (GlobalSIP), 2013 IEEE, pp. 245­248. IEEE, 2013.
+Thomas Steinke and Jonathan Ullman. Tight lower bounds for differentially private selection. In FOCS 2017, 2017.
+Beata Strack, Jonathan P DeShazo, Chris Gennings, Juan L Olmo, Sebastian Ventura, Krzysztof J Cios, and John N Clore. Impact of HbA1c measurement on hospital readmission rates: analysis of 70,000 clinical database patient records. BioMed research international, 2014, 2014.
+Christian Szegedy, Wojciech Zaremba, Ilya Sutskever, Joan Bruna, Dumitru Erhan, Ian Goodfellow, and Rob Fergus. Intriguing properties of neural networks. arXiv preprint arXiv:1312.6199, 2013.
+Florian Trame`r, Fan Zhang, Ari Juels, Michael K Reiter, and Thomas Ristenpart. Stealing machine learning models via prediction apis. In USENIX Security Symposium, pp. 601­618, 2016.
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding deep learning requires rethinking generalization. arXiv preprint arXiv:1611.03530, 2016.
+13
+
+Under review as a conference paper at ICLR 2018
+
+A APPENDIX: BACKGROUND ON PATE
+
+Here, we provide an overview of the PATE framework. Readers familiar with the approach may skip to Section 3. To protect the privacy of training data during learning, PATE transfers knowledge from an ensemble of teacher models trained on partitions of the data to a student model. Privacy guarantees may be understood intuitively and expressed rigorously in terms of differential privacy.
+Illustrated in Figure 7, the PATE framework consists of three key parts: (1) an ensemble of n teacher models, (2) an aggregation mechanism and (3) a student model.
+
+Data 1
+
+Not accessible by adversary Teacher 1
+
+Accessible by adversary
+
+Sensitive Data
+
+Data 2
+Data 3
+...
+Data n
+Training
+
+Teacher 2
+Teacher 3
+...
+Teacher n
+
+Aggregate Teacher
+
+Prediction
+
+Predicted completion
+
+Student
+
+Queries
+
+Incomplete Public Data
+Data feeding
+
+Figure 7: Overview of the approach: (1) an ensemble of teachers is trained on disjoint subsets of the sensitive data, (2) a student model is trained on public data labeled using the ensemble. Figure reproduced from Papernot et al. (2017) with permission.
+
+Teacher models: Training each teacher on a partition of the sensitive data produces n different models solving the same task. At inference, teachers independently predict labels. When there is a strong consensus among teachers, the label they almost all agree on does not depend on the model learned by any given teacher. Hence, this collective decision is intuitively private with respect to any given training point--because such a point could have been included only in one of the teachers' training set.
+Aggregation mechanism: The aggregation mechanism of the original PATE framework counts votes assigned to each class, adds carefully calibrated Laplacian noise to the resulting vote histogram, and outputs the class with the most noisy votes as the ensemble's prediction. This is referred to as the max-of-Laplacian mechanism going forward.
+For samples x and classes 1, . . . , m, let fj(x)  [m] denote the j-th teacher model's prediction and ni denote the vote count for the i-th class (i.e., ni = |fj(x) = i|). The output of the mechanism is A(x) := argmaxi (ni(x) + Lap (1/)). Through a rigorous analysis of this mechanism, the PATE framework provides a differentially private API: the privacy cost of each aggregated prediction made by the teacher ensemble is known.
+Student model: PATE's final step involves the training of a student model by knowledge transfer from the teacher ensemble using access to public--but unlabeled--data. To limit the privacy cost of labeling them, queries are only made to the aggregation mechanism for a subset of public data to train the student in a semi-supervised way using a fixed number of queries. The authors note that every additional ensemble prediction increases the privacy cost spent and thus cannot work with unbounded queries. Fixed queries fixes privacy costs as well as diminishes the avlue of attacks analyzing model parameters to recover training data (Zhang et al., 2016). The student only sees public data and privacy-preserving labels.
+
+B APPENDIX: RELATED WORK
+Differential privacy is by now the standard definition of privacy. It offers a rigorous framework whose threat model makes few assumptions about the adversary's capabilities, allowing differentially private algorithms to effectively cope against strong adversaries. This is not the case of all privacy definitions, as demonstrated by successful attacks against anonymization techniques (Aggarwal, 2005; Narayanan & Shmatikov, 2008; Bindschaedler et al., 2017).
+14
+
+Under review as a conference paper at ICLR 2018
+
+The first learning algorithms adapted to provide differential privacy with respect to their training data were often linear and convex (Pathak et al., 2010; Chaudhuri et al., 2011; Song et al., 2013; Bassily et al., 2014; Hamm et al., 2016). More recently, successful developments in deep learning called for differentially private stochastic gradient descent algorithms (Abadi et al., 2016), some of which have been tailored to learn in federated (McMahan et al., 2017) settings.
+Differentially private selection mechanisms like GNMax are commonly used in hypothesis testing, frequent itemset mining, and as building blocks of more complicated private mechanisms. The most commonly used differentially private selection mechanisms are exponential mechanism(McSherry & Talwar, 2007) and LNMax(Bhaskar et al., 2010). There are also works on lower bound for such problem (Steinke & Ullman, 2017).
+The Confident and Interactive Aggregator proposed in our work use the intuition that selecting samples under certain constraints could result in better training than using samples uniformly at random. In Machine Learning Theory, active learning (Cohn et al., 1994) has been shown to allow learning from fewer labeled examples than the passive case (see e.g. Hanneke (2014)). Similarly, in model stealing (Trame`r et al., 2016), a goal is to learn a model from limited access to a teacher network.
+
+C APPENDIX: RE´ NYI DIFFERENTIAL PRIVACY AND PRIVACY PROOFS
+
+C.1 RE´ NYI DIFFERENTIAL PRIVACY
+
+Papernot et al. (2017) note that the natural approach to bound PATE's privacy loss--by first having a bound for the privacy cost of each label queried and then using strong composition (Dwork et al., 2010) to derive the total cost--yields loose privacy guarantees. Instead, their approach uses datadependent privacy analysis. This takes advantage of the fact that when the consensus among the teachers is very strong, the plurality outcome has overwhelming likelihood leading to a very small privacy cost whenever the consensus occurs. To capture this effect quantitatively, Papernot et al. (2017) rely on the moments accountant, introduced by Abadi et al. (2016) and building on previous work (Bun & Steinke, 2016; Dwork & Rothblum, 2016).
+In this section, we restate the privacy analysis framework of PATE in the language of Re´nyi Differential Privacy or RDP (Mironov, 2017). RDP generalizes pure differential privacy ( = 0) and is closely related to the moments accountant. We choose to use RDP as a more natural analysis framework when dealing with our mechanisms that use Gaussian noise. Defined below, the RDP of a mechanism is stated in terms of the Re´nyi divergence.
+
+Definition 4 (Re´nyi Divergence). The Re´nyi divergence of order  between two distributions P
+
+and Q is defined as: D(P
+
+Q)
+
+=
+
+1 -1
+
+log ExQ
+
+(P (x)/Q(x))
+
+.
+
+Definition 5 (Re´nyi Differential Privacy (RDP)). A randomized mechanism M is said to guarantee (, )-RDP with   1 if for any neighboring datasets D and D and any auxiliary information
+aux,
+
+D(M(D, aux)
+
+M(D
+
+, aux)) =
+
+1  - 1 log ExM(D,aux)
+
+Pr [M(D, aux) = x]
+
+-1
+ .
+
+Pr [M(D , aux) = x]
+
+RDP generalizes pure differential privacy in the sense that -differential is equivalent to (, )-RDP. Mironov (2017) proves the following key facts that allow easy composition of RDP guarantees and their conversion to (, )-differential privacy bounds.
+
+Theorem 6 (Composition). If a mechanism M consists of a sequence of adaptive mechanisms
+
+M1, . . . , Mk such that for any i  [k], Mi guarantees (, i)-RDP, then M guarantees
+
+(,
+
+k i=1
+
+i
+
+)-RDP.
+
+Theorem 7 (From RDP to DP). If a mechanism M guarantees (, )-RDP, then M guarantees
+
+(
+
++
+
+log 1/ -1
+
+,
+
+)-differential
+
+privacy
+
+for
+
+any
+
+
+
+
+
+(0, 1).
+
+While both (, )-differential privacy and RDP are relaxations of pure -differential privacy, the two main advantages of RDP are as follows. First, it composes nicely; second, it captures the privacy
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+guarantee of Gaussian noise in a much cleaner manner compared to (, )-differential privacy. This lets us do a careful privacy analysis of the GNMax mechanism as stated in Theorem 2. While the analysis of Papernot et al. (2017) leverages the first aspect of such frameworks with the Laplace noise (LNMax mechanism), our analysis of the GNMax mechanism relies on both.
+
+C.2 PRIVACY PROOFS
+
+In this section, we provide the proofs of Theorem 2 and Lemma 3. Moreover, we present Lemma 9, which provides optimal values of µ1 and µ2 to apply towards Theorem 2 for the GNMax mechanism. We start off with a Lemma about the Re´nyi differential privacy guarantee of the GNMax.
+Lemma 8. The GNMax aggregator A guarantees , /2 -RDP for all   1.
+Proof. The result follows from observing that A can be decomposed into applying the argmax operator to a noisy histogram resulted from adding Gaussian noise to each dimension of the original histogram. The Gaussian mechanism satisfies (, /22)-RDP (Mironov, 2017), and since each teacher may change two counts (incrementing one and decrementing the other), the overall RDP guarantee is as claimed.
+
+Lemma 3.
+
+For any i  [m], we have Pr [A(D) = i] 
+
+1 2
+
+Proof. For any i  [n], we have
+
+i=i erfc
+
+ni -ni 2
+
+.
+
+Pr(M(D) = i) = Pr [i, ni + Zi > ni + Zi ]  Pr [ni + Zi > ni + Zi ]
+i=i
+
+= Pr [Zi - Zi > ni - ni]
+i=i
+= 1 1 - erf ni - ni 2 2
+i=i
+where the last equality follows from the fact that Zi - Zj is a Gaussian random variable with mean zero and variance 22.
+
+We now present a precise statement of Theorem 2.
+
+Theorem 2. Let M be a randomized algorithm with (µ1, 1)-RDP and (µ2, 2)-RDP guarantees and suppose that there exists a likely outcome i given a dataset D such that q~  Pr [M(D) = i].
+
+Let   µ1 and q~  e(µ2-1)2 /
+
+·µ1 µ2
+µ1-1 µ2-1
+
+µ2
+. Then, for any auxiliary information aux and any
+
+neighboring dataset D of D, we have:
+
+D(M(D, aux)
+
+M(D , aux)) 
+
+1  - 1 log
+
+(1 - q~) · A(q~, µ2, 2)-1 + q~ · B(q~, µ1, 1)-1
+
+(2)
+
+where A(q~, µ2, 2) := (1 - q~)/
+
+1
+
+-
+
+(q~e2
+
+)
+
+µ2 -1 µ2
+
+and B(q~, µ1, 1) := e1 /q~1/(µ1-1).
+
+Before we prove the Theorem, we introduce some simplifying notation. For a randomized mechanism M, neighboring datasets D and D , and auxiliary information aux, we define
+
+M(; aux, D, D ) := D(M(D, aux) M(D , aux))
+
+1 :=  - 1 log ExM(D,aux)
+
+Pr [M(D, aux) = x] -1 .
+Pr [M(D , aux) = x]
+
+Next, without loss of generality, we choose to work with RDP guarantees at moments µ1 + 1 and µ2 + 1 to derive a bound at moment  + 1 which can then be restated at the correct moments in a straightforward manner.
+Finally, the proof involves working with the RDP bounds in the exponent, so we set 1 = e1µ1 and 2 = e2µ2 for ease of notation.
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+Proof. Let q = Pr [M(D) = i] and we note that q  q~. From the definition of Re´nyi differential privacy at moment µ1 + 1, we have:
+
+exp (M(µ1 + 1; aux, D, D )) =
+
+(1 - q)µ1+1 (1 - p)µ1
+
++
+
+i>1
+
+qiµ1+1 pµi 1
+
+1/µ1
+ exp (1)
+
+=
+
+i>1
+
+qiµ1+1 pµi 1
+
+=
+
+qi
+i>1
+
+qi pi
+
+µ1
+ 1.
+
+(3)
+
+Since µ1 > , f (x) = xµ1/ is convex. For i > 1, let xi = (qi/pi) and ai = qi. Applying Jensen's Inequality we have the following series of inequalities:
+
+f aixi  ai
+
+ f
+
+
+i>1 qi
+
+qi pi
+
+i>1 qi
+
+  
+
+  µ1/
+
+i>1 qi
+
+qi pi
+
+
+
+
+
+q
+
+aif (xi) ai
+i>1 qif
+
+ qi pi
+
+i>1 qi
+
+i>1 qi
+
+qi µ1 pi
+
+q
+
+qi
+i>1
+qi
+i>1
+
+
+
+qi
+
+
+ q
+
+pi
+
+i>1 qi
+
+qi µ1 /µ1
+pi
+
+q
+
+qi pi
+
+
+ 1/µ1 · q1-/µ1 .
+
+Next, by the bound at moment µ2 + 1, we have:
+
+exp (M(µ2 + 1; aux, D , D)) =
+
+(1 - p)µ2+1 (1 - q)µ2
+
++
+
+i>1
+
+pµi 2+1 qiµ2
+
+1/µ2
+ exp (2)
+
+=
+
+(1 - p)µ2+1 (1 - q)µ2
+
++
+
+i>1
+
+pµi 2+1 qiµ2
+
+ 2.
+
+By data-processing inequality of Re´nyi-divergence, we have
+
+(1 - p)µ2+1 (1 - q)µ2
+
++
+
+pµ2+1 qµ2
+
+ 2,
+
+which implies
+
+pµ2 +1 qµ2
+
+ 2
+
+and thus
+
+p
+
+
+
+(qµ2
+
+2
+
+)
+
+1 (µ2 +1)
+
+.
+
+(4) (5)
+
+Combining (4) and (5) together, we can derive a bound at moment  + 1.
+
+exp (M( + 1, aux, D, D )) =
+
+(1 - q)+1 (1 - p)
+
++
+
+i>1
+
+qi+1 pi
+
+1/
+
+ 1/
+
+ 
+
+(1 - q)+1
+1
+
+
+
++ 1/µ1
+
+· q1-/µ1  
+
+1 - (qµ2 2) µ2+1
+
+.
+
+(6)
+
+17
+
+Under review as a conference paper at ICLR 2018
+
+Equation (6) can be translated to moments , µ1 and µ2 to complete the proof of the Theorem. But Equation (6) is a statement about the exact probability q = Pr [M(D) = i]. In the Theorem statement, and in practice, we can only derive an upper bound q~ on Pr [M(D) = i]. The last step of the proof, which is a little intricate, requires showing that the expression in Equation (6) is monotone in the range of values of q that we care about. The rest of the proof is therefore split into two parts. First, we translate the bound in Equation (6) down one moment. Next, we show that with functions:
+
+f1(x) :=
+
+(1 - x)+1
+1
+1 - (xµ2 2) µ2+1
+
+and f2(x) := 1/µ1 · x1-/µ1 ,
+
+defined on x  [0, 1] as above, f1(x) + f2(x) is increasing in
+
+0, 2/
+
+·µ1+1 µ2+1
+µ1 µ2
+
+µ2 +1
+.
+
+Translating Equation 6 into the Theorem statement. Taking logarithms on both sides of the
+inequality, and restating the expression by shifting the moments µ1 + 1, µ2 + 1, and  + 1 back to µ1, µ2, and  respectively, we have:
+
+
+
+M(, aux, D, D
+
+)
+
+
+
+
+
+1 -1
+
+log  
+
+(1 - q)
+
+1
+
+-
+
+(qµ2-12)
+
+1 µ2
+
+(-1)
+
++ 1(-1)/(µ1-1)
+
+· q1-(-1)/(µ1-1) . 
+
+The expression in the parenthesis can be re-written as:
+
+
+
+1-q
+
+(1 - q) · 
+
+1
+
+-
+
+(qµ2-12)
+
+1 µ2
+
+-1  +q·
+
+11/(µ1 -1) q 1/(µ1 -1)
+
+-1
+
+= (1 - q) ·
+
+1-q
+
+(1
+
+-
+
+(qe2
+
+))
+
+µ2 -1 µ2
+
+-1
++q·
+
+e1 q 1/(µ1 -1)
+
+-1
+
+which follows by plugging in 1 = e1(µ1-1) and 2 = e2(µ2-1) (at one moment lower). We can collect terms in a straightforward manner to derive the expressions for A(q, 2, µ2) and B(q, 1, µ1) in the Theorem statement.
+
+Monotonicity of the bound. Taking the derivative of f1(x), we have:
+
+f1(x)
+
+=
+
+-(
+
++
+
+1)(1
+
+-
+
+x)(1
+
+-
+
+(xµ2
+
+2)
+
+1 µ2 +1
+
+)
+
+1
+
+(1 - (xµ2 2) µ2+1 )2
+
++
+
+(1
+
+-
+
+x)+1(1
+
+-
+
+(xµ2
+
+2)
+
+1 µ2 +1
+
+)-12
+
+1 µ2 +1
+
+1
+
+·
+
+µ2 µ2 +1
+
+· x-
+
+1 µ2 +1
+
+(1 - (xµ2 2) µ2+1 )2
+
+(1 - x) =1
+(1 - (xµ2 2) µ2+1 )
+
+-(
+
++
+
+1)
+
++
+
+µ2 µ2 + 1
+
+1
+
+-
+
+1-x
+1
+(xµ2 2) µ2+1
+
+1
+2 µ2+1
+x
+
+.
+
+We intend to show that:
+
+1
+
+f1(x)
+
+
+
+-(
+
++
+
+1)
+
++
+
+µ2 µ2 + 1
+
+2 x
+
+µ2 +1
+.
+
+For x 
+
+0, 2/
+
+·µ1+1 µ2+1
+µ1 µ2
+
+µ2 +1
+
+and y  [1, ), define g(x, y) as:
+
+1
+g(x, y) := -y( + 1) + µ2 2 µ2+1 y+1. µ2 + 1 x
+
+(7)
+
+18
+
+Under review as a conference paper at ICLR 2018
+
+We claim that g(x, y) is increasing in y and therefore g(x, y)  g(x, 1) and prove it by showing the partial derivative of g(x, y) with respect to y is non-negative. Take a derivative with respect to y as:
+
+1
+
+gy (x,
+
+y)
+
+=
+
+-y-1(
+
++
+
+1)
+
++
+
+µ2 µ2 + 1
+
+2 x
+
+µ2+1 ( + 1)y
+
+1
+
+= y-1( + 1) -1 + µ2
+
+2
+
+µ2 +1
+y
+
+.
+
+µ2 + 1 x
+
+To see why gy(x, y) is non-negative in the respective ranges of x and y, note that:
+
+x  2/
+
+µ1 + 1 · µ2 + 1 µ1 µ2
+
+µ2 +1
+= x  2/
+
+µ2 + 1 µ2
+
+µ2 +1
+
+= 1  2 · µ2 µ2+1 x µ2 + 1
+
+1
+
+= 1  µ2
+
+2 µ2+1
+
+µ2 + 1 x
+
+1
+
+= 1 
+
+µ2
+
+2
+
+µ2 +1
+y
+
+µ2 + 1 x
+
+(as y  1)
+
+1
+
+= 0  -1 + µ2
+
+2
+
+µ2 +1
+y
+
+µ2 + 1 x
+
+= 0  gy(x, y). (in the resp. range of x and y)
+
+Consider
+
+1-x 1 . Since 2  1 and x  1, we have x  2 and hence
+
+1-(xµ2 2) µ2+1
+
+1-x
+
+1-x
+
+1
+
+1 = 1.
+
+1 - (xµ2 2) µ2+1 1 - (xµ2 x) µ2+1
+
+Therefore we can set y =
+
+1-x
+1
+
+and apply the fact that g(x, y)  g(x, 1) for all y  1 to
+
+1-(xµ2 2) µ2+1
+
+get
+
+1
+
+f1(x)
+
+
+
+-(
+
++
+
+1)
+
++
+
+µ2 µ2 + 1
+
+2 x
+
+µ2 +1
+,
+
+as required by (7).
+
+Taking the derivative of f2(x), we have:
+
+
+
+f2(x) = 1/µ1 (1 - /µ1)x-/µ1 =
+
+1 µ1 x
+
+1-  µ1
+
+1-
+
+ .
+
+µ1
+
+Combining the two terms together, we have:
+
+11
+
+f (x)  -( + 1) + µ2
+
+2
+
+µ2 +1
+
+
+
++1- =
+
+- µ1 + 1 +
+
+µ2
+
+2 µ2+1 .
+
+µ2 + 1 x
+
+µ1 µ1 µ2 + 1 x
+
+We need:
+
+1
+
+- µ1 + 1 + µ2
+
+2
+
+µ2 +1
+0
+
+µ1 µ2 + 1 x
+
+
+
+µ1 + 1 · µ2 + 1 µ2+1  2 .
+
+µ1 µ2
+
+x
+
+So f (x) is increasing for x
+
+
+
+[0, 2/
+
+·µ1+1 µ2+1
+µ1 µ2
+
+µ2 +1
+].
+
+This means for q  q~ 
+
+2/
+
+·µ1+1 µ2+1
+µ1 µ2
+
+µ2 +1
+, we have f (q)  f (q~). This completes the proof of the Theorem.
+
+19
+
+Under review as a conference paper at ICLR 2018
+
+Theorem 2 yields data-dependent Re´nyi differential privacy bounds for any value of µ1 and µ2 larger than . The following Lemma simplifies this search by calculating optimal higher moments µ1 and µ2 for the GNMax mechanism with variance 2. Lemma 9. When applying Theorem 2 and Lemma 8 for GNMax with Gaussian of variance 2, Eq. (2) is minimized at
+µ1 =  · log(1/q~), and µ2 = µ1 - 1.
+
+Proof. We can minimize both terms in (2) independently. To minimize the first term in (2), we
+
+minimize
+
+(q~µ2
+
+2
+
+)
+
+1 µ2 +1
+
+by
+
+considering
+
+logarithms:
+
+log
+
+(q~µ2
+
+2
+
+)
+
+1 µ2 +1
+
+= log
+
+q~1-
+
+1 µ2 +1
+
+exp
+
+µ2 2
+
+=
+
+1 1-
+µ2 + 1
+
+·
+
+log
+
+q~ +
+
+µ2 2
+
+=
+
+1 µ2 +
+
+1
+
+log
+
+1 q~
+
++
+
+µ2 + 2
+
+1
+
+-
+
+1 2
+
+-
+
+log
+
+1 ,
+q~
+
+which is minimized at µ2 =  · log(1/q~) - 1.
+
+To minimize the second term in (2), we minimize (A1/q~)1/µ1 as follows:
+
+log
+
+1
+A1 µ1
+
+= log
+
+exp
+
+µ1 +1 2
+
+q~ q~1/µ1
+
+=
+
+µ1 + 2
+
+1
+
++
+
+1 µ1
+
+log
+
+1 q~
+
+=
+
+1 2
+
++
+
+µ1 2
+
++
+
+1 µ1
+
+log
+
+1 ,
+q~
+
+which is minimized at µ1 =  · log(1/q~) completing the proof.
+
+20
+
+

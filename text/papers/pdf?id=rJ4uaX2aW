@@ -1,0 +1,511 @@
+Under review as a conference paper at ICLR 2018
+LARGE BATCH TRAINING OF CONVOLUTIONAL NETWORKS WITH LAYER-WISE ADAPTIVE RATE SCALING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+A common way to speed up training of large convolutional networks is to add computational units. Training is then performed using data-parallel synchronous Stochastic Gradient Descent (SGD) with a mini-batch divided between computational units. With an increase in the number of nodes, the batch size grows. However, training with a large batch often results in lower model accuracy. We argue that the current recipe for large batch training (linear learning rate scaling with warm-up) is not general enough and training may diverge. To overcome these optimization difficulties, we propose a new training algorithm based on Layer-wise Adaptive Rate Scaling (LARS). Using LARS, we scaled AlexNet and ResNet-50 to a batch size of 16K.
+1 INTRODUCTION
+Training of large Convolutional Neural Networks (CNN) takes a lot of time. The brute-force way to speed up CNN training is to add more computational power (e.g. more GPU nodes) and train network using data-parallel Stochastic Gradient Descent, where each worker receives some chunk of global mini-batch (see e.g. Krizhevsky (2014) or Goyal et al. (2017) ). The size of a chunk should be large enough to utilize the computational resources of the worker. So scaling up the number of workers results in the increase of batch size. But using large batch may negatively impact the model accuracy, as was observed in Krizhevsky (2014), Li et al. (2014), Keskar et al. (2016), Hoffer et al. (2017).
+Increasing the global batch while keeping the same number of epochs means that you have fewer iterations to update weights. The straight-forward way to compensate for a smaller number of iterations is to do larger steps by increasing the learning rate (LR). For example, Krizhevsky (2014) suggests to linearly scale up LR with batch size. However using a larger LR makes optimization more difficult, and networks may diverge especially during the initial phase. To overcome this difficulty, Goyal et al. (2017) suggested doing a "learning rate warm-up": training starts with a small LR, which is slowly increased to the target "base" LR. With a LR warm-up and a linear scaling rule, Goyal et al. (2017) successfully trained ResNet-50 [He et al. (2016)] with batch B=8K, see also [Cho et al. (2017)]. Linear scaling of LR with a warm-up is the "state-of-the art" recipe for large batch training.
+We tried to apply this linear scaling and warm-up scheme to train AlexNet [Krizhevsky et al. (2012)] on ImageNet [Deng et al. (2009)], but scaling stopped after B=2K since training diverged for large LR-s. For B=4K the accuracy dropped from the baseline 57.6% (B=512) to 53.1%, and for B=8K the accuracy decreased to 44.8%. To enable training with a large LR, we replaced Local Response Normalization layers in AlexNet with Batch Normalization (BN) [Ioffe & Szegedy (2015)]. We will refer to this models AlexNet-BN. BN improved model convergence for large LRs as well as accuracy: for B=8K the accuracy gap decreased from 14% to 2.2%.
+To analyze the training stability with large LRs we measured the ratio between the norm of the layer weights and norm of gradients update. We observed that if this ratio is too high, the training may become unstable. On other hand, if the ratio is too small, then weights don't change fast enough. This ratio varies a lot between different layers, which makes it necessary to use a separate LR for each layer. Thus we propose a novel Layer-wise Adaptive Rate Scaling (LARS) algorithm. There are two notable differences between LARS and other adaptive algorithms such as ADAM (Kingma & Ba (2014)) or RMSProp (Tieleman & Hinton (2012)): first, LARS uses a separate learning rate for each layer and not for each weight, which leads to better stability. And second, the magnitude of the
+1
+
+Under review as a conference paper at ICLR 2018
+
+update is controlled with respect to the weight norm for better control of training speed. With LARS we trained AlexNet-BN and ResNet-50 with B=16K without accuracy loss.
+
+2 BACKGROUND
+
+The training of CNN is done using Stochastic Gradient (SG) based methods. At each step t a minibatch of B samples xi is selected from the training set. The gradients of loss function L(xi, w) are computed for this subset, and networks weights w are updated based on this stochastic gradient:
+
+wt+1
+
+=
+
+wt
+
+-
+
+1 
+B
+
+B
+L(xi, wt)
+i=1
+
+(1)
+
+The computation of SG can be done in parallel by N units, where each unit processes a chunk of the
+
+mini-batch with
+
+B N
+
+samples.
+
+Increasing the mini-batch permits
+
+scaling
+
+to more
+
+nodes
+
+without
+
+reducing
+
+the workload on each unit. However, it was observed that training with a large batch is difficult. To
+
+maintain the network accuracy, it is necessary to carefully adjust training hyper-parameters (learning
+
+rate, momentum etc).
+
+Krizhevsky (2014) suggested the following rules for training with large batches: when you increase the batch B by k times, you should also increase LR by k times while keeping other hyper-parameters (momentum, weight decay, etc) unchanged. The logic behind linear LR scaling is straight-forward: if you increase B by k times while keeping the number of epochs unchanged, you will do k times fewer steps. So it seems natural to increase the step size by k times. For example, let's take k = 2. The weight updates for batch size B after 2 iterations would be:
+
+wt+2
+
+=
+
+wt
+
+-
+
+
+
+
+
+1 B
+
+B
+i=1L(xi, wt) +
+
+2B
+j=B+1L(xj , wt+1)
+
+The weight update for the batch B2 = 2  B with learning rate 2:
+
+1 wt+1 = wt - 2  2  B
+
+2B
+i=1L(xi, wt)
+
+will be similar if you take 2 = 2  , assuming that L(xj, wt+1)  L(xj, wt) .
+
+(2) (3)
+
+Using the "linear LR scaling" Krizhevsky (2014) trained AlexNet with batch B=1K with minor ( 1%) accuracy loss. The scaling of AlexNet above 2K is difficult, since the training diverges for larger LRs. It was observed that linear scaling works much better for networks with Batch Normalization (e.g. Codreanu et al. (2017)). For example Chen et al. (2016) trained the Inception model with batch B=6400, and Li (2017) trained ResNet-152 for B=5K.
+
+The main obstacle for scaling up batch is the instability of training with high LR. Hoffer et al. (2017) tried to use less aggressive "square root scaling" of LR with special form of Batch Normalization ("Ghost Batch Normalization") to train AlexNet with B=8K, but still the accuracy (53.93%) was much worse than baseline 58%. To overcome the instability during initial phase, Goyal et al. (2017) proposed to use LR warm-up: training starts with small LR, and then LR is gradually increased to the target. After the warm-up period (usually a few epochs), you switch to the regular LR policy ("multi-steps", polynomial decay etc). Using LR warm-up and linear scaling Goyal et al. (2017) trained ResNet-50 with batch B=8K without loss in accuracy. These recipes constitute the current state-of-the-art for large batch training, and we used them as the starting point of our experiments
+
+Another problem related to large batch training is so called "generalization gap", observed by Keskar et al. (2016). They came to conclusion that "the lack of generalization ability is due to the fact that large-batch methods tend to converge to sharp minimizers of the training function." They tried a few methods to improve the generalization with data augmentation and warm-starting with small batch, but they did not find a working solution.
+
+3 ANALYSIS OF ALEXNET TRAINING WITH LARGE BATCH
+We used BVLC1 AlexNet with batch B=512 as baseline. Model was trained using SGD with momentum 0.9 with initial LR=0.01 and the polynomial (power=2) decay LR policy for 100 epochs.
+1https://github.com/BVLC/caffe/tree/master/models/bvlc_AlexNet
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+The baseline accuracy is 58.8% (averaged over last 5 epochs). Next we tried to train AlexNet with B=4K by using larger LR. In our experiments we changed the base LR from 0.01 to 0.08, but training diverged with LR > 0.06 even with warm-up 2. The best accuracy for B=4K is 53.1%, achieved for LR=0.05. For B=8K we couldn't scale-up LR either, and the best accuracy is 44.8% , achieved for LR=0.03 (see Table 1(a) ).
+To stabilize the initial training phase we replaced Local Response Normalization layers with Batch Normalization (BN). We will refer to this model as AlexNet-BN. 3. AlexNet-BN model was trained using SGD with momentum=0.9, weight decay=0.0005 for 128 epochs. We used polynomial (power 2) decay LR policy with base LR=0.02. The baseline accuracy for B=512 is 60.2%. With BN we could use large LR-s even without warm-up. For B=4K the best accuracy 58.9% was achieved for LR=0.18, and for B=8K the best accuracy 58% was achieved for LR=0.3. We also observed that BN significantly widens the range of LRs with good accuracy.
+
+Table 1: AlexNet and AlexNet-BN: B=4K and 8K. BN makes it possible to use larger learning rates.
+
+(a) AlexNet (warm-up 2.5 epochs)
+
+Batch Base LR accuracy,%
+
+512 0.02
+
+58.8
+
+4096 0.04
+
+53.0
+
+4096 0.05
+
+53.1
+
+4096 0.06
+
+51.6
+
+4096 0.07
+
+0.1
+
+8192 0.02
+
+29.8
+
+8192 0.03
+
+44.8
+
+8192 0.04
+
+43.1
+
+8192 0.05
+
+0.1
+
+(b) AlexNet-BN (no warm-up)
+
+Batch Base LR accuracy,%
+
+512 0.02
+
+60.2
+
+4096 0.16
+
+58.1
+
+4096 0.18
+
+58.9
+
+4096 0.21
+
+58.5
+
+4096 0.30
+
+57.1
+
+8192 0.23
+
+57.6
+
+8192 0.30
+
+58.0
+
+8192 0.32
+
+57.7
+
+8192 0.41
+
+56.5
+
+Still there is a 2.2% accuracy loss for B=8K. To check if it is related to the "generalization gap" (Keskar et al. (2016)), we looked at the loss gap between training and testing (see Fig. 1). We did not find the significant difference in the loss gap between B=512 and B=8K. We conclude that in this case the accuracy loss was mostly caused by the slow training and was not related to a generalization gap.
+
+Figure 1: AlexNet-BN: Gap between training and testing loss
+4 LAYER-WISE ADAPTIVE RATE SCALING (LARS)
+The standard SGD uses the same LR  for all layers: wt+1 = wt - L(wt). When  is large, the update ||  L(wt)|| can become larger than ||w||, and this can cause the divergence. This makes the initial phase of training highly sensitive to the weight initialization and to initial LR. We found that the ratio the L2-norm of weights and gradients ||w||/||L(wt)|| varies significantly between weights
+2LR starts from 0.001 and is linearly increased it to the target LR during 2.5 epochs 3 https://github.com/NVIDIA/caffe/tree/caffe-0.16/models/AlexNet_bn
+3
+
+Under review as a conference paper at ICLR 2018
+
+and biases, and between different layers. For example, let's take AlexNet after one iteration (Table 2, "*.w" means layer weights, and "*.b" - biases). The ratio ||w||/||L(w)|| for the 1st convolutional layer ("conv1.w") is 5.76, and for the last fully connected layer ("fc6.w") - 1345. The ratio is high
+Table 2: AlexNet: The norm of weights and gradients at 1st iteration.
+
+Layer ||w|| ||L(w)||
+||w|| ||L(w)||
+Layer ||w|| ||L(w)||
+||w|| ||L(w)||
+
+conv1.b 1.86 0.22
+8.48
+conv5.b 6.65 0.09
+73.6
+
+conv1.w 0.098 0.017
+5.76
+conv5.w 0.16
+0.0002
+69
+
+conv2.b 5.546 0.165
+33.6
+fc6.b 30.7 0.26
+117
+
+conv2.w 0.16 0.002
+83.5
+fc6.w 6.4 0.005
+1345
+
+conv3.b 9.40 0.135
+69.9
+fc7.b 20.5 0.30
+68
+
+conv3.w 0.196 0.0015
+127
+fc7.w 6.4 0.013
+489
+
+conv4.b 8.15 0.109
+74.6
+fc8.b 20.2 0.22
+93
+
+conv4.w 0.196 0.0013
+148
+fc8.w 0.316 0.016
+19
+
+during the initial phase, and it is rapidly decreasing after few epochs (see Figure 2). If LR is large comparing to the ratio for some layer, then training may becomes unstable. The LR "warm-up" attempts to overcome this difficulty by starting from small LR, which can be safely used for all layers, and then slowly increasing it until weights will grow up enough to use larger LRs.
+We would like to use different approach. We use local LR l for each layer l:
+
+wtl =   l  L(wtl)
+
+(4)
+
+where  is a global LR. Local LR l is defined for each layer through "trust" coefficient  < 1:
+
+l
+
+=
+
+
+
+×
+
+||wl|| ||L(wl)||
+
+(5)
+
+The  defines how much we trust the layer to change its weights during one update 4. Note that now the magnitude of the update for each layer doesn't depend on the magnitude of the gradient anymore, so it helps to partially eliminate vanishing and exploding gradient problems. This definition can be easily extended for SGD to balance the local learning rate and the weight decay term :
+
+l
+
+=
+
+
+
+×
+
+||wl|| ||L(wl)|| + 
+
+
+
+||wl||
+
+(6)
+
+Algorithm 1 SGD with LARS. Example with weight decay, momentum and polynomial LR decay.
+
+Parameters: base LR 0, momentum m, weight decay , LARS coefficient , number of steps T
+
+Init: t = 0, v = 0. Init weight w0l for each layer l
+
+while t < T for each layer l do
+
+gtl  L(wtl) (obtain a stochastic gradient for the current mini-batch)
+
+t  0 
+
+1
+
+-
+
+t T
+
+2 (compute the global learning rate)
+
+l
+
+
+
+
+
+
+
+||wtl || ||gtl ||+||wtl ||
+
+(compute
+
+the
+
+local
+
+LR
+
+l)
+
+vtl+1  mvtl + t  l  (gtl + wtl) (update the momentum)
+
+wtl+1  wtl - vtl+1 (update the weights)
+
+end while
+
+The network training for SGD with LARS are summarized in the Algorithm 1 5.
+
+4 One can consider LARS as a particular case of block-diagonal re-scaling from Lafond et al. (2017). 5 More details in https://github.com/NVIDIA/caffe/blob/caffe-0.16/src/caffe/solvers/sgd_solver.cpp
+4
+
+Under review as a conference paper at ICLR 2018 The local LR strongly depends on the layer and batch size (see Figure. 2 )
+
+(a) Local LR, conv1-weights
+
+(b) Local LR , conv5-weights
+
+Figure 2: LARS: local LR for different layers and batch sizes
+
+5 TRAINING WITH LARS
+We re-trained AlexNet and AlexNet-BN with LARS for batches up to 32K. To emulate large batches (B=16K and 32K) we used iter_size parameter to partition mini-batch into smaller chunks. The weights update is done after gradients for the last chunk are computed. Models have been trained for 100 epochs using SGD with momentum=0.9, weight decay=0.0005, polynomial (p=2) decay LR policy, and LARS coefficient  = 0.001 6. For B=8K the accuracy of both networks matched the baseline B=512 (see Figure 3). AlexNet-BN trained with B=16K lost 0.9% in accuracy, and trained with B=32K lost 2.6%.
+
+(a) Training without LARS
+
+(b) Training with LARS
+
+Figure 3: LARS: AlexNet-BN with B=8K
+
+We observed that there is a relatively wide interval of base LRs which gives the "best" accuracy. For AlexNet-BN with B=16K for example, all LRs from [13;22] interval give almost the same accuracy  59.3.
+6Training have been done on NVIDIA DGX1 with 8 GPUs.
+5
+
+Under review as a conference paper at ICLR 2018
+
+Table 3: Alexnet and Alexnet-BN training with LARS
+
+(a) AlexNet (warm-up 2 epochs)
+
+Batch 512 4K 8K 16K 32K
+
+LR 2 10 10 14 14
+
+accuracy,% 58.7 58.5 58.2 55.0 46.9
+
+(b) AlexNet-BN (warm-up 5 epochs)
+
+Batch 512 4K 8K 16K 32K
+
+LR 2 10 14 23 22
+
+accuracy,% 60.2 60.4 60.1 59.3 57.8
+
+Figure 4: AlexNet-BN, B=16K and 32k: Accuracy as function of LR
+
+Next we trained ResNet-50, v.1 [He et al. (2016)] with LARS. First we used minimal data augmentation: during training images are scaled to 256x256, and then random 224x224 crop with horizontal flip is taken. All training was done with SGD with momentum 0.9 and weight decay=0.0005 for 100 epochs. We used polynomial decay (power=2) LR policy with LARS and warm-up (5-12 epochs). During testing we used one model and 1 central crop. The baseline (B=256) accuracy is 73.8% for minimal augmentation. To match the state-of-the art accuracy from Goyal et al. (2017) and Cho et al. (2017) we used the second setup with an extended augmentation with variable image scale and aspect ratio. The baseline accuracy for this setup is 75.4%.
+
+Table 4: ResNet50 with LARS, minimal and extended data augmentation
+
+Batch  warm-up min aug, accuracy,% max aug, accuracy, %
+
+256 4 N/A
+
+73.8
+
+75.4
+
+1K 9 8K 30
+
+5 5
+
+73.3 73.5
+
+75.3 75.2
+
+16K 33 32K 40
+
+12 12
+
+72.9 72.5
+
+75.3 74.7
+
+We found that with LARS we can scale up ResNet-50 up to B=16K with minor (0.7%) - accuracy loss. The detailed comparison with the previous state of the art is in the Appendix 1.
+
+6 LARGE BATCH VS NUMBER OF STEPS
+When batch becomes large (32K), even models trained with LARS and large LR don't reach the baseline accuracy. One way to recover the lost accuracy is to try to train longer. Note that when batch becomes large, the number of iteration decrease. So one way to try to improve the accuracy, would be train longer. For example for Alexnet and Alexnet-BN with B=16K, when we double the number of iterations from 7800 (100 epochs) to 15600 (200 epochs) the accuracy improved by 2-3% (see Table 5).
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Figure 5: Scaling ResNet-50 (no data augmentation) up to B=32K with LARS.
+
+The "train longer" recipes works only if there is no over-fitting. For example when we train longer Resnet-50 with minimal data augmentation and small weight decay 0.0001, the accuracy did not improve significantly.
+
+Table 5: Accuracy vs Training duration
+
+(a) AlexNet, B=16k
+
+Epochs 100 125 150 175 200
+
+accuracy,% 55.0 55.9 56.7 57.3 58.2
+
+(b) AlexNet-BN, B=32K
+
+Epochs 100 125 150 175 200
+
+accuracy,% 57.8 59.2 59.5 59.5 59.9
+
+(c) ResNet-50 min aug, B=32K
+
+Epochs 100 125 150 175 200
+
+accuracy,% 72.5 72.3 72.6 72.8 ­
+
+7 CONCLUSION
+Large batch is a key for scaling up training of convolutional networks. The existing approach for large-batch training, based on using large learning rates, leads to divergence, especially during the initial phase, even with learning rate warm-up. To solve these difficulties we proposed the new optimization algorithm, which adapts the learning rate for each layer (LARS) proportional to the ratio between the norm of weights and norm of gradients. With LARS the magnitude of the update for each layer doesn't depend on the magnitude of the gradient anymore, so it helps with vanishing and exploding gradients. But even with LARS and warm-up we couldn't increase LR farther for very large batches, and to keep the accuracy we have to increase the number of epochs and use extensive data augmentation to prevent over-fitting.
+REFERENCES
+Jianmin Chen, Rajat Monga, Samy Bengio, and Rafal Jozefowicz. Revisiting distributed synchronous sgd. arXiv preprint arXiv:1604.00981, 2016.
+Minsik Cho, Ulrich Finkler, Sameer Kumar, David Kung, Vaibhav Saxena, and Dheeraj Sreedhar. Powerai ddl. arXiv preprint arXiv:1708.02188, 2017.
+Valeriu Codreanu, Damian Podareanu, and Vikram Saletore. Blog: Achieving deep learning training in less than 40 minutes on imagenet-1k with scale-out intel R xeonTM/xeon phiTM architectures. blog https://blog.surf.nl/en/imagenet-1k-training-on-intel-xeon-phi-in-less-than-40-minutes/, 2017.
+7
+
+Under review as a conference paper at ICLR 2018
+
+Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. Imagenet: A large-scale hierarchical image database. In Computer Vision and Pattern Recognition, 2009. CVPR 2009. IEEE Conference on, pp. 248­255. IEEE, 2009.
+Priya Goyal, Piotr Dollár, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch sgd: Training imagenet in 1 hour. arXiv preprint arXiv:1706.02677, 2017.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 770­778, 2016.
+Elad Hoffer, Itay Hubara, and Daniel Soudry. Train longer, generalize better: closing the generalization gap in large batch training of neural networks. arXiv preprint arXiv:1705.08741, 2017.
+Sergey Ioffe and Christian Szegedy. Batch normalization: accelerating deep network training by reducing internal covariate shift. arXiv preprint arXiv:1502.03167, 2015.
+Nitish Shirish Keskar, Dheevatsa Mudigere, Jorge Nocedal, Mikhail Smelyanskiy, and Ping Tak Peter Tang. On large-batch training for deep learning: Generalization gap and sharp minima. arXiv preprint arXiv:1609.04836, 2016.
+Diederik Kingma and Jimmy Ba. Adam: a method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Alex Krizhevsky. One weird trick for parallelizing convolutional neural networks. arXiv preprint arXiv:1404.5997, 2014.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural networks. In Advances in neural information processing systems NIPS-25, pp. 1097­1105, 2012.
+Jean Lafond, Nicolas Vasilache, and Léon Bottou. Diagonal rescaling for neural networks. arXiv preprint arXiv:1705.09319v1, 2017.
+Mu Li. Scaling Distributed Machine Learning with System and Algorithm Co-design. PhD thesis, CMU, 2017.
+Mu Li, Tong Zhang, Yuqiang Chen, and Alexander J Smola. Efficient mini-batch training for stochastic optimization. In Proceedings of the 20th ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 661­670. ACM, 2014.
+Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop, course: Neural networks for machine learning. University of Toronto, Tech. Rep, 2012.
+
+A APPENDIX: RESNET-50 TRAINING WITH LARGE BATCH - COMPARISON
+
+Table 6: Results comparison for ResNet-50 with large batch: top-1 accuracy%.
+
+Batch Size
+
+256 8K 16K 32K 64K
+
+Comments
+
+He et al. (2016)
+
+75.3 75.2 -- -- -- data augmentation, multi-crop
+
+Cho et al. (2017)
+
+-- 75.0 -- -- --
+
+--
+
+Codreanu et al. (2017) -- 75.2 -- -- --
+
+modified model
+
+Goyal et al. (2017)
+
+76.3 76.2 75.2 72.4 66.0
+
+heavy data augmentation
+
+LARS (min augmentation) 73.8 73.5 72.9 72.5 70.0 min augmentation, single test crop
+
+LARS (ext augmentation) 75.4 75.2 75.3 74.7 72.0
+
+in progress, may change
+
+8
+
+

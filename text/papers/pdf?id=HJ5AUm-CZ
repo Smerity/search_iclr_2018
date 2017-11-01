@@ -1,0 +1,701 @@
+Under review as a conference paper at ICLR 2018
+FEW-SHOT LEARNING WITH VARIATIONAL HOMOENCODERS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Few-shot learning of generative models typically falls into two philosophies: conditional models, trained to generate new elements conditioned on observations, and hierarchical Bayesian models, which frame conditioning as inference of latent variables shared by a class. We modify the Variational Autoencoder framework to marry these two approaches, learning a hierarchical Bayesian model by a novel training procedure in which observations are encoded and decoded into new elements from the same class. We call this a Variational Homoencoder (VHE) and apply it to Caltech 101 Silhouettes and the Omniglot dataset. On Omniglot, our hierarchical PixelCNN outperforms existing models on joint likelihood of the data set, and achieves state-of-the-art results on both one-shot generation and one-shot classification tasks. The VHE framework also applies naturally to richer latent structures such as factorial or hierarchical categories. We illustrate this by training models to separate character content from simple variations in drawing style, and to generalise the style of an alphabet to new characters.
+1 INTRODUCTION
+Data-efficient generalisation is possible only with strong inductive biases. In machine learning such biases can come from hand design, as in the parametrisation of a model, or can be the result of a meta-learning algorithm. Furthermore they may be task-specific, as in discriminative modelling, or may describe the world causally so as to be more naturally reused across many tasks.
+Recent work has approached one- and few-shot learning from all of these perspectives. Siamese Networks (Koch, 2015), Matching Networks (Vinyals et al., 2016), Prototypical Networks (Snell et al., 2017), MANNs (Santoro et al., 2016) and ARCs (Shyam et al., 2017) are all discriminatively trained for few-shot classification. Such models can achieve state-of-the-art performance at the task they were trained for, but provide no principled means for transferring knowledge to other tasks.
+Other work such as Rezende et al. (2016) has focused on conditional generative models, which take one or a few observations from a class as input, and output a distribution over new elements p(x|D). Models following this philosophy may be used as classifiers despite not being explicitly trained for this purpose, by comparing conditional likelihoods. They may also be used to generate full sets incrementally as p(X) = i p(xi|x1, . . . , xi-1), discussed in Generative Matching Networks (Bartunov & Vetrov, 2016). However, such models do not expose any latent representation of shared structure within a class, and the distributions they induce are a more natural fit to sequences than to sets as they typically lack exchangeability.
+Finally are hierarchical approaches which model shared structure through shared latent variables, as p(X) = c p(c) i p(xi|c)dc. For example, Lake et al. (2015) develop a compositional generative model of handwritten characters which, by explicitly modelling shared structure from pen strokes to alphabets, achieves human-level performance at a variety of tasks. Salakhutdinov et al. (2013) follow a similar Bayesian philosophy for a model with less explicit knowledge built in: a Hierarchical Dirichlet Process prior on top of a two layer Boltzmann Machine. Most recently, the Neural Statistician (Edwards & Storkey, 2016) uses amortised inference to support learning in a more expressive generative model.
+In this work we propose the Variational Homoencoder (VHE), aiming to combine several advantages of the models described above:
+1
+
+Under review as a conference paper at ICLR 2018
+
+Figure 1: Single step of gradient training in various models. A VAE treats all datapoints as independent, so only a single random element need be encoded and decoded per gradient step. In order to share a latent variable c across a set of elements X, a Neural Statistician feeds the set through both encoder and decoder networks each step. Instead, we bound the likelihood p(X) using only random subsamples D and x for encoding and decoding. Optionally, p(x|c) may be defined through a local latent variable z.
+1. Like conditional generative approaches, we train on a few-shot generation objective which matches how our model may be used at test time. However, by introducing an encoding cost, we simultaneously optimise a likelihood lower bound for a hierarchical generative model, in which structure shared across elements is made explicit by shared latent variables.
+2. Previous work (Edwards & Storkey, 2016) has learned hierarchical Bayesian models by applying Variational Autoencoders to sets, such as classes of images. However, their approach requires feeding full sets through the model per gradient step (see Figure 1), rendering it intractable to train on large classes. In practice, they avoid computational limits by sampling smaller sub-classes as training data. We instead optimise a likelihood bound for the complete dataset, while still constructing this bound by subsampling. This approach not only can improve generalisation, but also departs from previous work by extending to models with richer latent structure, for which the joint likelihood cannot be factorised.
+3. As with a Variational Autoencoder, the VHE objective includes both an encoding- and reconstruction- cost. However, sharing latent variables across an entire class reduces the encoding cost per element is significantly. This facilitates use of powerful autoregressive decoders, which otherwise often suffer from ignoring latent variables (Chen et al., 2016). We demonstrate the significance of this by applying a VHE to the Omniglot dataset. Using a PixelCNN decoder (Oord et al., 2016), our generative model is arguably the first with a general purpose architecture to both attain near human-level one-shot classification performance and produce high quality samples in one-shot generation.
+2 BACKGROUND
+2.1 VARIATIONAL AUTOENCODERS
+When dealing with latent variable models of the form p(x) = z p(z)p(x|z)dz, the integration is necessary for both learning and inference but is often intractable to compute in closed form. Variational Autoencoders (VAEs, Kingma & Welling (2013)) provide a method for learning such models by combining the variational inference objective with neural-network based approximate posterior inference. Specifically, a VAE comprises a generative network p(z)p(x|z) parametrised by , alongside a separate inference network q(z|x) parameterised by . These are trained jointly to maximise a single objective:
+
+LX (, ) =
+
+log p(x) - DKL q(z|x) p(z|x)
+
+xX
+
+= E log p(x|z) - DKL q(z|x) p(z)
+xX q(z|x)
+
+2
+
+(1) (2)
+
+Under review as a conference paper at ICLR 2018
+
+As can be seen from Equation 1, this objective LX is a lower bound on the total log likelihood of the dataset xX log p(x), while q(z|x) is trained to approximate the true posterior p(z|x) as accurately as possible. If it could match this distribution exactly then the bound would be tight so that the VAE objective equals the true log likelihood of the data. In practice, the resulting model is typically a compromise between two goals: pulling p towards a distribution that assigns high likelihood to the data, but also towards one which allows accurate inference by q. Equation 2 provides a formulation for the same objective which can be optimised stochastically, using Monte-Carlo integration to approximate the expectation.
+
+2.2 VARIATIONAL AUTOENCODERS OVER SETS
+
+The Neural Statistician (Edwards & Storkey, 2016) is a Variational Autoencoder in which each item to be encoded is itself a set, such as the set X(i) of all images with a particular class label i:
+
+X(i) = {x1(i), x(2i), · · · , xn(i)}
+
+(3)
+
+The generative model for complete classes, p(X), is described by introduction of a corresponding latent variable c. Given c, individual x  X are conditionally independent:
+
+p(X) = p(c) p(x|c)dc
+c xX
+
+(4)
+
+This functional form is justified by de Finetti's theorem under the assumption that elements within in each set X are exchangeable. The likelihood is again intractable to compute, but it can be bounded below via:
+
+log p(X)  LX = E
+
+log p(x|c) - DKL q(c|X) p(c)
+
+q(c|X) xX
+
+(5)
+
+3 VARIATIONAL HOMOENCODERS
+
+Unfortunately, calculating the variational lower bound for each class X requires evaluating both q(c|X) and p(X|c), meaning that the entire class must be passed through both networks for each gradient update. This can easily become intractable for classes with hundreds of examples. Indeed, previous work (Edwards & Storkey, 2016) ensures that datasets used for training are always of small size by instead maximising a likelihood lower-bound of randomly sampled subsets.
+In this work we replace the variational lower-bound in Equation 5 with a new objective, constructed via sub-sampled datasets of reduced size. We use a constrained variational distribution q(c|D), D  X for posterior inference and an unbiased stochastic approximation log p(x|c), x  X for the likelihood. In the following section we show that the resulting objective can be interpreted as a lower-bound on the log-likelihood of the data.
+This bound will typically be loose due to stochasticity in sampling D, and we view this as a regularization strategy: we aim to learn latent representations that are quickly inferable from a small number of instances, and the VHE objective is tailored for this purpose.
+
+3.1 THE RESAMPLING TRICK
+
+We would like to learn a generative model for sets X of the form
+
+p(X) = p(c) p(x|c)dc
+xX
+
+(6)
+
+We will refer our full dataset as a union of disjoint classes X = X1 X2 . . . Xn, and use X(x) to refer to the class Xi x. Using the standard consequent of Jensen's inequality, we can lower bound the log-likelihood of each dataset X using an arbitrary distribution q. In particular, we give q
+as a fixed function of arbitrary data.
+
+log p(X)  E log p(X|c) - DKL q(c|D) p(c) , D  X
+q(c|D)
+
+(7)
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Splitting up individual likelihoods, we may rewrite
+
+log p(X)  E
+
+log p(x|c) - DKL q(c|D) p(c) ,
+
+q(c|D) xX
+
+=
+xX
+
+E log p(x|c) -
+q(c|D)
+
+1 |X| DKL
+
+q(c|D)
+
+p(c)
+
+d=ef L(x; D, |X|),
+
+xX
+
+,
+
+D  X D  X D  X
+
+(8) (9) (10)
+
+Finally, we can replace the universal quantification with an expectation under any distribution of D (e.g. uniform sampling from X without replacement):
+
+log p(X)  E
+
+L(x; D, |X|) =
+
+E L(x; D, |X|)
+
+DX xX
+
+xX DX
+
+log p(X ) 
+
+E L(x; D, |X(x)|)
+
+xX DX(x)
+
+(11) (12)
+
+This formulation suggests a simple modification to the VAE training procedure, train both the encoder and decoder together. At each step we select an element x, use new resampled elements D  X(x) to construct our approximate posterior q(c|D), and rescale the encoding cost appropriately. In contrast to a Variational Autoencoder which uses an element's encoding to reconstruct itself,
+a Variational Homoencoder uses encoded elements to construct a new element from the same class.
+
+3.2 APPLICATION TO STRUCTURED DATASETS
+
+The above derivation applies to a dataset partitioned into disjoint classes X = X1 X2 . . . Xn, each with a corresponding latent variable ci. However, an analogous trick can be applied to datasets with richer categorical structure. In general, if we wish to learn a model for X in which each latent
+variable ci affects some arbitrary subset Xi of the data (where the Xi may overlap), we may still construct a lower bound of the form:
+
+log p(X )  E
+
+log p(x|c) - DKL Q(c|D) P (c)
+
+Q(c|D) xX
+
+(13)
+
+In particular, we may subsample a set Di  Xi to infer each latent variable ci, so that Q(c) = i qi(ci|Di). This leads to an analogous training procedure (Equation 14). Figure ?? illustrates
+how this framework may be applied to data with hierarchical or factorial category structure.
+
+log p(X ) 
+
+E
+
+xX
+
+Di Xi for each
+
+i:xXi
+
+E log p(x|c) -
+
+qi (ci |Di ) for each
+
+i:xXi
+
+1 |Xi| DKL
+
+qi(ci|Di)
+
+i:xXi
+
+p(ci)
+
+(14)
+
+Figure 2: Application of VHE framework to hierarchical (left) and factorial (right) models. Given an element x such that x  X1 and x  X2, an approximate posterior is constructed for the corresponding shared latent variables c1, c2 using subsampled sets D1  X1, D2  X2
+4
+
+Under review as a conference paper at ICLR 2018
+
+3.3 DISCUSSION
+POWERFUL DECODER MODELS
+As evident in Equation 9, the VHE objective also provides a formal motivation for KL rescaling in the variational objective (a commonly-used technique to increase utilisation of latent variables) by sharing these variables across many elements.
+For powerful decoder models, in which inference can be particularly challenging, a common failure mode of VAEs is to avoid the penalty for inaccurate inference by learning a decoder p(x|z) with no dependence on the latent space, allowing q to match the (now fixed) posterior exactly. This has been discussed in Chen et al. (2016), who suggest crippling the decoder to alleviate this problem.
+This failure mode is very plausible in a VAE for sets with a sufficiently powerful generative network, for example, if the inference network q is not able to reduce its approximation error DKL[q(c|D) p(c|D)] to below the total correlation of D. This could easily happen whenever |D| is too small, or the inference network q is too weak. Variational Homoencoders suggest a potential remedy to this, encouraging use of the latent space by reusing the same latent variables across a large set X. This allows a VHE to learn useful representations even with |D| = 1, while at the same time utilising a powerful decoder model such as a PixelCNN to achieve highly accurate density estimation.
+
+CONSTRAINED POSTERIOR APPROXIMATION
+
+In a VAE, use of a recognition network encourages learning of generative models whose structure
+permits accurate amortised inference. In a VHE, this recognition network takes only small subsets of a class as input, which additionally encourages that the true posterior p(c|X) can be well approximated from only a few examples of X. For a subset D  X, q(c|D) is implicitly trained to minimise the KL divergence from this posterior in expectation, over all possible classes X consistent with D. For a data-generating distribution pd we may equivalently describe the VHE objective (Eq. 12) as
+
+EE
+pd(D) pd(X|D)
+
+E
+xX
+
+log p(x)
+
+-
+
+1 |X| DKL
+
+q(c|D)
+
+p(c|X )
+
+Note that the variational gap on the right side of this equation is itself bounded by:
+
+(15)
+
+E DKL q(c|D) p(c|X)  DKL q(c|D) E p(c|X)  0
+
+pd (X |D)
+
+pd (X |D)
+
+(16)
+
+The left inequality is tightest when p(c|X) matches p(c|D) well across all X consistent with D, and exact only when these are equal. We view this aspect of the VHE loss as regulariser for constrained posterior approximation, encouraging models for which the posterior p(c|X) can be well determined by sampled subsets D  X. This reflects how we expect the model to be used at test time, and in practice we have found this `loose' bound to perform well in our experiments. It is also possible for this bound to be tightened by introducing an auxiliary inference network (see supplement). However, in our experiments so far, we have not yet found this to confer any additional benefit.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+4 EXPERIMENTAL RESULTS
+4.1 CLASS-LEVEL MODELS
+Sharing latent variables across large datasets allows us to use more powerful autoregressive decoders, producing sharper samples and achieving higher test likelihood. We demonstrate this by training a multilayer PixelCNN on the Omniglot dataset. Our model is inspired by the recently proposed PixelVAE (Gulrajani et al., 2016) with addition of a Spatial Transformer (Jaderberg et al., 2015) in the generative model. Each character class is associated with latent variable c, drawn from a learned PixelCNN prior. For each character x, a sampled affine transform tx is applied to this template and the result is used to condition a Gated PixelCNN (Oord et al., 2016). We use a CNN with BatchNorm (Ioffe & Szegedy, 2015) for q(t|x), and for q(c|D) we use a Spatial Transformer followed by a mean and a single convolution, outputting a diagonal Gaussian posterior.
+We train Variational Homoencoders on a random sample of 1200 Omniglot classes, as in Edwards & Storkey (2016); Santoro et al. (2016); Vinyals et al. (2016). Images are scaled to 28x28 pixels, dynamically binarised, and augmented by 8 transformations to produce new classes. We additionally use 20 small random affine transformations to create new instances within each class. All models were built in Torch 7 (Collobert et al., 2011) and optimised using Adam (Kingma & Welling, 2013).
+For comparison, we also trained several alternative models on the same dataset. In particular, we compare the performance of this model to one with a deconvolutional architecture (following Edwards & Storkey (2016)) trained for 300 epochs. For both architectures, we also test several other models using different objectives with the sample computational cost of training: a Neural Statistician trained on sampled subsets D  X with |D| = 5, and two intermediate objectives:
+
+Resample only: E
+DX
+
+E log p(x|c) -
+q(c|D)
+
+1 |D| DKL
+
+q(c|D)
+
+xX
+
+1
+
+Rescale only: E
+DX
+
+E log p(x|c) -
+q(c|D)
+
+|X| DKL
+
+q(c|D)
+
+xD
+
+p(c) p(c)
+
+(17) (18)
+
+To aid optimisation, we use 50 epochs to anneal the encoding cost and perform 5 independent training runs from which we select the model with the lowest training error. This was necessary to ensure a fair comparison with the Neural Statistician objective, which otherwise converges to a local optimum with q(c|D) = p(c). We additionally implemented `sample dropout' (Edwards & Storkey, 2016) but found that this did not affect results.
+
+Figure 3: Autoregressive Variational Homoencoder for Omniglot characters.
+
+Figure 4: One-shot same-class samples generated by our model. Cues were drawn at random from test data.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Table 1: Comparison of deep learning techniques for Omniglot classification
+
+Table 2: 5-shot, 20 way classification accuracy for various models
+
+Generative models, log p(X)
+
+Accuracy (20-way) 1-shot 5-shot
+
+Generative Matching Networks* 77.0%
+
+Neural Statistician
+
+93.2%
+
+Variational Homoencoder
+
+95.2%
+
+Discriminative models, log q(y|x, X, Y )
+
+91.0% 98.1% 98.8%
+
+Siamese Networks Matching Networks Prototypical Networks Attentive Recurrent Comparators
+
+88.1% 93.8% 96.0% 97.5%
+
+97.0% 98.7% 98.9%
+-
+
+*Uses train/test split from Lake et al. (2015)
+
+KL / nats* Accuracy
+
+Deconvolutional Architecture
+
+NS [6] Resample Rescale VHE
+
+31.34 25.74 477.65 452.47
+
+95.6% 94.0% 95.3% 95.6%
+
+PixelCNN Architecture
+
+NS Resample Rescale VHE
+
+14.90 0.22 506.48 268.37
+
+66.0% 4.9% 62.8% 98.8%
+
+*DKL q(c|D) p(c) , train set
+
+Table 1 shows the 20-way classification accuracy of VHEs trained on 1-shot and 5-shot objectives. Both networks are state-of-the-art amongst deep generative models, and competitive when compared to models discriminatively trained for classification. As shown in Figure 4, the same models can be used for generation of new instances in a class, producing samples which are sharp and identifiable.
+Table 3 compares the results of models trained using alternative objectives, both on a deconvolutional architecture and on the hierarchical PixelCNN architecture described. In the former case, all models yield similar classification performance. However, when using a more expressive PixelCNN decoder, the Neural Statistician objective learns to place very little information in the posterior q(c|D), which can be seen both in the samples (Figure 5) and classification performance. Our careful training suggests that this is not an optimisation difficulty but is core to the objective, as discussed in Chen et al. (2016). In this case, VHE improves generalisation by encouraging use of the latent space. While KL rescaling is a common technique used to achieve this, we find that when used alone it leads to overfitting that is equally harmful to classification performance.
+Because our goal is to model shared structure across images, we evaluate the joint log likelihood of entire character classes. From this perspective, a single element VAE will perform poorly as it treats all datapoints as independent, optimising a sum over log likelihoods for each element. By sharing latent variables across all elements of the same class, a VHE can improve upon this considerably.
+Most previous work which evaluates likelihood uses the train/test split of Burda et al. (2015). However, our most appropriate comparison is with Generative Matching Networks (Bartunov & Vetrov, 2016) as they also model dependencies within a class. We thus train a VHE under the same conditions as them, using the harder test split from Lake et al. (2015) with no data augmentation. We evaluate the joint log likelihood of full character classes from the test set, normalised by the number of elements, using importance weighting with k=500 samples from q(c|X). Table 4.1 compares these log likelihoods, with VHE achieving state-of-the-art. To make clear the contribution of shared latent variables, we also compare with a VAE model with the same architecture.
+
+Figure 5: 5-shot samples generated by each model (more in supplement). With a PixelCNN, architecture both NS and Resample underutilise the latent space and so produce unfaithful samples.
+7
+
+Under review as a conference paper at ICLR 2018
+
+Table 3: Joint log-likelihood of full Omniglot classes
+
+Class NLL / image
+
+Independent models DRAW [7] Conv DRAW [8] VLAE [3] VAE (same architecture as VHE)
+
+1 n
+
+log
+
+i p(xi)
+
+< 96.5 nats
+
+< 91.0 nats
+
+89.83 nats
+
+71.44 nats
+
+Conditional models
+
+1 n
+
+log
+
+i p(xi|x1:i-1)
+
+Generative Matching Networks [1] 62.42 nats1
+
+Shared-latent models
+
+1 n
+
+log
+
+Ep(c)
+
+i p(xi|c)
+
+Variational Homoencoder
+
+61.65 nats
+
+Figure 6: Conditional samples from a VHE trained on object silhouettes (see supplement).
+
+4.2 MODELLING RICHER CATEGORY STRUCTURE
+To demonstrate how the VHE framework may apply to models with richer category structure, we build both a hierarchical and a factorial VHE (see Figure 2) using simple modifications to the above architectures. For the hierarchical VHE, we extend the deconvolutional model with an extra latent layer a using the same encoder and decoder architecture as c. This is used to encode alphabet level structure for the Omniglot dataset, learning a generative model for alphabets of the form
+
+p(A) = p(a)
+
+p(ci|a)
+
+p(xij|ci, a)dcida
+
+Xi A
+
+xij Xi
+
+(19)
+
+Again, we train this model using a single objective, using separately resampled subsets Da and Dc to infer each latent variable (see supplement). We then test our model at both one-shot character generation and 5-shot alphabet generation, using samples from previously unseen alphabets. As shown in Figure 6, our single trained model is able to learn structure at both layers of abstraction.
+
+For the factorial VHE, we extend the PixelCNN model with a 20-dimensional Gaussian latent variable s, which is appended to c when conditioning the PixelCNN decoder. c is used to represent the character in an image and s to represent the style. We extend the Omniglot dataset by assigning each image to one of 30 randomly generated styles (independent of its character class) and recolouring it accordingly. Once trained, we can use the model to re-render characters in a new style, either sampled from the prior p(s) or inferred from a separate character using the encoder q(s|Ds). Figure 8 shows samples from two separate models for manipulating background colour and pen stroke.
+
+Figure 7: Conditional samples from both Figure 8: Characters rendered with new pen stroke
+
+character (top) and alphabet (bottom) levels (top) or background (bottom). Style may be sam-
+
+of the same hierarchical model.
+
+pled from the prior or inferred from another image.
+
+1We thank the authors of Bartunov & Vetrov (2016) for providing us with this comparison. 8
+
+Under review as a conference paper at ICLR 2018
+5 CONCLUSION
+We introduced the Variational Homoencoder: a deep generative model trained by a novel training procedure which resembles few-shot generation. This framework allows latent variables to be shared across large numbers of elements in the training set, encouraging them to be well utilised even with highly expressive decoder networks. We demonstrate this by training a hierarchical PixelCNN model of the Omniglot dataset, and show that our novel training objective is responsible for the state-of-theart results it achieves. This model is arguably the first which uses a general purpose architecture to both attain near human-level one-shot classification performance and produce high quality samples in one-shot generation. Furthermore, we show that the VHE framework may be naturally applied to models with richer latent structure. We highlight this by training a hierarchical model which generalises the style of an alphabet to produce new characters, and a factorial model which separates the content and drawing style of coloured character images.
+REFERENCES
+[1] Sergey Bartunov and Dmitry P Vetrov. Fast adaptation in generative models with generative matching networks. arXiv preprint arXiv:1612.02192, 2016.
+[2] Yuri Burda, Roger Grosse, and Ruslan Salakhutdinov. Importance weighted autoencoders. arXiv preprint arXiv:1509.00519, 2015.
+[3] Xi Chen, Diederik P Kingma, Tim Salimans, Yan Duan, Prafulla Dhariwal, John Schulman, Ilya Sutskever, and Pieter Abbeel. Variational lossy autoencoder. arXiv preprint arXiv:1611.02731, 2016.
+[4] R. Collobert, K. Kavukcuoglu, and C. Farabet. Torch7: A matlab-like environment for machine learning. In BigLearn, NIPS Workshop, 2011.
+[5] Marco F Cusumano-Towner and Vikash K Mansinghka. Aide: An algorithm for measuring the accuracy of probabilistic inference algorithms. arXiv preprint arXiv:1705.07224, 2017.
+[6] Harrison Edwards and Amos Storkey. Towards a neural statistician. arXiv preprint arXiv:1606.02185, 2016.
+[7] Karol Gregor, Ivo Danihelka, Alex Graves, Danilo Jimenez Rezende, and Daan Wierstra. Draw: A recurrent neural network for image generation. arXiv preprint arXiv:1502.04623, 2015.
+[8] Karol Gregor, Frederic Besse, Danilo Jimenez Rezende, Ivo Danihelka, and Daan Wierstra. Towards conceptual compression. In Advances In Neural Information Processing Systems, pp. 3549­3557, 2016.
+[9] Ishaan Gulrajani, Kundan Kumar, Faruk Ahmed, Adrien Ali Taiga, Francesco Visin, David Vazquez, and Aaron Courville. Pixelvae: A latent variable model for natural images. arXiv preprint arXiv:1611.05013, 2016.
+[10] Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. arXiv preprint arXiv:1502.03167, 2015.
+[11] Max Jaderberg, Karen Simonyan, Andrew Zisserman, et al. Spatial transformer networks. In Advances in Neural Information Processing Systems, pp. 2017­2025, 2015.
+[12] Diederik P Kingma and Max Welling. Auto-encoding variational bayes. arXiv preprint arXiv:1312.6114, 2013.
+[13] Gregory Koch. Siamese neural networks for one-shot image recognition. PhD thesis, University of Toronto, 2015.
+[14] Brenden M Lake, Ruslan Salakhutdinov, and Joshua B Tenenbaum. Human-level concept learning through probabilistic program induction. Science, 350(6266):1332­1338, 2015.
+9
+
+Under review as a conference paper at ICLR 2018
+[15] Aaron van den Oord, Nal Kalchbrenner, Oriol Vinyals, Lasse Espeholt, Alex Graves, and Koray Kavukcuoglu. Conditional image generation with pixelcnn decoders. arXiv preprint arXiv:1606.05328, 2016.
+[16] Danilo Rezende, Ivo Danihelka, Karol Gregor, Daan Wierstra, et al. One-shot generalization in deep generative models. In Proceedings of The 33rd International Conference on Machine Learning, pp. 1521­1529, 2016.
+[17] Ruslan Salakhutdinov, Joshua B Tenenbaum, and Antonio Torralba. Learning with hierarchicaldeep models. IEEE transactions on pattern analysis and machine intelligence, 35(8):1958­ 1971, 2013.
+[18] Tim Salimans, Diederik Kingma, and Max Welling. Markov chain monte carlo and variational inference: Bridging the gap. In Proceedings of the 32nd International Conference on Machine Learning (ICML-15), pp. 1218­1226, 2015.
+[19] Adam Santoro, Sergey Bartunov, Matthew Botvinick, Daan Wierstra, and Timothy Lillicrap. One-shot learning with memory-augmented neural networks. arXiv preprint arXiv:1605.06065, 2016.
+[20] Pranav Shyam, Shubham Gupta, and Ambedkar Dukkipati. Attentive recurrent comparators. arXiv preprint arXiv:1703.00767, 2017.
+[21] Jake Snell, Kevin Swersky, and Richard S Zemel. Prototypical networks for few-shot learning. arXiv preprint arXiv:1703.05175, 2017.
+[22] Oriol Vinyals, Charles Blundell, Tim Lillicrap, Daan Wierstra, et al. Matching networks for one shot learning. In Advances in Neural Information Processing Systems, pp. 3630­3638, 2016.
+10
+
+Under review as a conference paper at ICLR 2018
+6 SUPPLEMENTARY MATERIAL
+6.1 SIMPLE DISTRIBUTIONS
+To understand the behaviour of the VHE objective, we apply it to few-shot learning of simple 1D distributions. We create five toy datasets as follows, each split into 100 classes of 100 examples: Gaussian: Each class is Normal with fixed 2, and with µ drawn from a Gaussian hyperprior. Mixture of Gaussians: Each class is an even mixture of two Gaussians, with fixed 2, fixed separation, and location drawn from a Gaussian hyperprior. von Mises: Each class is von Mises with fixed , and with µ drawn from a Uniform hyperprior. Gamma: Each class is Gamma with fixed , and with  drawn from a Uniform hyperprior. Discrete: Each class is a subset of integers 1 to 8, either small (1-4), large (5-8), odd or even. We train models on each of these datasets using a simple architecture with a single latent variable c  Normal(0, 1). We use a generator p(x|c) containing one fully connected layer which outputs parameters of the true distribution type (Gaussian, Mixture of two Gaussians, etc), and for the inference network q(c|D) we constrain our architecture to a simple linear map and a mean operation (using learned embeddings for the Discrete dataset) with a Gaussian posterior. All models are built in Torch 7 (Collobert et al., 2011) and optimised using Adam (Kingma & Welling, 2013) for 200 epochs. To aid optimisation, we also use an additional 50 epochs to anneal the encoding cost, and perform 3 independent training runs from which we select the model with the lowest training error. We then test on two few-shot generalisation tasks: conditional generation of new examples, evaluated as test log-likelihood under the approximate posterior q(c|D), and classification. Finally, we use importance weighting to evaluate the average joint log-likelihood of an entire class under the generative model p. Results of these experiments are shown in Figure 9, and elucidate several properties of our objective:
+· A Variational Homoencoder matches or outperforms other tested models at both few-shot generation (by conditional log likelihood) and few-shot classification, when the input size |D| is sufficiently small.
+· As is common in a VAE framework, we find cases for which NS encodes no information in the posterior q(c|D). Our careful training suggests that this is not an optimisation difficulty but is core to the objective, as discussed in Chen et al. (2016). In these cases, VHE improves generalisation by encouraging use of the latent space. While KL rescaling is a standard technique to achieve this, we find that when used alone it leads to overfitting and poor conditional NLL.
+· Simultaneously, the VHE objective learns a hierarchical generative model p with good marginal likelihood. For sufficiently small |D| we find that this significantly improves upon the likelihood achieved by other objectives, including versus a single-element VAE (corresponding to NS with |D| = 1). However, when |D| is sufficiently large, the benefit of resampling is lost and the NS objective may achieve equal or better class likelihood. At |D| = |X| = 100, all objectives become equivalent.
+11
+
+Under review as a conference paper at ICLR 2018
+
+Figure 9: Comparison of models with shared architecture, trained by various objectives on synthetic datasets. |D| refers to the size of the encoder input during training. Note that some lines extend above the limit of the y-axis. Top row: |D|-shot generation loss - Ecq(c|D) log p(x |c); Second row: |D|-shot binary classification error, by minimising conditional NLL; Third row: Joint NLL of
+all elements in a class normalised by the number of elements, calculated by importance weighting on 200 samples from q(c|X); Bottom row: Mean encoded information DKL[q(c|D) p(c)];
+
+6.2 TIGHTENED VARIATIONAL BOUND
+
+The likelihood lower bound in the VHE objective may also be tightened by introduction of an auxiliary network r(D|c, X), trained to infer which subset D  X was sampled during the inference procedure. This meta-inference approach was introduced in Salimans et al. (2015) to develop stochastic variational posteriors using MCMC inference, and has recently been applied to approximate inference evaluation (Cusumano-Towner & Mansinghka, 2017). Applied to Equation 12, this yields a modified bound for the VHE objective
+
+log p(X ) 
+
+E
+
+xX
+
+q (D|X(x) ) q(c|D)
+
+log
+
+p(x|c)
+
+-
+
+1 |X(x)| log
+
+p(c)r(D|c, X(x)) q(D|X(x))q(c|D)
+
+(20)
+
+where q(D|X) describes the stochastic procedure for sampling D  X. We have experimented
+with a simple functional form r(D|c, X) = i r(di|c, X)  i f(c) · di , learning parameters  and embeddings {d : d  X }. However, we have so far found that this conferred no additional benefit over the loose bound used in our experiments.
+
+6.3 VARIATIONAL BOUND FOR HIERARCHICAL MODELS
+
+The resampling trick may be applied iteratively, to construct likelihood bounds over hierarchically organised data. Expanding on Equation 12, suppose that we have collection of datasets
+
+X = X1 X2 . . . XN
+
+(21)
+
+For example, each X might be a different alphabet whose latent description a generates many char-
+acter classes Xi, and for each of these a corresponding latent ci is used to generate many images xij. From this perspective, we would like to learn a generative model for alphabets X of the form
+
+p(X ) = p(a)
+
+p(c|a) p(x|c, a)dcda
+
+Xi X
+
+xXi
+
+(22)
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+Reapplying the same trick as before yields a bound taken over all elements x:
+
+log
+
+p(X)
+
+
+
+xX
+
+EDa X(x)
+Dc X(x)
+
+E
+qa (a|D1 )
+
+log
+
+p(x|c)
+
+-
+
+1 |X(x)| DKL
+
+qa(a|Da)
+
+qc (c|D2 ,a)
+
+p(a)
+
+-
+
+1 |X(x)| DKL
+
+qc(c|Dc, a)
+
+p(c|a)
+
+(23)
+
+This suggests an analogous hierachical resampling trick: Summing over every element x, we can bound the log likelihood of the full hierarchy by resampling subsets Dc, Da, etc. at each level
+to construct an approximate posterior. All networks are trained together by this single objective, sampling x, Da and Dc for each gradient step. Note that this procedure need only require passing
+sampled elements, rather than full classes, into the upper-level encoder qa.
+
+6.4 OMNIGLOT ARCHITECTURE
+
+6.5 PIXELCNN OMNIGLOT ARCHITECTURE
+
+6.5.1 METHODOLOGY
+
+Our architecture uses a 8x28x28 latent variable c, with a full architecture detailed below. For our classification experiments, we trained 5 models on each of the objectives (VHE, Rescale only, Resample only, NS). Occasionally we found instability in optimisation, causing sudden large increases in the training objective. When this happened, we halted and restarted training. All models were trained for 100 epochs on 1000 characters from the training set (the remaining 200 have been used as validation data for model selection). Finally, for each objective we selected the parameters achieving the best training error.
+
+Note that we did not optimise or select models based on classification performance, other than through our development of our model's architecture. However, we find that classification performance is well correlated the generative training objective, as can be seen in the full table of results.
+
+We perform classification by calculating the expected conditional likelihood under the variational
+
+posterior: Eq(c|D) p(x|c). This is approximated using 20 samples for the outer expectation, and
+
+importance
+
+sampling
+
+with
+
+k
+
+=
+
+10
+
+for
+
+the
+
+inner
+
+integral
+
+p(x|c)
+
+=
+
+Eq(t|x)
+
+p(t) q(t|x)
+
+p(x|c,
+
+t)
+
+To evaluate and compare log likelihood, we trained 5 more models with the same architecture, this time on the canonical 30-20 alphabet split of Lake et al. We did not augment our training data. Again, we split the background set into training data (25 alphabets) and validation data (5) but do not use the validation set in training or evaluation for our final results. We estimate the total class log likelihood by importance weighting, using k=20 importance samples of the class latent c and k=10 importance samples of the transformation latent t for each instance.
+
+13
+
+Under review as a conference paper at ICLR 2018 6.5.2 CONDITIONAL SAMPLES ON OMNIGLOT
+14
+
+Under review as a conference paper at ICLR 2018
+
+6.5.3 MODEL SPECIFICATION [d] denotes a dimension d tensor. {t} denotes a set with elements of type t. Posteriors q are Gaussian.
+
+P(C)
+A PixelCNN with autoregressive weights along only the spatial (not depth) dimensions of c. We use 2 layers of masked 64x3x3 convolutions, followed by a ReLU and two 8x1x1 convolutions corresponding to the mean and log variance of a Gaussian posterior for the following pixel.
+
+P(T) t: [16] Normal(0, 1)
+
+P(X--C,T)
+
+c: [8x28x28], t: [16]  x: [1x28x28]
+
+Input Operation
+
+Output
+
+t Linear
+
+t2: [6]
+
+c,t2 Spatial Transformer
+
+y1: [8x28x28]
+
+y1 64x3x3 Conv; Relu; BatchNorm y2: [64x28x28]
+
+y2 64x3x3 Conv; Relu; BatchNorm y3: [64x28x28]
+
+y3 64x3x3 Conv; Relu; BatchNorm y4: [64x28x28]
+
+y4 64x3x3 Conv; Relu; BatchNorm y5: [64x28x28]
+
+y5 64x3x3 Conv; Relu; BatchNorm y: [64x28x28]
+
+y PixelCNN
+
+x: [1x28x28]
+
+PixelCNN is gated by y, and is autoregressive along only the spatial (not depth) dimensions of c.
+
+We use 2 layers of masked 64x3x3 convolutions, followed by a ReLU, a 2x1x1 convolution and a
+
+softmax, corresponding to a Bernoulli distribution on the following pixel.
+
+Q(C--D)
+
+D: {[1x28x28]}  c: [8x28x28]
+
+Input Operation
+
+Output
+
+D STNq
+
+Y: {[1x28x28]}
+
+Y Mean
+
+y: [1x28x28]
+
+y 16x28x28 Conv mu: [8x28x28], logvar: [8x28x28]
+
+Q(T--X)
+
+x: [1x28x28]  t: [16] Input Operation x 32x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y1 32x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y2 32x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y3 32x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y4 32x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y5 Linear
+
+Output y1: [32x15x15] y2: [32x8x8] y3: [32x4x4] y4: [32x2x2] y5: [32x1x1] mu: [16], logvar: [16]
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+SPATIAL TRANSFORMER STNQ
+
+x: [1x28x28]  y: [1x28x28] Input Operation x 16x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y1 16x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y2 16x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y3 16x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y4 16x3x3 Conv; 2x2 Max Pooling; ReLU; BatchNorm y5 Linear x, y6 Spatial Transformer Network
+
+Output y1: [16x15x15] y2: [16x8x8] y3: [16x4x4] y4: [16x2x2] y5: [16x1x1] y6: [6] y: [1x28x28]
+
+6.6 HIERARCHICAL OMNIGLOT ARCHITECTURE
+We extend the same architecture described in Appendix B of (Edwards & Storkey, 2016), with only a simple modification: we introduce a new latent layer containing a 64-dimensional variable a, with a Gaussian prior. We give p(c|a) the same functional form as p(z|c), and give q(a|Da) the same functional form as q(c|Dc) using the shared encoder.
+
+Figure 10: 10-shot alphabet generation samples from the hierarchical model. 16
+
+Under review as a conference paper at ICLR 2018 6.7 CONDITIONAL SAMPLES ON SILHOUETTES DATASET We created a VHE using the sampled deconvolutional architecture as applied to omniglot, and trained it on the Caltech-101 Silhouettes dataset. 10 object classes were held out as test data, which we use to generate both 5-shot and 5-shot conditional samples.
+17
+
+

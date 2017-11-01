@@ -1,0 +1,2050 @@
+Under review as a conference paper at ICLR 2018
+LEARNING DEEP GENERATIVE MODELS OF GRAPHS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Graphs are fundamental data structures required to model many important realworld data, from knowledge graphs, physical and social interactions to molecules and proteins. In this paper, we study the problem of learning generative models of graphs from a dataset of graphs of interest. After learning, these models can be used to generate samples with similar properties as the ones in the dataset. Such models can be useful in a lot of applications, e.g. drug discovery and knowledge graph construction. The task of learning generative models of graphs, however, has its unique challenges. In particular, how to handle symmetries in graphs and ordering of its elements during the generation process are important issues. We propose a generic graph neural net based model that is capable of generating any arbitrary graph. We study its performance on a few graph generation tasks compared to baselines that exploit domain knowledge. We discuss potential issues and open problems for such generative models going forward.
+1 INTRODUCTION
+Graphs are natural representations of information in many problem domains. For example, relations between entities in knowledge graphs and social networks are well captured by graphs, and they are also good for modeling the physical world, e.g. molecular structure and the interactions between objects in physical systems. Thus, the ability to capture the distribution of a particular family of graphs has many applications. For instance, sampling from the graph model can lead to the discovery of new configurations that share same global properties as is, for example, required in drug discovery (Gómez-Bombarelli et al., 2016). Obtaining graph-structured semantic representations for natural language sentences (Kuhlmann & Oepen, 2016) requires the ability to model (conditional) distributions on graphs. Distributions on graphs can also provide priors for Bayesian structure learning of graphical models (Margaritis, 2003).
+Probabilistic models of graphs have been studied for a long time, from at least two perspectives. On one hand, there are random graph models that robustly assign probabilities to large classes of graphs (Erdos & Rényi, 1960; Barabási & Albert, 1999). These make strong independence assumptions and are designed to capture only certain graph properties, like degree distribution and diameter. While these are effective models of the distributions of graphs found in some domains, such as social networks, they are poor models of more richly structured graphs where small structural differences can be functionally significant, such as those encountered in chemistry or when representing the meaning of natural language sentences. As an alternative, a more expressive class of models makes use of graph grammars, which generalize devices from formal language theory so as to produce non-sequential structures (Rozenberg, 1997). Graph grammars are systems of rewrite rules that incrementally derive an output graph via a sequence of transformations of intermediate graphs.While symbolic graph grammars can be made stochastic or otherwise weighted using standard techniques (Droste & Gastin, 2007), from a learnability standpoint, two problems remain. First, inducing grammars from a set of unannotated graphs is nontrivial since formalism-appropriate derivation steps must be inferred and transformed into rules (Lautemann, 1988; Aguiñaga et al., 2016, for example). Second, as with linear output grammars, graph grammars make a hard distinction between what is in the language and what is excluded, making such models problematic for applications where it is inappropriate to assign 0 probability to certain graphs.
+1
+
+Under review as a conference paper at ICLR 2018
+In this work we develop an expressive model which makes no assumptions on the graphs and can therefore assign probabilities to any arbitrary graph.1 Our model generates graphs in a manner similar to graph grammars, where during the course of a derivation new structure (specifically, a new node or a new edge) is added to the existing graph, and where the probability of that addition event depends on the history of the graph derivation. To represent the graph during each step of the derivation, we use a representation based on graph-structured neural networks (graph nets). Recently there has been a surge of interest in graph nets for learning graph representations and solving graph prediction problems (Henaff et al., 2015; Duvenaud et al., 2015; Li et al., 2016; Battaglia et al., 2016; Kipf & Welling, 2016; Gilmer et al., 2017). These models are structured according to the graph being utilized, and are parameterized independent of graph sizes therefore invariant to isomorphism, providing a good match for our purposes.
+We evaluate our model by fitting graphs in three problem domains: (1) generating random graphs with certain common topological properties (e.g., cyclicity); (2) generating molecule graphs; and (3) conditional generation of parse trees. Our proposed model performs better than random graph models and LSTM baselines on (1) and (2) and is close to a LSTM sequence to sequence with attention model on (3). We also analyze the challenges our model is facing, e.g. the difficulty of learning and optimization, and discuss possible ways to make it better.
+2 RELATED WORK
+The earliest probabilistic model of graphs developed by Erdos & Rényi (1960) assumed an independent identical probability for each possible edge. This model leads to rich mathematical theory on random graphs, but it is too simplistic to model more complicated graphs that violate this i.i.d. assumption. Most of the more recent random graph models involve some form of "preferential attachment", for example in (Barabási & Albert, 1999) the more connections a node has, the more likely it will be connect to new nodes added to the graph. Another class of graph models aim to capture the small diameter and local clustering properties in graphs, like the small-world model (Watts & Strogatz, 1998). Such models usually just capture one property of the graphs we want to model and are not flexible enough to model a wide range of graphs. Leskovec et al. (2010) proposed the Kronecker graphs model which is capable of modeling multiple properties of graphs, but it still only has limited capacity to allow tractable mathematical analysis.
+There are a significant amount of work from the natural language processing and program synthesis communities on modeling the generation of trees. Socher et al. (2011) proposed a recursive neural network model to build parse trees for natural language and visual scenes. Maddison & Tarlow (2014) developed probabilistic models of parsed syntax trees for source code. Vinyals et al. (2015c) flattened a tree into a sequence and then modeled parse tree generation as a sequence to sequence task. Dyer et al. (2016) proposed recurrent neural network models capable of modeling any top-down transition-based parsing process for generating parse trees. Kusner et al. (2017) developed models for context-free grammars for generating SMILES string representations for molecule structures. Such tree models are very good at their task of generating trees, but they are incapable of generating more general graphs that contain more complicated loopy structures.
+Our graph generative model is based on a class of neural net models we call graph nets. Originally developed in Scarselli et al. (2009), a range of variants of such graph structured neural net models have been developed and applied to various graph problems more recently (Henaff et al., 2015; Li et al., 2016; Kipf & Welling, 2016; Battaglia et al., 2016; Gilmer et al., 2017). Such models learn representations of graphs, nodes and edges based on a propagation process which communicates information across a graph, and are invariant to graph isomorphism because of the graph size independent parameterization. We use these graph nets to learn representations for making various decisions in the graph generation process.
+1We may make the analogy to language modeling prior to the advent of RNN language models. On one hand, we had formal grammars that were expressive (e.g., various classes could capture the long range syntactic dependencies found in natural language), but they were brittle and hard to learn; on the other, we had n-gram models that were robust and easy to learn, but made naïve Markov assumptions. RNNs offered a way of making models more expressive without increasing fragility or making learning unreasonably difficult.
+2
+
+Under review as a conference paper at ICLR 2018
+
+Add node? (yes/no)
+
+Add edge? (yes/no)
+
+Pick node to connect to
+
+Add edge? (yes/no)
+
+Add node? (yes/no)
+
+Generation steps
+Figure 1: Depiction of the steps taken during the generation process.
+3 MODEL
+Our generative model of graphs is a sequential process which generates one node at a time and connects each node to the partial graph already generated by creating edges one by one.
+3.1 THE SEQUENTIAL GRAPH GENERATION PROCESS
+The actions by which our model generates graphs is illustrated in Figure 1 (for the formal presentation, refer to Algorithm 1 in Appendix A). Briefly, in this generative process, in each iteration we (1) sample whether to add a new node of a particular type or terminate; if a node type is chosen, (2) we add a node of this type to the graph and (3) check if any further edges are needed to connect the new node to the existing graph; if yes (4) we select a node in the graph and add an edge connecting the new node to the selected node. The algorithm goes back to step (3) and repeats until the model decides not to add another edge. Finally, the algorithm goes back to step (1) to add subsequent nodes.
+There are many different ways to tweak this generation process. For example, edges can be made directional or typed by jointly modeling the node selection process with type and direction random variables (in the molecule generation experiments below, we use typed nodes and edges). Additionally, constraints on certain structural aspects of graphs can be imposed such as forbidding self-loops or multiple edges between a pair of nodes.
+The graph generation process can be seen as a sequence of decisions, i.e., (1) add a new node or not (with probabilities provided by an faddnode module), (2) add a new edge or not (probabilities provided by faddedge), and (3) pick one node to connect to the new node (probabilities provided by fnodes). One example graph with corresponding decision sequence is shown in Figure 6 in the Appendix. Note that different ordering of the nodes and edges can lead to different decision sequences for the same graph, how to properly handle these orderings is therefore an important issue which we will discuss below.
+Once the graph is transformed into such a sequence of structure building actions, we can use a number of different generative models to model it. One obvious choice is to treat the sequences as sentences in natural language, and use conventional LSTM language models. We propose to use graph nets to model this sequential decision process instead. That is, we define the modules that provide probabilities for the structure building events (faddnode, faddedge and fnodes) in terms of graph nets. As graph nets make use of the structure of the graph to create representations of nodes and edges via an information propagation process, this parameterization will be more sensitive to the structures being constructed than might be possible in an LSTM-based action sequence model.
+3.2 PROPAGATION ON GRAPHS AND GRAPH REPRESENTATIONS
+For any graph G = (V, E), we associate a node embedding vector hv  RH with each node v  V . These vectors can be computed initially from node inputs, e.g. node type embeddings, and then propagated on the graph to aggregate information from the local neighborhood. The propagation process is an iterative process, in each round of propagation, a "message" vector is computed on each edge, and after all the messages are computed, each node collects all incoming messages and updates its own representation, as characterized in Eq. 1, 2 and 3, where fe and fn are mappings that can be parameterized as neural networks, xu,v is a feature vector for the edge (u, v), e.g. edge type embedding, muv is the message vector from u to v2, av is the aggregated incoming message for node v and hv is the new representation for node v after one round of propagation. A typical choice
+2Here we only considered messages along the edge direction muv for (u, v)  E, but it is also possible to consider the reverse information propagation as well mvu = fe(hu, hv), and make av =
+u:(u,v)E muv + u:(v,u)E muv, which is what we used in all experiments.
+3
+
+Under review as a conference paper at ICLR 2018
+
+for fe and fn is to use fully-connected neural nets for both, but fn can also be any recurrent neural network core like GRU or LSTM as well. In our experience LSTM and GRU cores perform similarly, we therefore use the simpler GRUs for fn throughout our experiments.
+
+muv = fe(hu, hv, xu,v) (u, v)  E, (1)
+
+av =
+
+muv v  V,
+
+u:(u,v)E
+
+(2)
+
+hv = fn (av, hv) v  V,
+
+(3)
+
+hG =
+
+hGv
+
+vV
+
+hG =
+
+gvG
+
+vV
+
+hGv
+
+(4) (5)
+
+Given a set of node embeddings hV = {h1, . . . , h|V |}, one round of propagation denoted as prop(hV , G) returns a set of transformed node embeddings hV which aggregates information from each node's neighbors (as specified by G). It does not change the graph structure. Multiple rounds of propagation, i.e. prop(prop(· · · (hV , G), · · · , G), can be used to aggregate information across a larger neighborhood.
+To compute a vector representation for the whole graph, we first map the node representations to a higher dimensional hvG = fm(hv), then these mapped vectors are summed together to obtain a single vector hG (Eq. 4). The dimensionality of hG is chosen to be higher than that of hv as the graph contains more information than individual nodes. A particularly useful variant of this aggregation module is to use a separate gating network which predicts gvG = (gm(hv)) for each node, where  is the logistic sigmoid function and gm is another mapping function, and computes hG as a gated sum (Eq. 5). Also the sum can be replaced with other reduce operators like mean or max. We use
+gated sum in all our experiments. We denote the aggregation operation across the graph without propagation as hG = R(hV , G).
+
+3.3 PROBABILITIES OF STRUCTURE BUILDING DECISIONS
+
+Our graph generative model defines a distribution over the sequence of graph generating decisions by defining a probability distribution over possible outcomes for each step. Each of the decision steps is modeled using one of the three modules defined according to the following equations:
+
+hV(T ) = prop(T )(hV , G) hG = R(hV(T ), G) faddnode(G) = softmax(fan(hG))
+
+(6)
+(7) (8)
+
+faddedge(G, v) = (fae(hG, hv(T ))) su = fs(h(uT ), h(vT )), u  V fnodes(G, v) = softmax(s)
+
+(9)
+(10) (11)
+
+(a) faddnode(G) In this module, we take an existing graph G as input, together with its node representations hV , to produce the parameters necessary to make the decision whether to terminate the algorithm or add another node (this will be probabilities for each node type if nodes are typed).
+To compute these probabilities, we first run T rounds of propagation to update node vectors, after which we compute a graph representation vector and predict an output from there through a standard MLP followed by softmax or logistic sigmoid. This process is formulated in Eq. 6, 7, 8. Here the superscript (T ) indicates the results after running the propagation T times. fan is a MLP that maps the graph representation vector hG to the action output space, here it is the probability (or a vector of probability values) of adding a new node (type) or terminating.
+After the predictions are made, the new node vectors h(VT ) are carried over to the next step, and the same carry-over is applied after each and any decision step. This makes the node vectors recurrent, across both the propagation steps and the different decision steps.
+(b) faddedge(G, v) This module is similar to (a), we only change the output module slightly as in Eq. 9 to get the probability of adding an edge to the newly created node v through a different MLP fae, after getting the graph representation vector hG.
+(c) fnodes(G, v) In this module, after T rounds of propagation, we compute a score for each node (Eq. 10), which is then passed through a softmax to be properly normalized (Eq. 11). fs maps node state pairs hu and hv to a score su for connecting u to the new node v, and p(y) is the output distribution over nodes. This can be extended to handle typed edges by making su a vector of scores same size as the number of edge types, and taking the softmax over all nodes and edge types.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Initializing Node States Whenever a new node is added to the graph, we need to initialize its state vector. If there are some inputs associated with the node, they can be used to get the initialization vector. We also aggregate across the graph to get a graph vector, and use it as an extra source of input for initialization. More concretely, the node state for a new node v is initialized as the following:
+
+hv = finit(Rinit(hV , G), xv).
+
+(12)
+
+Here xv is any input feature associated with the node, e.g. node type embeddings, and Rinit(hV , G) computes a graph representation, finit is an MLP. If not using Rinit(hV , G) as part of the input to the initialization module, nodes with the same input features added at different stages of the generation
+
+process will have the same initialization. Adding the graph vector fixes this issue.
+
+Conditional Generative Model The graph generative model described above can also be used to do conditional generation, where some input is used to condition the generation process. We only need to make a few minor changes to the model architecture, by making a few design decisions about where to add in the conditioning information.
+
+The conditioning information comes in the form of a vector, and then it can be added in one or
+more of the following modules: (1) the propagation process; (2) the output component for the three modules, i.e. in fn, fe and fs; (3) the node state initialization module finit. In our experiments, we use the conditioning information only in fn and finit. Standard techniques for improving conditioning like attention can also be used, where we can use the graph representation to compute a query vector.
+
+3.4 TRAINING AND EVALUATION
+
+Our graph generative model defines a joint distribution p(G, ) over graphs G and node and edge ordering  (corresponding to the derivation in a traditional graph grammar). When generating samples, both the graph itself and an ordering are generated by the model. For both training and evaluation, we are interested in the marginal p(G) = P(G) p(G, ). This marginal is, however, intractable to compute for moderately large graphs as it involves a sum over all possible permutations. To evaluate this marginal likelihood we therefore need to use either sampling or some approximation instead. One Monte-Carlo estimate is based on importance sampling, where
+
+p(G) =
+
+p(G, ) =
+
+q(
+
+|
+
+p(G, )
+
+G) q(
+
+|
+
+G)
+
+=
+
+Eq(|G)
+
+p(G, ) q( | G)
+
+.
+
+
+
+(13)
+
+Here q(|G) is any proposal distribution over permutations, and the estimate can be obtained by
+
+generating a few samples from q( | G) and then average p(G, )/q( | G) for the samples. The
+
+variance of this estimate is minimized when q( | G) = p( | G). When a fixed canonical ordering
+
+is available for any arbitrary G, we can use it to train and evaluate our model by taking q( | G) to
+
+be a delta function that puts all the probability on this canonical ordering. This choice of q, however,
+
+only gives us a lower bound on the true marginal likelihood as it does not have full support over the
+
+set of all permutations.
+
+In training, since direct optimization of log p(G) is intractable, we can therefore learn the joint distribution p(G, ) instead by maximizing the expected joint log-likelihood
+
+Epdata(G,)[log p(G, )] = Epdata(G)Epdata(|G)[log p(G, )].
+
+(14)
+
+Given a dataset of graphs, we can get samples from pdata(G) fairly easily, and we have the freedom to choose pdata(|G) for training. Since the maximizer of Eq. 14 is p(G, ) = pdata(G, ), to make the training process match the evaluation process, we can take pdata( | G) = q( | G). Training with such a pdata( | G) will drive the posterior of the model distribution p( | G) close to the proposal distribution q( | G), therefore improving the quality of our estimate of the marginal probability.
+
+Ordering is an important issue for our graph model, in the experiments we always use a fixed ordering or uniform random ordering for training, and leave the potentially better solution of learning an ordering to future work. Interested readers can also refer to (Leskovec et al., 2010; Vinyals et al., 2015a) for discussions of similar ordering issues from different angles.
+
+4 EXPERIMENTS
+We study the properties and performance of different graph generation models and odering strategies on three different tasks. More experiment results and detailed settings are included in Appendix B.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+Negative Log-Likelihood Negative Log-Likelihood Negative Log-Likelihood
+
+50
+
+Cycles Graph Model
+
+45 LSTM
+
+40
+
+35
+
+30
+
+25
+
+20
+
+0.00
+
+0.25
+
+0.50Tra0.i7n5ing1.I0t0era1.t2io5ns1.50
+
+1.75
+
+2.00
+1e5
+
+50 48
+
+Trees Graph Model LSTM
+
+46
+
+44
+
+42
+
+40
+
+38
+
+36
+
+0.00
+
+0.25
+
+0.50Tra0.i7n5ing1.I0t0era1.t2io5ns1.50
+
+1.75
+
+2.00
+1e5
+
+60
+
+Barabasi-Albert Graphs Graph Model
+
+58 LSTM
+
+56
+
+54
+
+52
+
+50
+
+48
+
+0.00
+
+0.25
+
+0.50Tra0.i7n5ing1.I0t0era1.t2io5ns1.50
+
+1.75
+
+2.00
+1e5
+
+Figure 2: Training curves for the graph model and LSTM model on three sets.
+
+Dataset
+Cycles Trees Barabasi­Albert Graphs
+
+Graph Model
+84.4% 96.6% 0.0013
+
+LSTM
+48.5% 30.2% 0.0537
+
+Erdos­Rényi Model
+0.0% 0.3% 0.3715
+
+Table 1: Percentage of valid samples for three models on cycles and trees datasets, and the KLdivergence between the degree distributions of samples and data for Barabasi­Albert graphs.
+
+4.1 GENERATION OF GRAPHS WITH CERTAIN TOPOLOGICAL PROPERTIES
+
+In the first experiment, we train graph generative models on three sets of synthetic undirected graphs: (1) cycles, (2) trees, and (3) graphs generated by the Barabasi­Albert model (Barabási & Albert, 1999), which is a good model for power-law degree distribution. We generate data on the fly during training, all cycles and trees have between 10 to 20 nodes, and the Barabasi­Albert model is set to generate graphs of 15 nodes and each node is connected to 2 existing nodes when added to the graph.
+
+For comparison, we contast our model against the Erdos & Rényi (1960) random graph model and a LSTM baseline. We estimate the edge probability parameter p in the Erdos­Rényi model using maximum likelihood. For the LSTM model, we sequentialized the decision sequences (see Figure 6 for an example) used by the graph model and trained LSTM language models on them. During training, for each graph we uniformly randomly permute the orderings of the nodes and order the edges by node indices, and then present the permuted graph to the graph model and the LSTM model. In experiments on all three sets, we used a graph model with node state dimensionality of 16 and set the number of propagation steps T = 2, and the LSTM model has a hidden state size of 64. The two models have roughly the same number of parameters (LSTM 36k, graph model 32k).
+
+The training curves plotting - log p(G, ) with G,  sampled from the training distribution, comparing the graph model and the LSTM model, are shown in Figure 2. From these curves we can clearly see that the graph models train faster and have better asymptotic performance as well.
+
+0.40 0.35
+
+Barabasi-Albert Graphs Ground Truth Graph Model
+
+0.30 LSTM
+
+0.25 Erdos Renyi
+
+0.20
+
+Since our graphs have topological properties, we can also
+
+0.15
+
+evaluate the samples of these models and see how well
+
+0.10
+
+they align with these properties. We generated 10,000
+
+0.05
+
+samples from each model. For cycles and trees, we eval-
+
+0.00 0 2 4 6 8 10 12 14
+
+uate what percentage of samples are actually cycles or
+
+trees. For graphs generated by the Barabasi­Albert model, Figure 3: Degree histogram for samples
+
+we compute the node degree distribution. The results are generated by models trained on Barabasi­
+
+shown in Table 1 and Figure 3. Again we can see that the Albert Graphs. The histogram labeled
+
+proposed graph model has the capability of matching the "Ground Truth" shows the data distribu-
+
+training data well in terms of all these metrics. Note that tion estimated from 10,000 examples.
+
+we used the same graph model on three different sets of
+
+graphs, and the model learns to adapt to the data.
+
+Here the success of the graph model compared to the LSTM baseline can be partly attributed to the ability to refer to specific nodes in a graph. The ability to do this inevitably requires keeping track of a varying set of objects and then pointing to them, which is non-trivial for a LSTM to do. Pointer
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Model
+LSTM LSTM LSTM LSTM Graph Graph
+
+Gen.Seq
+SMILES SMILES
+Graph Graph Graph Graph
+
+Ordering
+Fixed Random
+Fixed Random
+Fixed Random
+
+N
+1 < 100
+1 O(n!)
+1 O(n!)
+
+NLL
+21.48 19.99 22.06 64.72 20.55 58.36
+
+%valid
+93.59 93.48 85.16 89.38 97.52 95.98
+
+%valid and novel
+81.27 83.95 80.14 89.26 90.01 95.54
+
+Table 2: Results on the molecule generation task. N is the number of permutations for each molecule the model is trained on. Typically the number of different SMILES strings for each molecule < 100.
+
+networks (Vinyals et al., 2015b) can be used to handle the pointers, but building a varying set of objects is challenging in the first place, and the graph model provides a way to do it.
+
+4.2 MOLECULE GENERATION
+In the second experiment, we train graph generative models for the task of molecule generation. Recently, there has been a number of papers tackling this problem by using RNN language models on SMILES string representations of molecules (Gómez-Bombarelli et al., 2016; Segler et al., 2017; Bjerrum & Threlfall, 2017). An example of a molecule and its corresponding SMILES string are Figure 4: NNc1nncc(O)n1 shown in Figure 4. Kusner et al. (2017) took one step further and used context free grammar to model the SMILES strings. However, inherently molecules are graph structured objects where it is possible to have cycles.
+We used the ChEMBL database (the latest version, 23) for this study; previous versions of ChEMBL were also used in (Segler et al., 2017; Olivecrona et al., 2017) for molecule generation. We filtered the database and chose to model molecules with at most 20 heavy atoms. This resulted in a training / validation / testing split of 130,830 / 26,166 / 104,664 examples each. The chemical toolkit RDKit (2006) is used to convert between the SMILES strings and the graph representation of the molecules. Both the nodes and the edges in molecule graphs are typed. All the model hyperparameters are tuned on the validation set, number of propagation steps T is chosen from {1, 2}.
+We compare the graph model with baseline LSTM language models trained on the SMILES strings as well as the graph generating sequences used by the graph model. RDKit can produce canonical SMILES representations for each molecule with associated edge ordering, we therefore train the models using these canonicalized representations. We also trained these models with permuted ordering. For the graph model, we randomly permute the node ordering and change the edge ordering correspondingly, for the LSTM on SMILES, we first convert the SMILES string into a graph representation, permute the node ordering and then convert back to a SMILES string without canonicalization, similar to (Bjerrum, 2017).
+We evaluate the negative log-likelihood for all models with the canonical ordering on the test set. We also generate 100,000 samples from each model and evaluate how many of them are valid well-formatted molecule representations and how many of the generated samples are not already seen in the training set following (Segler et al., 2017; Olivecrona et al., 2017). The results are shown in Table 2, which also lists the type of graph generating sequence and the ordering the models are trained on. Note that the models trained with random ordering are not tailored to the canonical ordering used in evaluation. In Appendix B.1, we show the distribution of a few chemical metrics for the generated samples to further assess the their quality. The LSTM on SMILES strings has a slight edge in terms of likelihood evaluated under canonical ordering (which is domain specific), but the graph model generates significantly more valid and novel samples. It is also interesting that the LSTM model trained with random ordering improves performance on canonical ordering, this is probably related to overfitting. Lastly, when compared using the genaric graph generation decision sequence, the Graph architecture outperforms LSTM in NLL as well.
+It is intractable to estimate the marginal likelihood p(G) =  p(G, ) for large molecules. However, for small molecules this is possible. We did the enumeration and evaluated the 6 models on small molecules with no more than 6 nodes. As we evaluate, we compare the negative log-likelihood we
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Model
+LSTM LSTM LSTM LSTM Graph Graph
+
+Gen.Seq
+SMILES SMILES
+Graph Graph Graph Graph
+
+Ordering
+Fixed Random
+Fixed Random
+Fixed Random
+
+N
+1 < 100
+1 O(n!)
+1 O(n!)
+
+Fixed Ordering
+17.28 15.95 16.79 20.82 16.19 20.18
+
+Best Ordering
+15.98 15.76 16.35 19.07 15.75 18.56
+
+Marginal
+15.90 15.67 16.26 16.11 15.64 15.32
+
+Table 3: Negative log-likelihood evaluation on small molecules with no more than 6 nodes.
+
+Random Order Fixed Order
+
+O C
+C
+
+Step 5
+C C
+
+C C
+
+CN C
+Step 5
+
+O C
+C
+
+C C Br
+
+C C
+C
+
+Step 15
+
+CC C
+C
+
+C
+
+CC C
+
+C
+
+C N
+
+O
+
+Step 15
+
+C C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+Step 25
+
+CC C
+C Cl
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+Step 25
+
+C C
+
+C C
+CC
+
+C
+
+N CO
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+Final Sample
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+Final Sample
+
+Figure 5: Visualization of the molecule generation processes for graph model trained with fixed and random ordering. Solid lines represent single bonds, and dashed lines represent double bounds.
+
+got with the fixed ordering and the best possible ordering, as well as the true marginal, the results are shown in Table 3. On these small molecules, the graph model trained with random ordering has better marginal likelihood, and surprisingly for the models trained with fixed ordering, the canonical ordering they are trained on are not always the best ordering, which suggests that there are big potential for actually learning an ordering.
+Figure 5 shows a visualization of the molecule generation processes for the graph model. The model trained with canonical ordering learns to generate nodes and immediately connect it to the latest part of the generated graph, while the model trained with random ordering took a completely different approach by generating pieces first and then connect them together at the end.
+
+4.3 PARSE TREE GENERATION
+In the last experiment, we look at a conditional graph generation task - generating parse trees given an input natural language sentence. We took the Wall Street Journal dataset with sequentialized parse trees used in (Vinyals et al., 2015c), and trained LSTM sequence to sequence models with attention as the baselines on both the sequentialized trees as well as on the decision sequences used by the graph model. In the dataset the parse trees are sequentialized following a top-down depth-first traversal ordering, we therefore used this ordering to train our graph model as well. Besides this, we also conducted experiments using the breadth-first traversal ordering. We changed our graph model slightly and replaced the loop for generating edges to a single step that picks one node as the parent for each new node to adapt to the tree structure. This shortens the decision sequence for the graph model, although the flattened parse tree sequence the LSTM uses is still shorter. We also employed an attention mechanism to get better conditioning information as for the sequence to sequence model.
+Table 4 shows the perplexity results of different models on this task. Since the length of the decision sequences for the graph model and sequentialized trees are different, we normalized the log-likelihood of all models using the length of the flattened parse trees to make them comparable. To measure sample quality we used another metric that checks if the generated parse tree exactly matches the ground truth tree. From these results we can see that the LSTM on sequentialized trees is better on both metrics, but the graph model does better than the LSTM trained on the same and more generic
+
+8
+
+Under review as a conference paper at ICLR 2018
+
+Model
+LSTM LSTM LSTM LSTM Graph Graph
+
+Gen.Seq
+Sequentialized Tree Sequentialized Tree
+Graph Graph Graph Graph
+
+Ordering
+Depth-First Breadth-First Depth-First Breadth-First Depth-First Breadth-First
+
+Perplexity
+1.114 1.187 1.164 1.428 1.124 1.238
+
+%Correct
+31.1 28.3 27.5 0.0 28.7 21.5
+
+Table 4: Parse tree generation results, evaluated on the Eval set.
+
+graph generating decision sequences, which is compatible with what we observed in the molecule generation experiment.
+One important issue for the graph model is that it relies on the propagation process to communicate information on the graph structure, and during training we only run propagation for a fixed T steps, and in this case T = 2. Therefore after a change to the tree structure, it is not possible for other remote parts to be aware of this change in such a small number of propagation steps. Increasing T can make information flow further on the graph, however the more propagation steps we use the slower the graph model would become, and more difficult it would be to train them. For this task, a tree-structured model like R3NN (Parisotto et al., 2016) may be a better fit which can propagate information on the whole tree by doing one bottom-up and one top-down pass in each iteration. On the other hand, the graph model is modeling a longer sequence than the sequentialized tree sequence, and the graph structure is constantly changing therefore so as the model structure, which makes training of such graph models to be considerably harder than LSTMs.
+
+5 DISCUSSIONS AND FUTURE DIRECTIONS
+The graph model in the proposed form is a powerful model capable of generating arbitrary graphs. However, as we have seen in the experiments and the analysis, there are still a number of challenges facing these models. Here we discuss a few of these challenges and possible solutions going forward.
+Ordering Ordering of nodes and edges is critical for both learning and evaluation. In the experiments we always used predefined distribution over orderings. However, it may be possible to learn an ordering of nodes and edges by treating the ordering  as a latent variable, this is an interesting direction to explore in the future.
+Long Sequences The generation process used by the graph model is typically a long sequence of decisions. If other forms of sequentializing the graph is available, e.g. SMILES strings or flattened parse trees, then such sequences are typically 2-3x shorter. This is a significant disadvantage for the graph model, it not only makes it harder to get the likelihood right, but also makes training more difficult. To alleviate this problem we can tweak the graph model to be more tied to the problem domain, and reduce multiple decision steps and loops to single steps.
+Dependence on T The graph nets use a fixed T propagation steps to propagate information on the graph. Large graphs require large T s to have sufficient information flow, however, this would also limit the scalability of these models. To solve this problem, we may use models that sequentially sweep over edges, like (Parisotto et al., 2016), or come up with ways to subsample the graph.
+Difficulty in Training We have found that training such graph models is more difficult than training typical LSTM models. The sequence these models are trained on are really long, but also the model structure is constantly changing, which leads to various scaling issues and only adds to the difficulty. We found lowering the learning rate can solve a lot of the instability problem, but more satisfying solutions may be obtained by tweaking the model architecture.
+
+6 CONCLUSION
+In this paper, we proposed a powerful deep generative model capable of generating arbitrary graphs through a sequential process. We studied its properties on a few graph generation problems. This model has shown great promise and has unique advantages over standard LSTM models. We hope that our results can spur further research in this direction to obtain better generative models of graphs.
+
+9
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Salvador Aguiñaga, Rodrigo Palacios, David Chiang, and Tim Weninger. Growing graphs from hyperedge replacement graph grammars. In Proc. CIKM, 2016.
+Albert-László Barabási and Réka Albert. Emergence of scaling in random networks. science, 286 (5439):509­512, 1999.
+Peter Battaglia, Razvan Pascanu, Matthew Lai, Danilo Jimenez Rezende, et al. Interaction networks for learning about objects, relations and physics. 2016.
+Esben Jannik Bjerrum. Smiles enumeration as data augmentation for neural network modeling of molecules. arXiv preprint arXiv:1703.07076, 2017.
+Esben Jannik Bjerrum and Richard Threlfall. Molecular generation with recurrent neural networks (rnns). CoRR, 2017.
+Manfred Droste and Paul Gastin. Weighted automata and weighted logics. Theoretical Computer Science, 380(1­2):69­86, 2007.
+David K Duvenaud, Dougal Maclaurin, Jorge Iparraguirre, Rafael Bombarell, Timothy Hirzel, Alán Aspuru-Guzik, and Ryan P Adams. Convolutional networks on graphs for learning molecular fingerprints. In Advances in neural information processing systems, pp. 2224­2232, 2015.
+Chris Dyer, Adhiguna Kuncoro, Miguel Ballesteros, and Noah A Smith. Recurrent neural network grammars. arXiv preprint arXiv:1602.07776, 2016.
+Paul Erdos and Alfréd Rényi. On the evolution of random graphs. Publ. Math. Inst. Hung. Acad. Sci, 5(1):17­60, 1960.
+Justin Gilmer, Samuel S Schoenholz, Patrick F Riley, Oriol Vinyals, and George E Dahl. Neural message passing for quantum chemistry. arXiv preprint arXiv:1704.01212, 2017.
+Rafael Gómez-Bombarelli, David Duvenaud, José Miguel Hernández-Lobato, Jorge AguileraIparraguirre, Timothy D Hirzel, Ryan P Adams, and Alán Aspuru-Guzik. Automatic chemical design using a data-driven continuous representation of molecules. arXiv preprint arXiv:1610.02415, 2016.
+Mikael Henaff, Joan Bruna, and Yann LeCun. Deep convolutional networks on graph-structured data. arXiv preprint arXiv:1506.05163, 2015.
+Thomas N Kipf and Max Welling. Semi-supervised classification with graph convolutional networks. arXiv preprint arXiv:1609.02907, 2016.
+Marco Kuhlmann and Stephan Oepen. Towards a catalogue of linguistic graph banks. Computational Linguistics, 42(4):819­827, 2016.
+Matt J Kusner, Brooks Paige, and José Miguel Hernández-Lobato. Grammar variational autoencoder. arXiv preprint arXiv:1703.01925, 2017.
+Clemens Lautemann. Decomposition trees: Structured graph representation and efficient algorithms. In Proc. of the 13th Colloquium on Trees in Algebra and Programming, 1988.
+Jure Leskovec, Deepayan Chakrabarti, Jon Kleinberg, Christos Faloutsos, and Zoubin Ghahramani. Kronecker graphs: An approach to modeling networks. Journal of Machine Learning Research, 11 (Feb):985­1042, 2010.
+Yujia Li, Daniel Tarlow, Marc Brockschmidt, and Richard Zemel. Gated graph sequence neural networks. 2016.
+Chris Maddison and Daniel Tarlow. Structured generative models of natural source code. In Proceedings of the 31st International Conference on Machine Learning (ICML-14), pp. 649­657, 2014.
+10
+
+Under review as a conference paper at ICLR 2018
+Dimitris Margaritis. Learning Bayesian Network Model Structure from Data. PhD thesis, Carnegie Mellon University, Pittsburgh, 5 2003.
+Marcus Olivecrona, Thomas Blaschke, Ola Engkvist, and Hongming Chen. Molecular de novo design through deep reinforcement learning. arXiv preprint arXiv:1704.07555, 2017.
+Emilio Parisotto, Abdel-rahman Mohamed, Rishabh Singh, Lihong Li, Dengyong Zhou, and Pushmeet Kohli. Neuro-symbolic program synthesis. arXiv preprint arXiv:1611.01855, 2016.
+RDKit. Rdkit: Open-source cheminformatics. 2006. URL http://www.rdkit.org. Grzegorz Rozenberg. Handbook of Graph Grammars and Computing by Graph Transformation:
+Volume 1 Foundations. 1997. Franco Scarselli, Marco Gori, Ah Chung Tsoi, Markus Hagenbuchner, and Gabriele Monfardini. The
+graph neural network model. IEEE Transactions on Neural Networks, 20(1):61­80, 2009. Marwin HS Segler, Thierry Kogej, Christian Tyrchan, and Mark P Waller. Generating fo-
+cussed molecule libraries for drug discovery with recurrent neural networks. arXiv preprint arXiv:1701.01329, 2017. Richard Socher, Cliff C Lin, Chris Manning, and Andrew Y Ng. Parsing natural scenes and natural language with recursive neural networks. In Proceedings of the 28th international conference on machine learning (ICML-11), pp. 129­136, 2011. Oriol Vinyals, Samy Bengio, and Manjunath Kudlur. Order matters: Sequence to sequence for sets. arXiv preprint arXiv:1511.06391, 2015a. Oriol Vinyals, Meire Fortunato, and Navdeep Jaitly. Pointer networks. In Advances in Neural Information Processing Systems, pp. 2692­2700, 2015b. Oriol Vinyals, Lukasz Kaiser, Terry Koo, Slav Petrov, Ilya Sutskever, and Geoffrey Hinton. Grammar as a foreign language. In Advances in Neural Information Processing Systems, pp. 2773­2781, 2015c. Duncan J Watts and Steven H Strogatz. Collective dynamics of `small-world'networks. nature, 393 (6684):440­442, 1998.
+11
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 Generative Process for Graphs
+
+1: E0 = , V0 = , G0 = (V0, E0), t = 1 2: patddnode  faddnode(Gt-1) 3: vt  Categorical(patddnode) 4: while vt = STOP do
+5: Vt  Vt-1  {vt}
+6: Et,0  Et-1, i  1
+
+Initial graph is empty Probabilities of initial node type and STOP
+Sample initial node type or STOP
+Incorporate node vt
+
+7: pat,didedge  faddedge((Vt, Et,0), vt)
+
+Probability of adding an edge to vt
+
+8: zt,i  Bernoulli(pta,didedge)
+
+Sample whether to add an edge to vt
+
+9: while zt,i = 1 do
+
+Add edges pointing to new node vt
+
+10: ptn,oides  fnodes((Vt, Et,i-1), vt)
+
+Probabilities of selecting each node in Vt
+
+11: vt,i  Categorical(ptn,oides)
+
+12: Et,i  Et,i-1  {(vt,i, vt)} 13: i  i + 1 14: pat,didedge  faddedge((Vt, Et,i-1), vt)
+
+Incorporate edge vt - vt,i Probability of adding another edge
+
+15: zt,i  Bernoulli(pta,didedge)
+
+Sample whether to add another edge to vt
+
+16: end while
+
+17: Et  Et,i-1 18: Gt  (Vt, Et) 19: t  t + 1
+
+20: patddnode  faddnode(Gt-1) 21: vt  Categorical(ptaddnode) 22: end while
+
+Probabilities of each node type and STOP for next node Sample next node type or STOP
+
+23: return Gt
+
+A GRAPH GENERATION PROCESS
+The graph generation process is presented in Algorithm 1 for reference.
+0 2
+1 <add node (node 0)>
+<don't add edge> <add node (node 1)>
+<add edge> <pick node 0 (edge (0, 1))> <don't add edge> <add node (node 2)> <add edge> <pick node 0 (edge (0, 2))> <add edge> <pick node 1 (edge (1, 2))> <don't add edge> <don't add node>
+Figure 6: An example graph and one corresponding decision sequence.
+Figure 6 shows an example graph. Here the graph contains three nodes {0, 1, 2}, and three edges {(0, 1), (0, 2), (1, 2)}. Consider generating nodes in the order of 0, 1 and 2, and generating edge (0, 2) before (1, 2), then the corresponding decision sequence is the one shown in the figure. Here the decisions are indented to clearly show the two loop levels.
+12
+
+Under review as a conference paper at ICLR 2018
+B MORE EXPERIMENT DETAILS AND RESULTS
+In this section we describe more detailed experiment setup and present more experiment results not included in the main paper.
+B.1 MOLECULE GENERATION
+Model Details Our graph model has a node state dimensionality of 128, the LSTM models have hidden size of 512. The two models have roughly the same number of parameters (around 2 million). Our graph model uses GRU cores as fn, we have tried LSTMs as well but they perform similarly as GRUs. We have also tried GRUs for the baselines, but LSTM models work slightly better.
+Distribution of chemical properties for samples Here we examine the distribution of chemical metrics for the valid samples generated from trained models. For this study we chose a range of chemical metrics available from RDKit (2006), and computed the metrics for 100,000 samples generated from each model. For reference, we also computed the same metrics for the training set, and compare the sample metrics with the training set metrics.
+For each metric, we create a histogram to show its distribution across the samples, and compare the histogram to the histogram on the training set by computing the KL divergence between them. The results are shown in Figure 7. Note that all models are able to match the training distribution on these metrics quite well, notably the graph model and LSTM model trained on permuted node and edge sequences has a bias towards generating molecules with higher SA scores which is a measure of the ease of synthesizing the molecules. This is probably due to the fact that these models are trained to generate molecular graphs in arbitrary order (as apposed to following the canonical order that makes sense chemically), therefore more likely to generate things that are harder to synthesize. However, this can be overcome if we train with RL to optimize for this metric. The graph model trained with permuted nodes and edges also has a slight bias toward generating larger molecules with more atoms and bonds.
+We also note that the graph and LSTM models trained on permuted nodes and edge sequences can still be improved as they are not even overfitting after 1 million training steps. This is because with node and edge permutation, these models see on the order of n! times more data than the other models. Given more training time these models can improve further.
+Changing the bias for faddnode and faddedge Since our graph generation model is very modular, it is possible to tweak the model after it has been trained. For example, we can tweak a single bias parameter in faddnode and faddedge to increase or decrease the graph size and edge density.
+In Figure 8 (a) we show the shift in the distribution of number of atoms for the samples when changing the faddnode bias. As the bias changes, the samples change accordingly while the model is still able to generate a high percentage of valid samples.
+Figure 8 (b) shows the shift in the distribution of number of bonds for the samples when changing the faddedge bias. The number of bonds, i.e. number of edges in the molecular graph, changes as this bias changes. Note that this level of fine-grained control of edge density in sample generation is not straightforward to achieve with LSTM models trained on SMILES strings. Note that however here the increasing the faddedge slightly changed the average node degree, but negatively affected the total number of bonds. This is because the edge density also affected the molecule size, and when the bias is negative, the model tend to generate larger molecules to compensate for this change, and when this bias is positive, the model tend to generate smaller molecules. Combining faddedge bias and faddnode bias can achieve the net effect of changing edge density.
+Step-by-step molecule generation visualization Here we show a few examples for step-by-step molecule generation. Figure 9 shows an example of such step-by-step generation process for a graph model trained on canonical ordering, and Figure 10 shows one such example for a graph model trained on permuted random ordering.
+13
+
+Under review as a conference paper at ICLR 2018
+
+0.30 0.25 0.20 0.15 0.10 0.05 0.00 0 0.7 0.6 0.5 0.4 0.3 0.2 0.1 0.0 1
+0.7 0.6 0.5 0.4 0.3 0.2 0.1 0.0 0
+
+HBA rg_lstm_perm, KL 0.0037 rg_lstm, KL 0.0013 lstm_perm, KL 0.0005 lstm, KL 0.0024 graph_perm, KL 0.0237 graph, KL 0.0013 training_data
+2 4 6 8 10 12
+SA
+rg_lstm_perm, KL 1.9920 rg_lstm, KL 0.0559 lstm_perm, KL 0.0036 lstm, KL 0.0043 graph_perm, KL 1.0446 graph, KL 0.0252 training_data
+2345678
+NumAromaticRings
+rg_lstm_perm, KL 0.9297 rg_lstm, KL 0.0190 lstm_perm, KL 0.0010 lstm, KL 0.0040 graph_perm, KL 0.1327 graph, KL 0.0109 training_data
+2 4 6 8 10
+
+HBD
+
+rg_lstm_perm, KL 0.0026
+
+0.4
+
+rg_lstm, KL 0.0027 lstm_perm, KL 0.0003
+
+lstm, KL 0.0014
+
+graph_perm, KL 0.0132
+
+0.3
+
+graph, KL 0.0077 training_data
+
+0.2
+
+0.1
+
+0.0 0 2 4 6 8 10
+
+TPSA
+
+rg_lstm_perm, KL 0.0029
+
+0.014 rg_lstm, KL 0.0018
+
+lstm_perm, KL 0.0018
+
+0.012
+
+lstm, KL 0.0009 graph_perm, KL 0.0031
+
+0.010
+
+graph, KL 0.0050 training_data
+
+0.008
+
+0.006
+
+0.004
+
+0.002
+
+0.000 0
+
+50 100 150 200 250 300
+
+NumAtoms
+
+rg_lstm_perm, KL 0.0067
+
+0.25
+
+rg_lstm, KL 0.0052 lstm_perm, KL 0.0918
+
+lstm, KL 0.0918
+
+0.20
+
+graph_perm, KL 0.1038 graph, KL 0.1035
+
+training_data
+
+0.15
+
+0.10
+
+0.05
+
+0.00 0
+
+5 10 15 20 25 30
+
+logP
+
+rg_lstm_perm, KL 0.0092
+
+0.25
+
+rg_lstm, KL 0.0009 lstm_perm, KL 0.0019
+
+lstm, KL 0.0017
+
+graph_perm, KL 0.0052
+
+0.20 graph, KL 0.0074
+
+training_data
+
+0.15
+
+0.10
+
+0.05
+
+0.00 25 20 15 10
+
+5
+
+QED
+
+3.0 rg_lstm_perm, KL 0.2192
+
+rg_lstm, KL 0.0011
+
+2.5
+
+lstm_perm, KL 0.0010 lstm, KL 0.0011
+
+graph_perm, KL 0.0813
+
+2.0
+
+graph, KL 0.0060 training_data
+
+1.5
+
+0
+
+5
+
+1.0
+
+0.5
+
+0.00.0 0.2 0.4 0.6
+
+NumBonds
+
+0.175
+
+rg_lstm_perm, KL 0.0111 rg_lstm, KL 0.0024
+
+lstm_perm, KL 0.0233
+
+0.150 lstm, KL 0.0245
+
+graph_perm, KL 0.1281
+
+0.125
+
+graph, KL 0.0398 training_data
+
+0.100
+
+0.075
+
+0.050
+
+0.025
+
+0.000 0
+
+5 10 15 20
+
+0.8 25
+
+10 30
+
+Figure 7: Distribution of chemical properties for samples from different models and the training set. rg_lstm: LSTM trained on fixed graph generation decision sequence; rg_lstm_perm: LSTM trained on permuted graph generation decision sequence; lstm: LSTM on SMILES strings; lstm_perm: LSTM on SMILES strings with permuted nodes; graph: graph model on fixed node and edge sequence; graph_perm: graph model on permuted node and edge sequences.
+
+NumAtoms
+
+graph_perm_nb-2, valid 96.40%
+
+0.30
+
+graph_perm_nb-1, valid 96.25% graph_perm_nb1, valid 95.63%
+
+graph_perm_nb2, valid 95.18%
+
+0.25 graph_perm, valid 95.98%
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 0
+
+5 10 15 20
+
+(a) shift faddnode bias
+
+AvgNodeDegree
+
+3.5 graph_perm_eb-2, valid 94.45% graph_perm_eb-1, valid 95.69%
+
+3.0
+
+graph_perm_eb1, valid 96.24% graph_perm_eb2, valid 94.20%
+
+2.5 graph_perm, valid 95.98%
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+25 0.0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5
+(b) shift faddedge bias
+
+NumBonds
+
+0.30 graph_perm_eb-2, valid 94.45%
+
+graph_perm_eb-1, valid 95.69%
+
+0.25
+
+graph_perm_eb1, valid 96.24% graph_perm_eb2, valid 94.20%
+
+graph_perm, valid 95.98%
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+0.00 0 5 10 15 20 25
+(c) shift faddedge bias
+
+Figure 8: Changing the faddnode and faddedge biases can affect the generated samples accordingly, therefore achieving a level of fine-grained control of sample generation process. nb<bias> and
+eb<bias> shows the bias values added to the logits.
+
+B.2 PARSING TASK
+Model Details In this experiment we used a graph model with node state dimensionality of 64, and an LSTM encoder with hidden size 256. Attention over input is implemented using a graph aggregation operation to compute a query vector and then use it to attend to the encoder LSTM states. The baseline LSTM models have hidden size 512 for both the encoder and the decoder. Dropout is applied to both the encoder and the decoder. For the graph model the dropout in the decoder is applied to various output modules and the node initialization module. The baseline models have more than 2 times more parameters than the graph model (52M vs 24M), mostly due to using a larger encoder.
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+O
+
+(1)
+O C
+C
+C
+(6)
+O C
+C C C C
+
+(11)
+
+O C
+C
+
+C C Br
+
+C C
+C
+
+(16)
+
+N Br
+
+O C
+C
+
+C C C
+
+C C
+C
+
+(21)
+
+C C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(26)
+
+C
+
+CC
+
+C
+
+C NO C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(31)
+
+C C
+
+C C
+CC
+
+C
+
+NO
+
+C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(36)
+
+O
+
+C
+(2)
+O C
+C C
+
+(7)
+O C
+C C C C
+C
+
+(12)
+
+O C
+C
+
+C C Br
+
+C C
+C
+
+(17)
+
+N Br
+
+O C
+C
+
+C C C
+
+C C
+C
+
+(22)
+
+CC C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(27)
+
+C
+
+CC
+
+C
+
+C NO C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(32)
+
+C C
+
+C C
+CC
+
+C
+
+NO
+
+C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(37)
+
+O
+
+C
+
+(3)
+O C
+C
+C C
+(8)
+O C
+C C C C
+C
+(13)
+O C
+C C
+CC C CC Br
+(18)
+
+C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(23)
+
+CC C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(28)
+
+CC
+
+CC
+
+C
+
+C NO C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(33)
+
+O C
+
+C
+(4)
+O C
+C C C
+
+(9)
+
+O C
+C
+
+C Br
+
+C C
+C
+
+(14)
+O C
+C
+C CC C CC Br
+
+(19)
+
+C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(24)
+
+C CC C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(29)
+
+CC
+
+CC
+
+C
+
+C NO C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(34)
+
+O C
+
+C
+(5)
+O C
+C C C C
+
+(10)
+
+O C
+C
+
+C Br
+
+C C
+C
+
+(15)
+O C
+C
+C CC C CC Br
+
+(20)
+
+C C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(25)
+
+C CC C NO C
+
+C
+
+C
+
+CC
+
+C C
+
+C
+
+Br
+
+(30)
+
+C C
+
+C C
+CC
+
+C
+
+NO
+
+C
+
+C
+
+C
+
+Br
+
+C C C
+
+C C
+
+(35)
+
+Figure 9: Step-by-step generation process visualization for a graph model trained with canonical ordering.
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+C
+
+(1)
+
+C C
+C
+
+CN C
+(6)
+
+C C
+C
+
+C
+
+C C
+
+C
+
+N
+
+O
+
+(11)
+
+CC C
+C
+
+C
+
+CC C
+
+C
+
+C N
+
+O
+
+(16)
+
+CC C
+C Cl
+
+C
+
+C
+
+C
+
+C C
+
+C
+
+C N
+
+O
+
+(21)
+
+CC C
+C Cl
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(26)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(31)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(36)
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(41)
+
+C
+
+C
+(2)
+
+C C
+C
+
+CN C
+(7)
+
+C C
+C
+
+CO
+
+C
+
+C C
+
+C
+
+N
+
+(12)
+
+CC C
+C
+
+C
+
+CC CC
+
+C N
+
+O
+
+(17)
+
+CC C
+C Cl
+
+C
+
+C
+
+C
+
+C C
+
+C
+
+C N
+
+O
+
+(22)
+
+CC C
+C Cl
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(27)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(32)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(37)
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(42)
+
+C C
+
+C
+(3)
+
+C C
+C C
+CN C
+(8)
+
+C C
+C
+
+CO
+
+C
+
+C C
+
+C
+
+N
+
+(13)
+
+CC C
+C Cl
+
+C
+
+CC CC
+
+C N
+
+O
+
+(18)
+
+CC C
+C Cl
+
+C O C
+
+CC C
+
+C
+
+C N
+
+O
+
+(23)
+
+CC C
+C Cl
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(28)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(33)
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(38)
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(43)
+
+C C
+C
+C
+(4)
+
+C C
+C
+
+C CN C
+
+O
+
+(9)
+
+C C
+C
+
+C
+
+CC C
+
+C
+
+C N
+
+O
+
+(14)
+
+CC C
+C Cl
+
+C
+
+CC CC
+
+C N
+
+O
+
+(19)
+
+CC C
+C Cl
+
+C O C
+
+CC C
+
+C
+
+C N
+
+O
+
+(24)
+
+CO
+
+C C C Cl
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(29)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(34)
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(39)
+
+C C
+C
+
+CN
+
+(5)
+
+C C
+C
+
+C
+
+C C
+
+C
+
+N
+
+O
+
+(10)
+
+C C
+C
+
+C
+
+CC C
+
+C
+
+C N
+
+O
+
+(15)
+
+CC C
+C Cl
+
+C
+
+C
+
+CC C
+
+C
+
+C N
+
+O
+
+(20)
+
+CC C
+C Cl
+
+C O C
+
+CC C
+
+C
+
+C N
+
+O
+
+(25)
+
+CO
+
+C C C Cl
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+C N
+
+O
+
+(30)
+
+CO
+
+C C C Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(35)
+
+CO
+
+C
+
+C C
+
+C
+
+Cl C
+
+C
+
+O
+
+CC C
+
+C C
+
+C
+
+CO C
+N
+
+(40)
+
+Figure 10: Step-by-step generation process visualization for a graph model trained with permuted random ordering.
+
+16
+
+

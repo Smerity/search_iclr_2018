@@ -1,0 +1,686 @@
+Under review as a conference paper at ICLR 2018
+MACE: STRUCTURED EXPLORATION VIA DEEP HIERARCHICAL COORDINATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+In multi-agent reinforcement learning environments, exploration can be inefficient as the joint policy space is in general exponentially large. Hence, even if the dynamics are simple, the optimal policy can be combinatorially hard to discover.We introduce Multi-Agent Coordinated Exploration (MACE), a deep reinforcement learning approach to learn expressive multi-agent policies that are both statistically and computationally efficient. MACE implements a form of multi-agent coordination during exploration and execution, by using a hierarchical stochastic multi-agent policy class that encodes flexible structure between individual policies. In this way, MACE preserves expressivity along with low sample complexity. In order to make learning tractable, we derive a joint learning and exploration strategy by combining hierarchical variational inference with actor-critic learning. The benefits of our learning approach are that 1) it is principled, 2) simple to implement and 3) easily scalable to settings with many agents. We demonstrate empirically that MACE can more efficiently learn optimal policies in challenging multi-agent games with a large number ( 20) of agents, compared to conventional baselines. Moreover, we show that our hierarchical structure leads to meaningful agent coordination.
+1 INTRODUCTION
+In many real-life situations, intelligent agents have to solve (multiple) tasks collectively, rather than in isolation. For example, a fleet of N autonomous delivery vehicles might need to deliver M  N packages, while avoiding collisions and satisfying time and fuel constraints. In such multi-agent-task settings, agents must learn jointly to coordinate to optimize their (collective) rewards. Instances of this problem have been studied previously, but often make limiting assumptions, e.g. consider a static environment (the bandit setting) or discrete payoffs in matrix games (Bouzy & Me´tivier (2010)). For dynamic multi-agent-task problems, it is instead natural to use reinforcement learning to train a collective of agents. One important technical challenge is dealing with the combinatorial complexity of the multi-agent-task learning problem. For instance, agents can be assigned to tasks in an exponentially large number of ways (w.r.t. to the number of agents & tasks).
+Coordination can take many forms: we focus on (long-term) spatiotemporal task assignment. As a motivating example, consider a variant of the Hare-Hunters problem (see Figure 1), with hyper-parameters (N = 2, M = 2, H = 1, T ). In this game, N = 2 identical hunters need to capture M = 2 identical prey within T time-steps, and exactly H = 1 hunter is needed to capture each prey. T is set such that no hunter Figure 1: Equivalent socan capture both preys. This problem has two equivalent solutions: hunter lutions in a 2-hunter 21 captures prey 1 and hunter 2 captures prey 2, or vice versa. There are prey game. also two suboptimal choices: both hunters choose the same prey. Hence, the hunters must coordinate over a (large) number of time-steps to maximize their reward. This implies the solution space has low-dimensional structure that can be exploited to accelerate training.
+In general, for N 1 agents and M 1 tasks, discovering such coordinated solutions using unstructured trial-and-error methods (i.e. agents explore state-actions independently) quickly becomes intractable, as the joint state-action space is exponentially large (e.g. O(|A|N ). Hence, reinforcement learning agents can greatly benefit from employing structured exploration in order to achieve tractable multi-agent-task learning, e.g. by encoding coordination during learning.
+1
+
+Under review as a conference paper at ICLR 2018
+
+In this work, we propose a hierarchical stochastic policy class to enable efficient structured exploration and learning. The key ideas of our approach are: 1) to utilize a shared stochastic latent variable model that defines the structured exploration policy, and 2) to employ a principled variational method to learn the posterior distribution over the latents jointly with the optimal policy. Our approach has several desirable properties. First we do not incorporate any form of prior domain knowledge, but rather discover the coordination structure purely from empirical experience during learning. Second, our variational learning method enables fully differentiable end-to-end training of the entire multi-agent policy class. Finally, by utilizing a hierarchical policy class, our approach can easily scale to large numbers of coordinating agents.
+To summarize, our contributions in this work are as follows:
+· We introduce a multi-agent policy class that uses a hierarchy of stochastic latent variables.
+· We propose an efficient and principled algorithm using variational methods to train the policy end-to-end.
+· To validate our learning framework, we introduce several synthetic multi-agent environments that explicitly require team coordination, and feature competitive pressures that are characteristic of many coordinated decision problems.
+· We empirically verify that our approach improves sample complexity on coordination games with a large number (N  20) of agents.
+· We show that learned latent structures correlate with meaningful coordination patterns.
+
+2 COOPERATIVE MULTI-AGENT REINFORCEMENT LEARNING
+
+In multi-agent RL, agents sequentially interact within an environment defined by the tuple: E  (S, A, r, fP ). Each agent i starts in an initial state s0i , and at each time t observes a state st  S and executes an action ati chosen by a (stochastic) policy ait  P ait|st . Each agent then receives a reward ri (st, at), and the environment transitions to a new state st+1 with probability fP (st+1|st, at). We define the joint state and actions as st = {sit  S} and at = {ait  A}, where i  I indexes the agents. Note that the rewards for each agent ri can depend on the full joint state and actions.
+
+In this work, we restrict to fully cooperative MDPs that are fully observable, deterministic and episodic. Each agent can see the full state s, fP is deterministic and each episode  = (st, at, rt)0tT ends when the agent encounters a terminal state and the MDP resets.
+In the fully cooperative case, the goal for each agent is to learn its optimal policy P  ait|st,  that maximizes the total reward R( ) = i Ri( ) = i t ri(st, at):
+
+max J () = max J i(), J i() = E Ri ( ) at  P (at|st; )
+ iI
+
+(1)
+
+To optimize, we can apply gradient descent with policy gradient estimators g^ (Williams (1992))
+
+g
+
+=
+
+ J
+
+()
+
+=
+
+E [
+
+log
+
+P (at|st; )R( )|at, st]
+
+
+
+1 M
+
+M
+
+ log P (akt |skt ; )R( k), (2)
+
+k=1 t
+
+where we sample M rollouts  k by sampling actions from the policy that is being learned.
+
+Compared to the single-agent RL setting, multi-agent RL poses unique difficulties. A central issue is the exploration-exploitation trade-off: agents must sample rollouts from an exponentially large state-action space, but discovering good coordinated policies when each agent samples independently becomes combinatorially intractable, e.g. as N grows or the problem requires long-term coordination.
+
+2.1 MACE: JOINT COORDINATION AND EXPLORATION
+We now formulate our multi-agent objective (1) using a hierarchical policy class that enables structured exploration. Our approach, MACE ("Multi-Agent Coordinated Exploration"), builds upon two complementary approaches:
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Figure 2: Structured latent variable model of the multi-agent policy (actor, left) and instance of the multi-agent actor-critic interacting in the environment E (right). The joint policy contains two stacked layers of stochastic latent variables (red), and deterministically receives states and computes actions (green). Global variables  are shared across agents. On the right, a neural network instance of the actor-critic uses the reparametrization trick and receives the environment state, samples actions from the policy for all agents and computes value functions V ·.
+
+· Encode structured exploration by sampling actions that are correlated between agents. The correlation between actions encodes coordination.
+· Use a variational approach to derive and optimize a lower bound on the objective (1).
+
+Hierarchical Latent Model. To encode coordination between agents, we assume the individual
+policies have shared structure, encoded by a latent variable t. This leads to a hierarchical policy model, as shown in Figure 2. Hence, our goal is to learn the joint distribution P (at, t|st). We first write the joint policy for a single time-step as:
+
+P (at|st) =
+
+N
+dtP (at, t, |st) =
+i=1
+
+N
+dtP (ati, t, |st) =
+i=1
+
+dtP (ait|t, st)P (t|st). (3)
+
+Since the at are conditionally dependent via t, the policy is more flexible compared to standard fully factorized policies (Ranganath et al. (2015)). Finding the true posteriors P (t|st)  P (st|t)P (t) is intractable in general as computing the normalization P (st) involves marginalization over t.
+Hence, to make learning tractable, we will use a variational approach.
+
+Hierarchical Variational Lower Bound. We next derive a tractable learning algorithm using
+variational methods. Instead of directly optimizing (1), we cast it as a probabilistic inference problem,
+as in Levine & Koltun (2013); Vlassis et al. (2009), and instead optimize a lower bound. To do so, we assume that the total reward Ri for each i to be non-negative and bounded. Hence, we can view the total reward Ri( ) as a random variable, whose unnormalized distribution is defined as P (Ri| ) = Ri. We can then rewrite (1) as a maximum likelihood problem (omitting i for clarity):
+
+max
+
+
+E (st ; )
+
+[R]
+
+=
+
+max
+
+
+d R( )P ( ; )  max
+
+
+d P (R| )P ( ; ),
+
+(4)
+
+T
+P ( ; ) = P (s0) P (st+1|st, at)
+t=0
+
+dtP (at, t|st; )
+
+(5)
+
+Denoting time sequences as  = (t)0t<T for clarity, we can use a variational posterior QR(|s; ) and Jensen's inequality (Hoffman et al., 2013) to get a lower bound on the log-likelihood of (4):
+
+log P (R; ) 
+
+d dQR(|s; ) log
+
+P (R| )P (s0)
+
+T t=0
+
+P
+
+(st+1|st,
+
+at)P
+
+(at,
+
+t
+
+|st
+
+;
+
+)
+
+QR(|s; )
+
+(6)
+
+where we denoted
+
+d d =
+
+T t=0
+
+dstdatdt. The term L(QR, , ) in Equation (6) is called the
+
+evidence lower bound (ELBO) which we can maximize as a proxy for (4). From the form of the
+
+ELBO, we see that the optimal QR factorizes similarly to P :
+
+T
+QR(|s; ) = P (R| )P (s0) P (st+1|st, at)Q(t|st; ).
+t=0
+
+(7)
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+We can then simplify the ELBO as:
+
+L(QR, , ) =
+
+T
+d dQR(|s; )
+t=0
+
+log
+
+P
+
+(at|t,
+
+st;
+
+)
+
++
+
+log
+
+P (t|st) Q(t|st, )
+
+.
+
+(8)
+
+using P (at, t|st; ) = P (at|t, st; )P (t|st). For more details, see the Appendix. The standard choice is to use maximum-entropy standard-normal priors: P (t|st) = N (0, 1). We can then optimize (8) using e.g. stochastic gradient ascent. Formally, the gradient  of (8) is:
+
+T
+ L(QR, , ) =
+t=0
+
+T
+dstdatdtQR(t|st; )  log P (at |t , st ; ),
+t =0
+
+(9)
+
+with L(QR, , ) calculated similarly. These gradients can be estimated using sampled roll-outs  k of the policy P  . During a rollout  k, we sample   Q, observe rewards R  P (R| ) and transitions st+1  P (st+1|.): the sample estimated (9) approximates the policy gradient (2):
+
+g
+
+
+
+g^,Q
+
+=
+
+1 M
+
+M
+
+T
+ log P atk|kt , skt ;  R( k),
+
+g  g^,Q = L(QR, , ). (10)
+
+k=1 t=0
+
+The second term in (10) is the gradient for the variational posterior QR, which learns to sample the
+optimal t. This shows that using an approximate posterior Q introduces a mismatch between (2) and (10); if Q(t|st) = P (t|st), the second term in (8) would be 0 and (2) and (10) would be equivalent.
+
+Actor-Critic and Bias-Variance. Estimating policy gradients g using empirical rewards can suffer from high variance and instabilities. It is thus useful to consider more general objectives F i:
+
+J i() = E F i ( ) at  P t (at|st; ) ,
+
+(11)
+
+such that the variance in g^ is reduced.1 In practice, we find that using (10) with more general F , such as generalized advantages (Schulman et al. (2015)), performs quite well.
+
+3 EXPERIMENTAL VALIDATION
+
+3.1 MULTI-AGENT ENVIRONMENTS
+
+To validate our approach, we created two grid-world games, depicted in Figure 2, inspired by the classic Predator-Prey and Stag-Hunt games (Shoham & Leyton-Brown (2008)). In both games, the world is periodic and the initial positions of the hunters and prey are randomized. Also, we consider two instances for both games: either the prey are moving or fixed.
+Hare-Hunters. Predator-Prey is a classic test environment for multi-agent learning, where 4 predators try to capture a prey by boxing it in. We consider a variation defined by the settings (N, M, H, T ): N hunters and M prey. Each prey can be captured by exactly H hunters: to capture the prey, a hunter gets next to it, after which the hunter is frozen. Once a prey has had H hunters next to it, it is frozen and cannot be captured by another hunter. The terminal rewards used are:
+
+Ri = 1, if all prey are captured H times before the time limit T 0, otherwise
+
+(12)
+
+The challenge of the game is for the agents to inactivate all prey within a finite time T . Due to the time limit, the optimal strategy is for the agents to distribute targets efficiently, which can be challenging due to the combinatorially large number of possible hunter-to-prey assignments.
+Stag-Hunters. The Stag-Hunt is another classic multi-agent game designed to study coordination. In this game, hunters have a choice: either they capture a hare for low reward, or, together with another hunter, capture a stag for a high reward. We extend this to the multi-agent (N, M, H, T )-setting: N hunters hunt M prey (M/2 stags and M/2 hares). Each stag has H hit-points, while hares and
+
+1Note that if the total reward R is bounded, we can define R-weighted probabilities by shifting and normalizing R. In general, the derivation applies if F is similarly bounded.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+hunters have 1 hit-point. Capturing is as in Hare-Hunters. The spatial domain is similar to the Hare-Hunters game and we also use a time limit T . The terminal reward is now defined as:
+
+1, if i captured a live stag that became inactive before the time limit T  Ri = 0.1, if i captured a live hare before the time limit T
+0, otherwise
+
+(13)
+
+The challenge for the agents here is to discover that choosing to capture the same prey can yield substantially higher reward, but this requires coordinating with another hunter.
+
+3.2 NEURAL COORDINATION MODEL
+
+For experiments, we instantiated our multi-agent policy class (as in Figure 2) with deep neural net-
+works. For simplicity, we only used reactive policies without memory, although it is straightforward
+to apply MACE to policies with memory (e.g. LSTMs). The model takes a joint state st as input and computes features (s) using a 2-layer convolutional neural network. To compute the latent variable   Rd, we use the reparametrization trick (Kingma & Welling, 2013) to learn the variational distribution (e.g. Q(|s)), sampling  via  N (0, 1) and distribution parameters µ,  (omitting t):
+
+µ(s) = Wµ(s) + bµ, log (s)2 = W(s) + b,  = µ(s) + (s) .
+
+(14)
+
+Given , the model then computes the policies P (ai|, s) and value functions V i(s) as (omitting t):
+
+P (ai|, s) = softmax Wi [ (s)] + bi , V i(s) = WVi (s) + bVi ,
+
+(15)
+
+where softmax(x) = exp x/ j exp xj. In this way, the model can be trained end-to-end.
+
+Training. We used A3C (Mnih et al. (2016)) with KL-controlled policy gradients (10), generalized advantage as F (Schulman et al. (2015)). and policy-entropy regularization. For all experiments, we performed a hyper-parameter search and report the best 5 runs seen (see the Appendix for details).
+
+Baselines. We compared MACE against two natural baselines:
+
+· Shared (shared actor-critic): agents share a deterministic hidden layer, but maintain individual weights i for their (stochastic) policy P (a|, s; i) and value function V i(s; ). The key difference is that this model does not sample from the shared hidden layer.
+· Cloned (actor-critic): a model where each agent uses an identical policy and value function with shared weights. There is shared information between the agents, and actions are sampled according to the agents' own policies.
+
+4 QUANTITATIVE ANALYSIS
+Above, we defined a variational approach to train hierarchical multi-agent policies using structured exploration. We now validate the efficacy of our approach by showing our method scales to environments with a large number of agents. We ran experiments for both Hare-Hunters and Stag-Hunters for N = M = 10, 20 in a spatial domain of 50 × 50 grid cells.
+Sample complexity. In Table 1 we show the achieved rewards after a fixed number of training samples, and Figure 3 showcases the corresponding learning curves. We see that MACE achieves up to 10× reward compared to the baselines. Figure 4 shows the corresponding distribution of training episode lengths. We see that MACE solves game instances more than 20% faster than baselines in 50% (10%) of Hare-Hunters (Stag-Hunters) episodes. In particular, MACE learns to coordinate for higher reward more often: it achieves the highest average reward per-episode (e.g. for 10-10 Stag-Hunters with frozen prey, average rewards are 4.64 (Cloned), 6.22 (Shared), 6.61 (MACE)). Hence, MACE coordinates successfully more often to capture the stags. Together, these results show MACE enables more efficient learning.
+Using the ELBO. A salient difference between (10) and (2) is the KL-regularization, which stems from the derivation of the ELBO. Since we use a more general objective F , c.f. (11), we also investigated the impact of using the KL-regularized policy gradient (10) versus the standard (2). To this end, we ran several instances of the above experiments both with and without KL-regularization.
+
+5
+
+Under review as a conference paper at ICLR 2018
+Figure 3: Train-time cumulative terminal reward for N agents in (N, M, 1, T ) Hare-Hunters (upper, T = 2000) and Stag-Hunters (lower, T = 1000) on a 50 × 50 gridworld, for 10-vs-10 or 20-vs-20 agents; randomly moving or fixed preys. Average, minimal and maximal rewards for the best 5 runs for each model are shown. MACE accumulates increasingly higher rewards compared to the baselines, by 1) achieving higher terminal reward per episode and 2) finishing episodes faster (see Figure 4). For 10-10 Stag-Hunters with frozen prey, average reward per-episode is 4.64 (Cloned), 6.22 (Shared), 6.61 (MACE) after 1 million samples. For more, see the Appendix.
+w Figure 4: Train-time episode lengths during 1 million steps for 10-vs-10 Hare-Hunters (left) and Stag-Hunters (right), with fixed preys. MACE (orange) finishes an episode successfully before the time limit more often than the baselines (Cloned (blue) and Shared (yellow)).
+We found that without KL-regularization, training is unstable and prone to mode collapse: the variance  of the variational distribution can go to 0. This reflects in essentially 0 achieved reward: the model does not solve the game for any reasonable hyperparameter settings. Impact of dynamics and T . Inspecting training performance, we see the relative difficulty of capturing moving or randomly moving prey. Capturing moving prey is easier to learn than capturing fixed preys, as comparing rewards in Table 1 shows. This shows a feature of the game dynamics: the expected distance between a hunter and an uncaptured prey are lower when the preys are randomly moving, resulting in an easier game. Comparing Hare-Hunters and Stag-Hunters, we also see the impact of the time limit T . Since we use terminal rewards only, as T gets larger, the reward becomes very sparse and models need more samples to discover good policies.
+5 MODEL INSPECTION
+Beyond training benefits, we now demonstrate empirical evidence that suggest efficacy and meaningfulness of our approach to structured exploration. We start by inspecting the behavior of the latent variable  for a simple N = M = 2 Hare-Hunters game, which enables semantic inspection of the learned policies, as in Figure 5. We make a number of observations. First,  is relevant: many components are statistically significantly correlated with the agents' actions. This suggests the model
+6
+
+Under review as a conference paper at ICLR 2018
+
+Preys are Samples (x100k)
+
+Frozen 5 10
+
+Moving 5 10
+
+Frozen 5 10
+
+Moving 5 10
+
+Hare-Hunters Cloned Shared MACE
+
+85.0 65.0 240.0
+
+10-vs-10 178.3 465.0 155.0 457.5 580.0 662.7
+
+912.5 923.8 1381.8
+
+20.0 65.0 200.0
+
+20-vs-20 70.0 706.7 105.0 491.4 393.3 1260.0
+
+1401.7 962.9 2344.0
+
+Stag-Hunters Cloned Shared MACE
+
+1229.2 1214.5 1515.2
+
+10-vs-10 2482.9 2079.4 2423.7 2005.7 3047.3 2275.7
+
+4171.2 4144.3 4610.7
+
+3224.5 3150.7 3799.3
+
+20-vs-20 6219.9 5934.5 6379.8 6344.4 7158.1 6880.7
+
+11429.2 12196.8 13358.6
+
+Table 1: Total terminal reward (averaged over 5 best runs) for N agents for set # of training samples.
+
+0 relevant -components
+
+10 agents explore
+
+agents solve vertically 100
+
+episodes
+
+agents solve horizontally episode steps
+
+latent 
+
+Figure 5: Predators (red) and prey (green) during training for 2v2 Hare-Hunters for 100 episodes. Arrows show where agents move to in the next frame. Top: at the start, predators explore via , but do not succeed before the time limit T (red dot). Bottom: after convergence agents succeed consistently (green dot) before the time limit (purple dot) and  encodes the two strategies from Figure 1. Highlighted -components correlate with rollout under a 2-sided t-test at  = 0.1 significance.
+
+does indeed use the latent : it (partly) controls the coordination between agents.2 Second, the latent  shows strong correlation during all phases of training. This suggests that the model indeed is performing a form of structured exploration. Third, the components of  are correlated with semantic meaningful behavior. We show a salient example in the bottom 2 rows in Figure 5: the correlated components of  are disjoint and each component correlates with both agents. The executed policies are exactly the two equivalent ways to assign 2 hunters to 2 preys, as illustrated in Figure 1.
+Coordination with a large N . In the large N = M = 10 case, the dynamics of the agent collective are a generalization of the N = M = 2 case. There are now redundancies in multi-agent hunter-prey assignments that are analogous to the N = M = 2 case that are prohibitively complex to analyze due to combinatorial complexity. However our experiments strongly suggest (see e.g. Figure 6) the latent code is again correlated with the agents' behavior during all phases of training, showing that  induces meaningful multi-agent coordination.
+6 RELATED WORK
+Deep Structured Inference. Recent works have focused on learning structured representations using expressive distributions, which enable more powerful probabilistic inference. For instance, Johnson et al. (2016) has proposed combining neural networks with graphical models, while
+2This is parallel to the discussion in Chen et al. (2016), which investigates the effectiveness of latent codes .
+7
+
+relevant -components
+
+Under review as a conference paper at ICLR 2018
+episode steps
+Figure 6: Visualization of MACE for a (10, 10, 1, 1000) Hare-Hunters game in a 30 × 30 world. Left: components of the latent code  that significantly correlate with sampled actions (computed as in Figure 5). Right: Three episode snapshots: at the start, middle and end. Red: predators; green: prey. Arrows indicate where agents move to in the next snapshot. The hunters solve the game (green dot) before the time limit T = 1000 (purple dot), by distributing targets amongst themselves.
+Ranganath et al. (2015) learn hierarchical latent distributions. Our work builds upon these approaches to learn structured policies in the reinforcement learning setting. Variational methods in RL. Neumann (2011); Furmston & Barber (2010) discuss variational approaches for RL problems, but did not consider end-to-end trainable models. Levine & Koltun (2013) used variational methods for guided policy search. Houthooft et al. (2016) learned exploration policies via information gain using variational methods. However, these only consider 1 agent. Coordination in RL. Multi-agent coordination has been studied in the RL community (e.g. Kapetanakis & Kudenko (2002); Chalkiadakis & Boutilier (2003)) as a method to reduce the instability of training multiple agents simultaneously using RL. The benefit of coordination was demonstrated in simple multi-agent settings in e.g. Tan (1993). However, previous methods learned hand-crafted communication models and do not scale well to complex state spaces and many agents. In contrast, our method learns coordination end-to-end via on-policy methods, learns the multi-agent exploration policy and scales well to many agents via its simple hierarchical structure. Communication Models. Recently, end-to-end learning of communication models has been studied for shared broadcast channels (Sukhbaatar et al. (2016)), sequential communication (Peng et al. (2017)), heuristic multi-agent exploration Usunier et al. (2016) and bit-channels (Foerster et al. (2016)). These works show that non-trivial communication protocols can be learned through backpropagation or heuristic stabilization methods, but often do not scale well to a large number of agents. Our hierarchical approach is complementary, learns via variational methods, and can scale to large N . Multi-task learning. Hierarchical models have been studied for multi-task learning, e.g. Daume III (2014) learns latent hierarchies via EM in a supervised learning setting. Instead, we study flexible end-to-end trainable latent hierarchies in the reinforcement learning setting.
+7 DISCUSSION
+In a sense, we studied the simplest setting that can benefit from structured exploration, in order to isolate the contribution of our work. Our hierarchical model and variational approach are a simple way to implement multi-agent coordination, and easily combine with existing actor-critic methods. Moving forward, there are many ways to expand on our work. Firstly, for complex (partial-information) environments, instead of using reactive policies with simple priors P  N (0, 1), memoryfull policies with flexible priors (Chen et al., 2016) may be needed. Secondly, our approach is complementary to richer forms of communication between agents. Our hierarchical structure can be interpreted as a broadcast channel, where agents are passive receivers of the message . Richer communication protocols could be encoded by policies with more complex inter-agent structure. It would be interesting to investigate how to learn these richer structures. Taken together, these could enable using our method for efficient multi-agent RL in more complex coordination games.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Bruno Bouzy and Marc Me´tivier. Multi-agent learning experiments on repeated matrix games. In ICML, 2010.
+Georgios Chalkiadakis and Craig Boutilier. Coordination in Multiagent Reinforcement Learning: A Bayesian Approach. In International Joint Conference on Autonomous Agents and Multiagent Systems, AAMAS '03, New York, NY, USA, 2003.
+Xi Chen, Diederik P. Kingma, Tim Salimans, Yan Duan, Prafulla Dhariwal, John Schulman, Ilya Sutskever, and Pieter Abbeel. Variational Lossy Autoencoder. arXiv:1611.02731 [cs, stat], November 2016. URL http://arxiv.org/abs/1611.02731. arXiv: 1611.02731.
+Hal Daume III. Bayesian Multitask Learning with Latent Hierarchies. arXiv:1408.2032 [cs, stat], August 2014. arXiv: 1408.2032.
+Jakob N. Foerster, Yannis M. Assael, Nando de Freitas, and Shimon Whiteson. Learning to Communicate with Deep Multi-Agent Reinforcement Learning. arXiv:1605.06676 [cs], May 2016. arXiv: 1605.06676.
+T. Furmston and D. Barber. Variational methods for reinforcement learning. Journal of Machine Learning Research, 9:241­248, December 2010. ISSN 1533-7928.
+Matthew D. Hoffman, David M. Blei, Chong Wang, and John Paisley. Stochastic variational inference. Journal of Machine Learning Research, 14:1303­1347, 2013. URL http://jmlr. org/papers/v14/hoffman13a.html.
+Rein Houthooft, Xi Chen, Yan Duan, John Schulman, Filip De Turck, and Pieter Abbeel. VIME: Variational Information Maximizing Exploration. arXiv:1605.09674 [cs, stat], May 2016. arXiv: 1605.09674.
+M. J. Johnson, D. Duvenaud, A. B. Wiltschko, S. R. Datta, and R. P. Adams. Composing graphical models with neural networks for structured representations and fast inference. ArXiv e-prints, March 2016.
+Spiros Kapetanakis and Daniel Kudenko. Reinforcement Learning of Coordination in Cooperative Multi-agent Systems. In Eighteenth National Conference on Artificial Intelligence, pp. 326­ 331, Menlo Park, CA, USA, 2002. American Association for Artificial Intelligence. ISBN 9780262511292.
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes. arXiv preprint arXiv:1312.6114, 2013.
+Sergey Levine and Vladlen Koltun. Variational Policy Search via Trajectory Optimization. In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q. Weinberger (eds.), Advances in Neural Information Processing Systems 26, pp. 207­215. Curran Associates, Inc., 2013.
+Volodymyr Mnih, Adri Puigdomnech Badia, Mehdi Mirza, Alex Graves, Timothy P. Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous Methods for Deep Reinforcement Learning. arXiv:1602.01783 [cs], February 2016. arXiv: 1602.01783.
+Gerhard Neumann. Variational inference for policy search in changing situations. In International Conference on Machine Learning, ICML 2011, pp. 817­824, Bellevue, Washington, USA, June 2011.
+Peng Peng, Quan Yuan, Ying Wen, Yaodong Yang, Zhenkun Tang, Haitao Long, and Jun Wang. Multiagent Bidirectionally-Coordinated Nets for Learning to Play StarCraft Combat Games. arXiv:1703.10069 [cs], March 2017. arXiv: 1703.10069.
+Rajesh Ranganath, Dustin Tran, and David M. Blei. Hierarchical Variational Models. arXiv:1511.02386 [cs, stat], November 2015. arXiv: 1511.02386.
+John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel. High-Dimensional Continuous Control Using Generalized Advantage Estimation. arXiv:1506.02438 [cs], June 2015. arXiv: 1506.02438.
+9
+
+Under review as a conference paper at ICLR 2018
+Yoav Shoham and Kevin Leyton-Brown. Multiagent Systems: Algorithmic, Game-Theoretic, and Logical Foundations. Cambridge University Press, New York, NY, USA, 2008. ISBN 9780521899437.
+Sainbayar Sukhbaatar, Arthur Szlam, and Rob Fergus. Learning Multiagent Communication with Backpropagation. arXiv:1605.07736 [cs], May 2016. arXiv: 1605.07736.
+Ming Tan. Multi-Agent Reinforcement Learning: Independent vs. Cooperative Agents. In In Proceedings of the Tenth International Conference on Machine Learning, pp. 330­337. Morgan Kaufmann, 1993.
+Nicolas Usunier, Gabriel Synnaeve, Zeming Lin, and Soumith Chintala. Episodic Exploration for Deep Deterministic Policies: An Application to StarCraft Micromanagement Tasks. arXiv:1609.02993 [cs], September 2016. arXiv: 1609.02993.
+Nikos Vlassis, Marc Toussaint, Georgios Kontes, and Savas Piperidis. Learning model-free robot control by a Monte Carlo EM algorithm. Autonomous Robots, 27(2):123­130, August 2009. ISSN 0929-5593, 1573-7527.
+Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine learning, 8(3-4):229­256, 1992.
+10
+
+Under review as a conference paper at ICLR 2018
+
+8 SUPPLEMENTARY MATERIAL
+
+8.1 HIERARCHICAL VARIATIONAL LOWER BOUND.
+
+We next derive a tractable learning algorithm using variational methods. To apply variational methods,
+we first cast (1) as a probabilistic inference problem, as in Levine & Koltun (2013); Vlassis et al. (2009). To do so, we assume that the total reward Ri for each i to be non-negative and bounded. Hence, we can view the total reward Ri( ) as a random variable, whose unnormalized distribution is defined as P (Ri| ) = Ri. We can then rewrite (1) as a maximum likelihood problem (omitting i for
+clarity):
+
+max
+
+
+E (st ; )
+
+[R]
+
+=
+
+max
+
+
+d R( )P ( ; )  max
+
+
+d P (R| )P ( ; ),
+
+(16)
+
+T
+
+P ( ; ) = P (s0)
+
+dtP (st+1|st, at)P (at, t|st; ).
+
+(17)
+
+t=0
+
+Denoting time sequences as  = (t)0t<T for clarity, we can use a variational posterior QR(|s; ) and Jensen's inequality (Hoffman et al., 2013) to get a lower bound on the log-likelihood of (16):
+
+log P (R; ) = L(QR, , ) + KL [QR(|s; )||P (|s)]  L(QR, , )
+
+(18)
+
+L(QR, , ) =
+
+d dQR(|s; ) log
+
+P (R| )P (s0)
+
+T t=0
+
+P
+
+(st+1
+
+|st
+
+,
+
+at)P
+
+(at
+
+,
+
+t|st;
+
+
+
+)
+
+,
+
+QR(|s; )
+
+(19)
+
+where we used d d =
+
+T t=0
+
+dstdatdt. The first term L(QR, , ) is called the evidence
+
+lower bound (ELBO) which we can maximize as a proxy for (16). From the form of the ELBO, it is
+
+clear that the optimal QR factorizes similarly to P :
+
+Substituting this:
+
+T
+QR(|s; ) = P (R| )P (s0) P (st+1|st, at)Q(t|st; ).
+t=0
+
+(20)
+
+L(QR, , ) =
+
+d dQR(|s; ) log
+
+P (R| )P (s0)
+
+T t=0
+
+P
+
+(st+1|st,
+
+at)P
+
+(at,
+
+t
+
+|st
+
+;
+
+
+
+)
+
+P (R| )P (s0)
+
+T t=0
+
+P
+
+(st+1|st,
+
+at)Q(t
+
+|st
+
+;
+
+)
+
+=
+
+d dQR(|s; ) log
+
+T P (at, t|st; ) t=0 Q(t|st; )
+
+We can rewrite this as:
+
+L(QR, , ) =
+
+T
+d dQR(|s; )
+t=0
+
+log
+
+P
+
+(at|t,
+
+st;
+
+)
+
++
+
+log
+
+P (t|st) Q(t|st, )
+
+(21)
+
+P (at, t|st; ) = P (at|t, st; )P (t|st).
+
+(22)
+
+The standard choice is to set the priors to the maximum-entropy standard-normal: P (t|st) = N (0, 1). With this choice, we can optimize (22) using standard optimization methods, e.g. stochastic
+gradient ascent. Formally, the gradient  of (22) is:
+
+TT
+
+ L(QR, , ) =
+
+dstdatdtQR(t|st; )  log P (at |t , st ; ),
+
+(23)
+
+t=0 t =0
+
+with L(QR, , ) calculated similarly. These gradients can be estimated using sampled roll-outs  k of the policy P  . During a rollout  k, we sample   Q, observe rewards R  P (R| ) and transitions st+1  P (st+1|.): the sample estimated (23) approximates the policy gradient (2):
+
+g
+
+
+
+g^,Q
+
+=
+
+1 M
+
+M
+
+T
+ log P akt |kt , stk;  R( k),
+
+g  g^,Q = L(QR, , ). (24)
+
+k=1 t=0
+
+The second term in (24) provides the gradient for the variational posterior QR, which learns to sample the optimal t.
+
+11
+
+Under review as a conference paper at ICLR 2018
+
+8.2 TRAINING
+Training method. We used the A3C method with 5-20 threads for all our experiments. Each thread performed SGD with (24). The loss for the value function at each state st is the standard L2-loss between the observed total rewards for each agent i and its value estimate:
+
+ V i(st) - Ri(st, at) 2 .
+ti
+
+(25)
+
+In addition, in line with other work using actor-critic methods, we found that adding a small entropy regularization on the policy can sometimes positively influence performance, but this does not seem to be always required for our testbeds. The entropy regularization is:
+
+H(P ) = -
+
+P (at|st; ) log P (at|st; ).
+
+t at
+
+(26)
+
+A3C additionally defines training minibatches in terms of a fixed number of environment steps L: a smaller L gives faster training with higher variance and a higher L vice versa.
+
+Hyperparameter search. For experiments, we performed a random search over hyperparameters:
+
+Hyperparameter
+
+Search range
+
+Learning-rate  [10-6, 10-1]
+
+Discount
+
+ [0.9, 0.99]
+
+GAE discount  [0.9, 0.99]
+
+Value loss
+
+ [0.1, 0.5]
+
+Policy entropy  [0, 0.01]
+
+Table 2: Search range of hyper-parameters.
+
+8.3 RESULTS
+
+Figure 7: Train-time cumulative terminal reward in (N, M, 1, 1000) Hare-Hunters (upper) and Stag-Hunters (lower) on a 50×50 gridworld, for 10-vs-10 or 20-vs-20 agents; randomly moving or fixed preys. Average, minimal and maximal rewards for the best 5 runs for each model are shown. MACE accumulates increasingly higher rewards compared to the baselines.
+
+12
+
+

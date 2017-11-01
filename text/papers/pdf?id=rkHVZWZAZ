@@ -1,0 +1,876 @@
+Under review as a conference paper at ICLR 2018
+THE REACTOR: A FAST AND SAMPLE-EFFICIENT ACTOR-CRITIC AGENT FOR REINFORCEMENT LEARNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+In this work we present a new agent architecture, called Reactor, which combines multiple algorithmic and architectural contributions to produce an agent with higher sample-efficiency than Prioritized Dueling DQN (Wang et al., 2016) and Categorical DQN (Bellemare et al., 2017), while giving better run-time performance than A3C (Mnih et al., 2016). Our first contribution is a new policy evaluation algorithm called Distributional Retrace, which brings multi-step off-policy updates to the distributional reinforcement learning setting. The same approach can be used to convert several classes of multi-step policy evaluation algorithms designed for expected value evaluation into distributional ones. Next, we introduce the -leaveone-out policy gradient algorithm which improves the trade-off between variance and bias by using action values as a baseline. Our final algorithmic contribution is a new prioritized replay algorithm for sequences, which exploits the temporal locality of neighboring observations for more efficient replay prioritization. Using the Atari 2600 benchmarks, we show that each of these innovations contribute to both the sample efficiency and final agent performance. Finally, we demonstrate that Reactor reaches state-of-the-art performance after 200 million frames and less than a day of training.
+1 INTRODUCTION
+Model-free deep reinforcement learning has achieved several remarkable successes in domains ranging from super-human-level control in video games (Mnih et al., 2015) and the game of Go (Silver et al., 2016; 2017), to continuous motor control tasks (Lillicrap et al., 2015; Schulman et al., 2015).
+Much of the recent work can be divided into two categories. First, those of which that, often building on the DQN framework, act -greedily according to an action-value function and train using minibatches of transitions sampled from an experience replay buffer (Van Hasselt et al., 2016; Wang et al., 2015; He et al., 2017; Anschel et al., 2017). These value-function agents benefit from improved sample complexity, but tend to suffer from long runtimes (e.g. DQN requires approximately a week to train on Atari). The second category are the actor-critic agents, which includes the asynchronous advantage actor-critic (A3C) algorithm, introduced by (Mnih et al., 2016). These agents train on transitions collected by multiple actors running, and often training, in parallel (Schulman et al., 2017; Vezhnevets et al., 2017). The deep actor-critic agents train on each trajectory only once, and thus tend to have worse sample complexity. However, their distributed nature allows significantly faster training in terms of wall-clock time. Still, not all existing algorithms can be put in the above two categories and various hybrid approaches do exist (Zhao et al., 2016; O'Donoghue et al., 2017; Gu et al., 2017; Wang et al., 2017).
+Data-efficiency and off-policy learning are essential for many real-world domains where interactions with the environment are expensive. Similarly, wall-clock time (time-efficiency) directly impacts an algorithm's applicability through resource costs. The focus of this work is to produce an agent that is sample- and time-efficient. To this end, we introduce a new reinforcement learning agent, called Reactor (Retrace-Actor), which takes a principled approach to combining the sample-efficiency of off-policy experience replay with the time-efficiency of asynchronous algorithms. We combine recent
+1
+
+Under review as a conference paper at ICLR 2018
+
+advances in both categories of agents with novel contributions to produce an agent that inherits the benefits of both and reaches state-of-the-art performance over 57 Atari 2600 games.
+Our primary contributions are (1) a novel policy gradient algorithm, -LOO, which makes better use of action-value estimates to improve the policy gradient; (2) the first multi-step off-policy distributional reinforcement learning algorithm, distributional Retrace(); (3) a novel prioritized replay for off-policy sequences of transitions; and (4) an optimized network and parallel training architecture.
+We begin by reviewing background material, including relevant improvements to both value-function agents and actor-critic agents. In Section 3 we introduce each of our primary contributions and present the Reactor agent. Finally, in Section 4, we present experimental results on the 57 Atari 2600 games from the Arcade Learning Environment (ALE) (Bellemare et al., 2013), as well as a series of ablation studies for the various components of Reactor.
+
+2 BACKGROUND
+
+We consider a Markov decision process (MDP) with state space X and finite action space A. A (stochastic) policy (·|x) is a mapping from states x  X to a probability distribution over actions. We consider a -discounted infinite-horizon criterion, with   [0, 1) the discount factor, and define for policy  the action-value of a state-action pair (x, a) as
+Q(x, a) d=ef E t0trt|x0 = x, a0 = a,  ,
+where ({xt}t0) is a trajectory generated by choosing a in x and following  thereafter, i.e., at  (·|xt) (for t  1), and rt is the reward signal. The objective in reinforcement learning is to find an optimal policy , which maximises Q(x, a). The optimal action-values are given by Q(x, a) = max Q(x, a).
+
+2.1 VALUE-BASED ALGORITHMS
+
+The Deep Q-Network (DQN) framework, introduced by (Mnih et al., 2015), popularised the current line of research into deep reinforcement learning by reaching human-level, and beyond, performance across 57 Atari 2600 games in the ALE. While DQN includes many specific components, the essence of the framework, much of which is shared by Neural Fitted Q-Learning (Riedmiller, 2005), is to use of a deep convolutional neural network to approximate an action-value function, training this approximate action-value function using the Q-Learning algorithm (Watkins & Dayan, 1992) and mini-batches of one-step transitions (xt, at, rt, xt+1, t) drawn randomly from an experience replay buffer (Lin, 1992). Additionally, the next-state action-values are taken from a target network, which is updated to match the current network periodically. Thus, the temporal difference (TD) error for transition t used by these algorithms is given by
+
+t
+
+=
+
+rt
+
++
+
+t
+
+max
+a A
+
+Q(xt+1,
+
+a
+
+;
+
+¯)
+
+-
+
+Q(xt,
+
+at;
+
+),
+
+(1)
+
+where  denotes the parameters of the network and ¯ are the parameters of the target network.
+
+Since this seminal work, we have seen numerous extensions and improvements that all share
+the same underlying framework. Double DQN (Van Hasselt et al., 2016), attempts to cor-
+rect for the over-estimation bias inherent in Q-Learning by changing the second term of (1) to Q(xt+1, arg maxa A Q(xt+1, a ; ); ¯). The dueling architecture (Wang et al., 2015), changes the network to estimate action-values using separate network heads V (x; ) and A(x, a; ) with
+
+Q(x,
+
+a;
+
+)
+
+=
+
+V
+
+(x;
+
+)
+
++
+
+A(x,
+
+a;
+
+)
+
+-
+
+1 |A|
+
+A(x, a ; ).
+
+a
+
+Recently, (Hessel et al., 2017) introduced Rainbow, a value-based reinforcement learning agent combining many of these improvements into a single agent and demonstrating that they are largely complementary. Rainbow significantly out performs previous methods, but also inherits the poorer time-efficiency of the DQN framework. In the remainder of the section we will describe in more depth other recent improvements to DQN.
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+2.1.1 PRIORITIZED EXPERIENCE REPLAY
+
+The experience replay buffer was first introduced by (Lin, 1992) and later used in DQN (Mnih et al., 2015). Typically, the replay buffer is essentially a first-in-first-out queue with new transitions gradually replacing older transitions. The agent would then sample a mini-batch uniformly at random from the replay buffer. Drawing inspiration from prioritized sweeping (Moore & Atkeson, 1993), prioritized experience replay replaces the uniform sampling with prioritized sampling proportional to the absolute TD error (Schaul et al., 2016).
+
+Specifically, for a replay buffer of size N , prioritized experience replay samples transition t with probability P (t), and applies weighted importance-sampling with wt to correct for the prioritization bias, where
+
+P (t) =
+
+pt k pk
+
+,
+
+wt =
+
+1· 1 N P (t)
+
+
+,
+
+pt = |t| + ,
+
+, , > 0.
+
+(2)
+
+Prioritized DQN significantly increases both the sample-efficiency and final performance over DQN on the Atari 2600 benchmarks (Schaul et al., 2015).
+
+2.1.2 RETRACE()
+
+Retrace() is a convergent off-policy multi-step algorithm extending the DQN agent (Munos et al.,
+2016). Assume that some trajectory {x0, a0, r0, x1, a1, r1, . . . , xt, at, rt, . . . , } has been generated according to behaviour policy µ, i.e., at  µ(·|xt). Now we aim to evaluate the value of a different target policy , i.e. we want to estimate Q. The Retrace algorithm will update our current estimate Q of Q in the direction of
+
+Q(xt, at) d=ef sts-t(ct+1 . . . cs)sQ,
+
+(3)
+
+where sQ d=ef rs + E[Q(xs+1, ·)] - Q(xs, as) is the temporal difference at time s under , and
+
+cs =  min 1, s ,
+
+s
+
+=
+
+(as|xs µ(as|xs
+
+) )
+
+.
+
+(4)
+
+The Retrace algorithm comes with the theoretical guarantee that in finite state and action spaces, repeatedly updating our current estimate Q according to (3) produces a sequence of Q functions which converges to Q for a fixed  or to Q if we consider a sequence of policies  which become increasing greedy w.r.t. the Q estimates (Munos et al., 2016).
+
+2.1.3 DISTRIBUTIONAL RL
+
+Distributional reinforcement learning refers to a class of algorithms that directly estimate the distribution over returns, whose expectation gives the traditional value function (Bellemare et al., 2017). Such approaches can be made tractable with a distributional Bellman equation, and the recently proposed algorithm C51 showed state-of-the-art performance in the Atari 2600 benchmarks. C51 parameterizes the distribution over returns with a mixture over Diracs centered on a uniform grid,
+
+N -1
+Q(x, a; ) = qi(x, a; )zi,
+i=0
+
+qi =
+
+ei (x,a)
+
+N -1 j=0
+
+ej
+
+(x,a)
+
+,
+
+zi
+
+=
+
+vmin
+
++
+
+i
+
+vmax N
+
+- -
+
+vmin 1
+
+,
+
+with hyperparameters vmin, vmax that bound the distribution support of size N .
+
+(5)
+
+2.2 ACTOR-CRITIC ALGORITHMS
+
+In this section we review the actor-critic framework for reinforcement learning algorithms and
+
+then discuss recent advances in actor-critic algorithms along with their various trade-offs. The
+
+asynchronous advantage actor-critic (A3C) algorithm (Mnih et al., 2016), maintains a parameterized policy (a|x; ) and value function V (x; v), which are updated with
+
+ =  log (at|xt; )A(xt, at; , v),
+
+v = A(xt, at; , v)v V (xt),
+
+(6)
+
+n-1
+where, A(xt, at; , v) = krt+k + nV (xt+n) - V (xt).
+
+(7)
+
+k
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+A3C uses M = 16 parallel CPU workers, each acting independently in the environment and applying the above updates asynchronously to a shared set of parameters. In contrast to the previously discussed value-based methods, A3C is an on-policy algorithm, and does not use a GPU nor a replay buffer.
+Proximal Policy Optimization (PPO) is a closely related actor-critic algorithm (Schulman et al., 2017), which replaces the advantage (7) with,
+min(tA(xt, at; , v), clip(t, 1 - , 1 + )A(xt, at; , v)), > 0,
+where t is as defined in Section 2.1.2. Although both PPO and A3C run M parallel workers collecting trajectories independently in the environment, PPO collects these experiences to perform a single, synchronous, update in contrast with the asynchronous updates of A3C.
+Actor-Critic Experience Replay (ACER) extends the A3C framework with an experience replay buffer, Retrace algorithm for off-policy corrections and Truncated Importance Sampling Likelihood Ratio (TISLR) algorithm used for off-policy policy optimization (Wang et al., 2017).
+
+3 THE REACTOR
+
+The Reactor is a combination of four novel contributions on top of recent improvements to both deep value-based RL and policy-gradient algorithms. Each contribution moves Reactor towards our goal of achieving both sample and time efficiency.
+
+3.1 -LOO
+
+The Reactor architecture represents both a policy (a|x) and action-value function Q(x, a). We use a policy gradient algorithm to train the actor  which makes use of our current estimate Q(x, a) of Q(x, a). Let V (x0) be the value function at some initial state x0, the policy gradient theorem (Sutton et al., 2000) says that V (x0) = E t t a Q(xt, a)(a|xt) , where  refers to the gradient w.r.t. policy parameters. We now consider several possible ways to estimate this gradient.
+
+To simplify notation, we drop the dependence on the state x for now and consider the problem of
+
+estimating the quantity
+
+G = aQ(a)(a).
+
+(8)
+
+In the off-policy case, we consider estimating G using a single action A drawn from a (possibly different from ) behaviour distribution A  µ. Let us assume that for the chosen action A we have access to an estimate R(A) of Q(A). Then we can use likelihood ratio (LR) method combined with an importance sampling (IS) ratio (which we call ISLR) to build an unbiased estimate of G:
+
+G^ ISLR
+
+=
+
+(A) µ(A)
+
+(R(A)
+
+-
+
+V
+
+) log (A),
+
+where V is a baseline that depend on the state but not on the chosen action. However this estimate suffers from high variance. A possible way for reducing variance is to estimate G directly from (8) by using the return R(A) for the chosen action A and our current estimate Q of Q for the other
+actions, which leads to the so-called leave-one-out (LOO) policy-gradient estimate:
+
+G^LOO = R(A)(A) + a=AQ(a)(a).
+
+(9)
+
+This estimate has low variance but may be biased if the estimated Q values differ from Q. A better
+
+bias-variance tradeoff may be obtained by the more general -LOO policy-gradient estimate:
+
+G^-LOO = (R(A) - Q(A))(A) + aQ(a)(a),
+
+(10)
+
+where  = (µ, , A) can be a function of both policies  and µ and the selected action A. Notice
+
+that when  = 1, (10) reduces to (9), and when  = 1/µ(A), then (10) is
+
+G^
+
+1 µ
+
+-LOO
+
+=
+
+(A) µ(A)
+
+(R(A)
+
+-
+
+Q(A))
+
+log
+
+(A)
+
++
+
+aQ(a)(a).
+
+(11)
+
+This estimate is unbiased and can be seen as a generalization of G^ISLR where instead of using a state-only dependent baseline, we use a state-and-action-dependent baseline (our current estimate Q) and add the correction term a (a)Q(a) to cancel the bias. Proposition 1 gives our analysis of the bias of G-LOO, with a proof left to the Appendix.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+3. Shift distribution by rt
+rt
+
+1. Mix action-value distributions by 
+E
+
+2. Shrink mixed distribution by 4. Obtain target probabilities
+
+rt
+
+E
+
+rt+1
+
+E
+
+Figure 1: Single-step (left) and multi-step (right) distribution bootstrapping.
+
+Proposition 1. Assume A  µ and that E[R(A)] = Q(A). Then, the bias of G-LOO is µ(a)(a))(a)[Q(a) - Q(a)] .
+
+a(1 -
+
+Thus the bias is small when (a) is close to 1/µ(a), or when the Q-estimates are close to the true Q values, and unbiased regardless of the estimates if (a) = 1/µ(a). The variance is low when 
+
+is small, therefore, in order to improve the bias-variance tradeoff we recommend using the -LOO
+
+estimate with  defined as: (A) = min
+
+c,
+
+1 µ(A)
+
+, for some constant c  1. This truncated 1/µ
+
+coefficient shares similarities with the truncated IS gradient estimate introduced in (Wang et al., 2017)
+
+(which we call TISLR for truncated-ISLR):
+
+G^TISLR = min
+
+c,
+
+(A) µ(A)
+
+(R(A) - V ) log (A)+
+a
+
+(a) µ(a)
+
+-
+
+c
+
+µ(a)(Q (a)
++
+
+-
+
+V
+
+)
+
+log
+
+(a).
+
+The differences are: (i) we truncate 1/µ(A) = (A)/µ(A) × 1/(A) instead of truncating
+
+(A)/µ(A), which provides an additional variance reduction due to the variance of the LR
+
+ log (A)
+
+=
+
+(A) (A)
+
+(since
+
+this
+
+LR
+
+may
+
+be
+
+large
+
+when
+
+a
+
+low
+
+probability
+
+action
+
+is
+
+chosen),
+
+and
+
+(ii)
+
+we use our Q-baseline instead of a V baseline, reducing further the variance of the LR estimate.
+
+3.2 DISTRIBUTIONAL RETRACE
+In off-policy learning it is very difficult to produce an unbiased sample R(A) of Q(A) when following another policy µ. This would require using full importance sampling correction along the trajectory. Instead, we use the off-policy corrected return computed by the Retrace algorithm, which produces a (biased) estimate of Q(A) but whose bias vanishes asymptotically (Munos et al., 2016).
+In Reactor, we consider predicting an approximation of the return distribution function from any state-action pair (x, a) in a similar way as in Bellemare et al. (2017). The original algorithm C51 described in that paper considered single-step Bellman updates only. Here we need to extend this idea to multi-step updates and handle the off-policy correction performed by the Retrace algorithm, as defined in (3). Here is a description of those two extensions.
+
+multi-step distributional Bellman operator: First, we extend C51 to multi-step Bellman backups.
+We consider return-distributions from (x, a) of the form i qi(x, a)zi (where z denotes a Dirac in z) which are supported on a finite uniform grid {zi}  [vmin, vmax]. The coefficients qi(x, a) (discrete distribution) corresponds to the probabilities assigned to each atom zi of the grid. From an observed n-step sequence {xt, at, rt, xt+1, . . . , xt+n}, generated by behavior policy (i.e, as  µ(·|xs) for t  s < t + n), we build the n-step backed-up return-distribution from (xt, at) (for any action a
+selected at the last state of the sequence):
+
+t+n-1
+
+qin,a(xt, at)zin , with zin =
+
+s-trs + nzi and qin,a(xt, at) = qin(xt+n, a).
+
+i s=t
+
+Since this distribution is supported on the set of atoms {zin}, which is not necessarily aligned with the grid {zi}, we do a projection step and minimize the KL-loss between the projected target and the current estimate, just as with C51 except with a different target distribution (Bellemare et al., 2017).
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+Distributional Retrace: Now, the Retrace algorithm defined in (3) involves an off-policy correction which is not handled by the previous n-step distributional Bellman backup. The key to extending this distributional back-up to off-policy learning is to rewrite the Retrace algorithm as a linear combination of n-step Bellman backups, weighted by some coefficients n,a. Indeed, notice that (3) rewrites as
+
+Q(xt, at) =
+
+t+n-1
+
+n,a
+
+s-trs + nQ(xt+n, a) - Q(xt, at),
+
+n1 aA
+
+s=t
+
+n-step Bellman backup
+
+where n,a = ct+1 . . . ct+n-1 (a|xt+n) - I{a = at+n}ct+n . These coefficients depend on the degree of off-policy-ness (between µ and ) along the trajectory. We have that n1 a n,a =
+n1 ct+1 . . . ct+n-1 (1 - ct+n) = 1, but notice some coefficients may be negative. However, in expectation (over the behavior policy) they are non-negative. Indeed,
+
+Eµ[n,a] = E ct+1 . . . ct+n-1 Eat+nµ(·|xt+n) (a|xt+n) - I{a = at+n}ct+n|xt+n
+
+=
+
+E ct+1 . . . ct+n-1
+
+(a|xt+n) - µ(a|xt+n) min
+
+1,
+
+(a|xt+n) µ(a|xt+n)
+
+ 0,
+
+by definition of the cs coefficients (4). Thus in expectation (over the behavior policy), the Retrace update can be seen as a convex combination of n-step Bellman updates.
+
+Then, the distributional Retrace algorithm can be defined as backing up a mixture of n-step distributions. More precisely, we define the Retrace target distribution as:
+
+qi(xt, at)zi , with qi(xt, at) =
+
+n,a qjn(xt, at)hzi (zjn),
+
+i=1
+
+n1 a
+
+j
+
+and update the current probabilities q(xt, at) by performing a gradient step on the KL-loss
+
+KL(q(xt, at), q(xt, at)) = - qi(xt, at) log qi(xt, at).
+i
+
+(12)
+
+Again, notice that some target "probabilities" qi(xt, at) may be negative for some sample trajectory, but in expectation they will be non-negative. Since the gradient of a KL-loss is linear w.r.t. its first
+argument, our update rule (12) provides an unbiased estimate of the gradient of the KL between the expected (over the behavior policy) Retrace target distribution and the current predicted distribution.1
+
+Remark: The same method can be applied to other algorithms (such as TB() (Precup et al., 2000) and importance sampling (Precup et al., 2001)) in order to derive distributional versions of other off-policy multi-step RL algorithms.
+
+3.3 PRIORITIZED SEQUENCE REPLAY
+Prioritized experience replay has been shown to boost both statistical efficiency and final performance of deep RL agents (Schaul et al., 2016). However, as originally defined prioritized replay does not handle sequences of transitions and weights all unsampled transitions identically. In this section we present an alternative initialization strategy, called lazy initialization, and argue that it better encodes prior information about temporal difference errors. We then briefly describe our computationally efficient prioritized sequence sampling algorithm, with full details left to the appendix.
+It is widely recognized that TD errors tend to be temporally correlated, indeed the need to break this temporal correlation has been one of the primary justifications for the use of experience replay (Mnih et al., 2015). Our proposed algorithm begins with this fundamental assumption.
+Assumption 1. Temporal differences are temporally correlated, with correlation decaying on average with the time-difference between two transitions.
+Prioritized experience replay adds new transitions to the replay buffer with a constant priority, but given the above assumption we can devise a better method. Specifically, we propose to add experience
+1We store past action probabilities µ together with actions taken in the replay memory.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+DQN A3C
+Reactor
+
+Algorithm
+DQN Double DQN Dueling Prioritized DQN Rainbow A3C Reactor Reactor 500m Reactor*
+
+Training Time
+8 days 8 days 8 days 8 days 10 days 4 days < 2 days 4 days < 1 day
+
+Type
+GPU GPU GPU GPU GPU CPU CPU CPU CPU
+
+# Workers
+1 1 1 1 1 16 10+1 10+1 20+1
+
+Figure 2: (Left) The model of parallelism of DQN, A3C and Reactor architectures. Each row represents a separate thread. In Reactor's case, each worker, consiting of a learner and an actor is run on a separate worker machine. (Right) Comparison of training times and resources for various algorithms.
+
+to the buffer with no priority, inserting a priority only after the transition has been sampled and used for training. Also, instead of sampling transitions, we assign priorities to all (overlapping) sequences of length 32. When sampling, sequences with an assigned priority are sampled proportionally to that priority. Sequences with no assigned priority are sampled proportionally to the average priority of assigned priority sequences within some local neighbourhood. Averages are weighted to compensate for sampling biases (i.e. more samples are made in areas of hight estimated priorities, and in the absence of weighting this would lead to overestimation of unassigned priorities).
+
+The lazy initialization scheme starts with priorities pt corresponding to the sequences
+
+{xt, at, . . . , xt+n} for which a priority was already assigned. Then it extrapolates a priority to
+
+all other sequences in the following way. Let us define a partition (Ii)i of the states ordered by
+
+increasing time such that each cell Ii contains exactly one state si with already assigned priority. We
+
+define the estimated priority p^t to all other sequences as p^t =
+
+si J (t)
+
+i
+
+wi J(t) wi
+
+p(si), where J(t)
+
+is a collection of contiguous cells (Ii) containing time t, and wi = |Ii| is the length of the cell Ii
+
+containing si. (and we define p^t = pt for already assigned priorities). Cell sizes work as estimates of inverse local density and are used as importance weights for priority estimation 2. So far we have
+
+defined a class of algorithms all free to choose the partition (Ii) and the collection of cells I(t), as
+
+long that they satisfy the above constraints.
+
+Now with probability we sample uniformly at random, and with probability 1 - we sample proportionally to p^t. We implemented an algorithm satisfying the above constraints and called it Contextual Priority Tree (CPT). It is based on AVL trees (Velskii & Landis, 1976) and can execute sampling, insertion, deletion and density evaluation in O(n ln(n)) time. We describe CPT in detail in
+the Appendix in Section 6.3.
+
+We treated prioritization as purely a variance reduction technique. Importance-sampling weights were evaluated as in prioritized experience replay, with fixed  = 1 in (2). We used simple gradient magnitude estimates as priorities: 1) a mean absolute TD error along a sequence for Retrace as
+defined in (3) in a classical RL case and 2) total variation in the distributional Retrace case.
+
+3.4 AGENT ARCHITECTURE
+In order to improve CPU utilization we decoupled acting from learning. This is an important aspect of our architecture: an acting thread receives observations, submits actions to the environment, and stores transitions in memory, while a learning thread re-samples sequences of experiences from memory and trains on them (Figure 2, left). We typically execute 4-6 acting steps per each learning step. We sample sequences of length 33 in batches of 4.
+We allow the agent to be distributed over multiple machines each containing action-learner pairs. Both the network and target network are stored on a shared parameter server while each machine contains its own local replay memory. Training is done by downloading a shared network, evaluating local gradients and sending them to be applied on the shared network. While the agent can also be trained on a single machine, in this work we present results of training obtained with 10 actor-learner
+2Not to be confused with importance weights of produced samples.
+
+7
+
+Under review as a conference paper at ICLR 2018
+Figure 3: (Left) 'Reactor' includes distributional Retrace algorithm, prioritized replay and beta-LOO policy gradient with  = 1. The other curves show algorithms performance by removing each of the components and changing the number of workers. (Right) Performance of Reactor as a function of real time in hours compared to other state-of-art algorithms. Rainbow learning curve provided by Hessel et al. (2017) by request.
+workers and one parameter server. In Figure 2 (right) we compare resources and runtimes of Reactor with related algorithms.3
+3.4.1 NETWORK ARCHITECTURE
+In some domains, such as Atari, it is useful to base decisions on a short history of past observations. Two techniques are generally used to achieve this: 1) frame stacking and 2) recurrent network architectures. We chose the latter over the former for reasons of implementation simplicity and computational efficiency. As the Retrace algorithm requires evaluating action-values over contiguous sequences of trajectories, using a recurrent architecture allowed each frame to be processed by the convolutional network only once, as opposed to n times times if n frame concatenations were used. The Reactor architecture uses a recurrent neural network which takes an observation xt as input and produces two outputs: categorical action-value distributions qi(xt, a) (i here is a bin identifier), and policy probabilities (a|xt). We use an architecture inspired by the duelling network architecture (Wang et al., 2015). We split action-value -distribution logits into state-value logits and advantage logits, which in turn are connected to the same LSTM network (Hochreiter & Schmidhuber, 1997). Final action-value logits are produced by summing state- and action-specific logits. Finally, a softmax layer on top for each action produces the distributions over discounted future returns. The policy head uses a softmax layer mixed with a fixed uniform distribution over actions, where this mixing ratio is a hyperparameter (Wiering (1999) Section 5.1.3.). Policy and Q-networks have separate LSTMs. Both LSTMs are connected to a shared linear layer which is connected to a shared convolutional neural network (Krizhevsky et al., 2012). The precise network specification is given in Table 3 in the Appendix. Gradients coming from the policy LSTM are blocked and only gradients originating from the Qnetwork LSTM are allowed to back-propagate into the convolutional neural network. We block gradients from the policy head for increased stability, as this avoids positive feedback loops between  and qi caused by shared representations. We used the Adam optimiser (Kingma & Ba, 2014), with a learning rate of 5 × 10-5 and zero momentum because asynchronous updates induce implicit momentum (Mitliagkas et al., 2016). Further discussion of hyperparameters and their optimization can be found in Appendix 6.1.
+4 EXPERIMENTAL RESULTS
+Figure 3 compares the performance of Reactor with the original Categorical DQN ((Bellemare et al., 2017)) algorithm and different versions of Reactor each time leaving one of the algorithmic improvements out. Reactor outperforms Categorical DQN by a wide margin. We can also see that each of the algorithmic improvements (Distributional retrace, beta-LOO and prioritized replay) contributed to the final results. While prioritization was arguably the most important component,
+3All results are reported with respect to the total number of observations obtained over all worker machines.
+8
+
+Under review as a conference paper at ICLR 2018
+
+Beta-LOO clearly outperformed TISLR algorithm. Although distributional and non-distributional versions performed similarly in terms of median human normalized scores, distributional version of the algorithm generalized better when tested with random human starts (Table 1).
+4.1 COMPARING TO PRIOR WORK
+We evaluated Reactor with target update frequency Tupdate = 1000,  = 1.0 and -LOO with  = 1 on 57 Atari games trained on 10 machines in parallel. We averaged scores over 200 episodes using 30 random human starts and noop starts (Tables 4 and 5 in the Appendix). We calculated mean and median human normalised scores across all games. We also ranked all algorithms (including random and human scores) for each game and evaluated mean rank of each algorithm across all 57 Atari games. We also evaluated mean Rank and Elo scores for each algorithm for both human and noop start settings. Please refer to Section 6.2 in the Appendix for more details.
+In Table 1, we see that Reactor, with 200 million steps, exceeds the performance of all algorithms across all metrics, except for Rainbow where the story is mixed. However, the difference in time-efficiency is especially apparent when comparing Reactor and Rainbow (see Figure 3, right). Additionally, unlike Rainbow, Reactor does not use Noisy Networks (Fortunato et al., 2017), which was reported to have contributed to the performance gains.
+Regarding ACER (Wang et al., 2016), another Retrace-based actor-critic architecture, both classical and distributional versions of Reactor (Figure 3) exceeded the best reported median human normalized score of 1.9 with noop starts achieved in 500 million steps 4.
+
+ALGORITHM
+RANDOM HUMAN
+DQN DDQN DUEL PRIOR PRIOR. DUEL. A3C LSTM RAINBOW REACTOR ND 5 REACTOR REACTOR 500M
+
+NORMALIZED
+SCORES
+0.00 1.00 0.69 1.11 1.17 1.13 1.15 1.13 1.53
+1.51 1.65 1.82
+
+MEAN
+RANK
+11.65 6.82 9.05 7.63 6.35 6.63 6.25 6.30 4.18
+4.98 4.58 3.65
+
+ELO
+-563 0
+-172 -58 32 13 40 37 186 126 156 227
+
+ALGORITHM
+RANDOM HUMAN
+DQN DDQN DUEL PRIOR PRIOR. DUEL. ACER4 500M RAINBOW REACTOR ND 5 REACTOR REACTOR 500M
+
+NORMALIZED
+SCORES
+0.00 1.00 0.79 1.18 1.51 1.24 1.72 1.9 2.31
+1.80 1.87 2.30
+
+MEAN
+RANK
+10.93 6.89 8.65 7.28 5.19 6.11 5.44
+3.63 4.53 4.46 3.47
+
+ELO
+-673 0
+-167 -27 143 70 126
+270 195 196 280
+
+Table 1: Random human starts
+
+Table 2: 30 random no-op starts.
+
+Table 1 compares two versions of our algorithm 5. with several other state-of-art algorithms across 57 Atari games for a fixed random seed across all games (Bellemare et al., 2013). The algorithms that we compare Reactor against are: DQN (Mnih et al., 2015), Double DQN (Van Hasselt et al., 2016), DQN with prioritised experience replay (Schaul et al., 2015) and dueling architecture and prioritised dueling architecture (Wang et al., 2015). Each algorithm was exposed to 200 million frames of experience (unless stated otherwise) and the same pre-processing pipeline including 4 action repeats was used as in the original DQN paper (Mnih et al., 2015).
+
+5 CONCLUSION
+In this work we presented a new off-policy agent based on Retrace actor-critic architecture and show that it can achieve similar performance as the current state-of-the-art while giving significant real-time performance gains. We demonstrate the benefits of each of the suggested algorithmic improvements, including Distributional Retrace, beta-LOO policy gradient and contextual priority tree.
+4 Score for ACER in Table 2 was obtained from (Figure 1 in Wang et al. (2016)), but is not directly comparable due to the authors' use of a cumulative maximization along each learning curve before taking the median.
+5 `ND` stands for a non-distributional (i.e. classical) version of Reactor using Retrace (Munos et al., 2016).
+
+9
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Oron Anschel, Nir Baram, and Nahum Shimkin. Averaged-dqn: Variance reduction and stabilization for deep reinforcement learning. In International Conference on Machine Learning, pp. 176­185, 2017.
+Marc G Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning environment: An evaluation platform for general agents. J. Artif. Intell. Res.(JAIR), 47:253­279, 2013.
+Marc G Bellemare, Will Dabney, and Rémi Munos. A distributional perspective on reinforcement learning. arXiv preprint arXiv:1707.06887, 2017.
+Meire Fortunato, Mohammad Gheshlaghi Azar, Bilal Piot, Jacob Menick, Ian Osband, Alex Graves, Vlad Mnih, Remi Munos, Demis Hassabis, Olivier Pietquin, et al. Noisy networks for exploration. arXiv preprint arXiv:1706.10295, 2017.
+Shixiang Gu, Timothy Lillicrap, Zoubin Ghahramani, Richard E Turner, and Sergey Levine. Q-prop: Sample-efficient policy gradient with an off-policy critic. International Conference on Learning Representations, 2017.
+Frank S He, Yang Liu, Alexander G Schwing, and Jian Peng. Learning to play in a day: Faster deep reinforcement learning by optimality tightening. In International Conference on Learning Representations, 2017.
+Matteo Hessel, Joseph Modayil, Hado Van Hasselt, Tom Schaul, Georg Ostrovski, Will Dabney, Dan Horgan, Bilal Piot, Mohammad Azar, and David Silver. Rainbow: Combining improvements in deep reinforcement learning. arXiv preprint arXiv:1710.02298, 2017.
+Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural networks. In Advances in neural information processing systems, pp. 1097­1105, 2012.
+Timothy P Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. arXiv preprint arXiv:1509.02971, 2015.
+Long-H Lin. Self-improving reactive agents based on reinforcement learning, planning and teaching. Machine learning, 8(3/4):69­97, 1992.
+Ioannis Mitliagkas, Ce Zhang, Stefan Hadjis, and Christopher Ré. Asynchrony begets momentum, with an application to deep learning. In Communication, Control, and Computing (Allerton), 2016 54th Annual Allerton Conference on, pp. 997­1004. IEEE, 2016.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015.
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy P Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In International Conference on Machine Learning, 2016.
+Andrew W Moore and Christopher G Atkeson. Prioritized sweeping: Reinforcement learning with less data and less time. Machine learning, 13(1):103­130, 1993.
+Rémi Munos, Tom Stepleton, Anna Harutyunyan, and Marc Bellemare. Safe and efficient off-policy reinforcement learning. In Advances in Neural Information Processing Systems, pp. 1046­1054, 2016.
+10
+
+Under review as a conference paper at ICLR 2018
+Brendan O'Donoghue, Remi Munos, Koray Kavukcuoglu, and Volodymyr Mnih. Combining policy gradient and q-learning. International Conference on Learning Representations, 2017.
+Doina Precup, Richard S Sutton, and Satinder Singh. Eligibility traces for off-policy policy evaluation. In Proceedings of the Seventeenth International Conference on Machine Learning, 2000.
+Doina Precup, Richard S Sutton, and Sanjoy Dasgupta. Off-policy temporal-difference learning with function approximation. In Proceedings of the 18th International Conference on Machine Laerning, pp. 417­424, 2001.
+Martin Riedmiller. Neural fitted q iteration-first experiences with a data efficient neural reinforcement learning method. In ECML, volume 3720, pp. 317­328. Springer, 2005.
+Tom Schaul, John Quan, Ioannis Antonoglou, and David Silver. Prioritized experience replay. arXiv preprint arXiv:1511.05952, 2015.
+Tom Schaul, John Quan, Ioannis Antonoglou, and David Silver. Prioritized experience replay. In International Conference on Learning Representations, 2016.
+John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz. Trust region policy optimization. In Proceedings of the 32nd International Conference on Machine Learning (ICML-15), pp. 1889­1897, 2015.
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, et al. Mastering the game of go with deep neural networks and tree search. Nature, 529(7587):484­489, 2016.
+David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, Yutian Chen, Timothy Lillicrap, Fan Hui, Laurent Sifre, George van den Driessche, Thore Graepel, and Demis Hassabis. Mastering the game of go without human knowledge. Nature, 550(7676):354­359, 10 2017. URL http: //dx.doi.org/10.1038/nature24270.
+Richard S. Sutton, David Mcallester, Satinder Singh, and Yishay Mansour. Policy gradient methods for reinforcement learning with function approximation. In In Advances in Neural Information Processing Systems 12, pp. 1057­1063. MIT Press, 2000.
+Hado Van Hasselt, Arthur Guez, and David Silver. Deep reinforcement learning with double qlearning. In AAAI, pp. 2094­2100, 2016.
+Adel'son G Velskii and E Landis. An algorithm for the organisation of information. Dokl. Akad. Nauk SSSR, 146:263­266, 1976.
+Alexander Sasha Vezhnevets, Simon Osindero, Tom Schaul, Nicolas Heess, Max Jaderberg, David Silver, and Koray Kavukcuoglu. Feudal networks for hierarchical reinforcement learning. arXiv preprint arXiv:1703.01161, 2017.
+Ziyu Wang, Tom Schaul, Matteo Hessel, Hado van Hasselt, Marc Lanctot, and Nando de Freitas. Dueling network architectures for deep reinforcement learning. International Conference on Machine Learning, pp. 1995­2003, 2015.
+Ziyu Wang, Victor Bapst, Nicolas Heess, Volodymyr Mnih, Remi Munos, Koray Kavukcuoglu, and Nando de Freitas. Sample efficient actor-critic with experience replay. arXiv preprint arXiv:1611.01224, 2016.
+Ziyu Wang, Victor Bapst, Nicolas Heess, Volodymyr Mnih, Remi Munos, Koray Kavukcuoglu, and Nando de Freitas. Sample efficient actor-critic with experience replay. In International Conference on Learning Representations, 2017.
+C. J. C. H. Watkins and P. Dayan. Q-learning. Machine Learning, 8(3):272­292, 1992.
+11
+
+Under review as a conference paper at ICLR 2018 Marco A Wiering. Explorations in efficient reinforcement learning. PhD thesis, University of
+Amsterdam, 1999. Dongbin Zhao, Haitao Wang, Kun Shao, and Yuanheng Zhu. Deep reinforcement learning with
+experience replay based on sarsa. In Computational Intelligence (SSCI), 2016 IEEE Symposium Series on, pp. 1­6. IEEE, 2016.
+12
+
+Under review as a conference paper at ICLR 2018
+
+6 APPENDIX
+Proposition 1. Assume A  µ and that E[R(A)] = Q(A). Then, the bias of G-LOO is µ(a)(a))(a)[Q(a) - Q(a)] .
+
+a(1 -
+
+Proof. The bias of G^-LOO is
+
+E[G^-LOO] - G =
+
+µ(a)[(a)(E[R(a)] - Q(a))](a) + Q(a)(a) - G
+
+aa
+
+= (1 - µ(a)(a))[Q(a) - Q(a)](a)
+
+a
+
+6.1 HYPERPARAMETER OPTIMIZATION
+As we believe that algorithms should be robust with respect to the choice of hyperparameters, we spent little effort on parameter optimization. In total, we explored three distinct values of learning rates and two values of ADAM momentum (the default and zero) and two values of Tupdate on a subset of 7 Atari games without prioritization using non-distributional version of Reactor. We later used those values for all experiments. We did not optimize for batch sizes and sequence length or any prioritization hyperparamters.
+6.2 RANK AND ELO EVALUATION
+Commonly used mean and median human normalzied scores are have several disadvantages. A mean human normalized score implicitly puts more weight on games where computers are good and humans are bad at. Comparing algorithm by a mean human normalized score across 57 Atari games is almost equivalent to comparing algorithms on a small subset of games dominating the signal. Typically a set of ten most score-generous games, namely Assault, Asterix, Breakout, Demon Attack, Double Dunk, Gopher, Pheonix, Stargunner, Up'n Down and Video Pintball can explain more than half of inter-algorithm variance. A median human normalized score has the opposite disadvantage by efectively discarding very easy and very hard games from the comparison. As typical median human nomalized scores are within the range of 1-2.5, an algorithm which scores zero points on Montezuma's Revenge is evaluated equal to the one which scores 2500 points, as both performance levels are still below human performance making incremental improvements on hard games not being reflected in the overall evaluation. In order to address both problem, we also evaluated Mean Rank and Elo metrics for inter-algorithm comparison. Those metrics implicitly assign the same weight to each game, and is more sensitive of relative performance on very hard and easy games: swapping scores of two algorithms on any game would results in the change of both Mean Eank and Elo metrics.
+We calculated separate mean Rank and Elo scores for each algorithm by using results of test evaluations with 30 random noop-starts and 30 random human starts by using data from tables 4 and 5. All algorithms were ranked across each game separately, and a mean rank metric was evaluated by calculating a mean rank across 57 Atari games. For Elo score evaluation algorithm A was considered to win over algorithm B if it collects more score on a given Atari. We produced an empirical win-probabolity matrix by summing wins across all games and used this matrix to evaluate Elo scores. Ranking difference of 400 corresponds to the odds of winning of 10:1 under the Gaussian assumption.
+6.3 CONTEXTUAL PRIORITY TREE
+Proportional priority distribution was implemented as follows. All sequence keys were put into a balanced binary search tree sorted by temporal order. An AVL tree (Velskii & Landis (1976)) was chosen due to the ease of implementation and because it is on average more evenly balanced than a Red-Black Tree.
+Each tree node has up to two children (left and right) and contains currently stored key and a priority of the key which is either set or is unknown. Some trees may only have a single child subtree while
+13
+
+Under review as a conference paper at ICLR 2018
+Figure 4: Rules used to evaluate summary statistics on each node of a binary search tree where all sequence keys are kept sorted by temporal order. cl and cr are total number of nodes within left and right subtrees. ml and ml are estimated mean priorities per node within the subtree. A central square node corresponds to a single key stored within the parent node with its corresponding priority of p (if set) or ? if not set. Red subtrees do not have any singe child with a set priority, and a result do not have priority estimates. A red square shows that priority of the key stored within the parent node is not known. Unknown mean priorities is marked by a question mark. Empty child nodes simply behave as if c = 0 with p =?. Rules a-f illustrate how mean values are propagated down from children to parents when priorities are only partially known (rules d and e also apply symmetrically). Sampling is done by going from the root node up the tree by selecting one of the children (or the current key) stochastically proportional to orange proportions. Sampling terminates once the current (square) key is chosen.
+Figure 5: Example of a balanced priority tree. Dark blue nodes contain keys with known priorities, light blue nodes have at least one child with at least a single known priority, while ping nodes do not have any priority estimates. Nodes 1, 2 and 3 will obtain priority estimates equal to 2/3 of the priority of key 5 and 1/3 of the priority of node 4. This implies that estimated priorities of keys 1, 2 and 3 are implicitly defined by keys 4 and 6. Nodes 8, 9 and 11 are estimated to have the same priority as node 10.
+14
+
+Under review as a conference paper at ICLR 2018
+some may have none. In addition to this information, we were tracking other summary statistics at each node which was re-evaluated after each tree rotation. The summary statistics was evaluated by consuming previously evaluated summary statistics of both children and a priority of the key stored within the current node. In particular, we were tracking a total number of nodes within each subtree and mean-priority estimates updated according to rules shown in Figure 4. Total number of nodes within each subtree was always known (c in Figure 4), while mean priority estimates per key (m in Figure 4) could either be known or unknown. The main idea behind the rules was that if a mean priority of either one child subtree or a key stored within the current node is unknown then it can be estimated to by exploiting information coming from another sibling subtree or a priority stored within the parent node. Sampling is done by traversing the tree from the root node up while sampling either one of the children subtrees or the currently held key proportionally to the total estimated priority masses contained within. The rules used to evaluate proportions are shown in orange in Figure 4. Similarly, probabilities of arbitrary keys can be queried by traversing the tree from the root node towards the child node of an interest while maintaining a product of probabilities at each branching point. Insertion, deletion, sampling and probability query operations can be done in O(ln(n)) time. The suggested algorithm has a desired property that it becomes a simple proportional sampling algorithm once all the priorities are known. While some key priorities are unknown, they are estimated by using nearby known key priorities (Figure 5). Each time when a new sequence key is added to the tree, it is set to have an unknown priority. A priority gets set only after the key gets first sampled the corresponding sequence gets passed through the learner. When a priority of a key is set or updated, the key node is deliberately removed from and placed back to the tree in order to become a leaf-node. This helps to set priorities of nodes in the immediate vicinity more accurately by using the freshest information available. 6.4 NETWORK ARCHITECTURE The value of = 0.01 is the minimum probability of choosing a random action and it is hard-coded into the policy network. 6.5 ATARI RESULTS
+15
+
+Under review as a conference paper at ICLR 2018
+
+Table 3: Specification of the neural network used.
+
+LAYER
+CONVOLUTIONAL
+CONV 1 CONCATRELU
+CONV 2 CONCATRELU
+CONV 3 CONCATRELU FULLY CONNECTED
+LINEAR CONCATRELU RECURRENT
+ AND µ^ LSTM LINEAR CONCATRELU LINEAR SOFTMAX X(1- )+ /#ACTIONS RECURRENT Q LSTM VALUE LOGIT HEAD LINEAR CONCATRELU LINEAR ADVANTAGE LOGIT HEAD LINEAR CONCATRELU
+
+INPUT
+SIZE
+[84, 84, 1] [20, 20, 16] [20, 20, 32]
+[9, 9, 32] [9, 9, 64] [7, 7, 32]
+[7, 7, 64] [128]
+[256] [128] [32] [64] [#ACTIONS] [#ACTIONS]
+[256]
+[128] [32] [64]
+[128] [32]
+
+PARAMETERS
+
+KERNEL WIDTH
+[8, 8]
+
+OUTPUT CHANNELS
+16
+
+STRIDES
+4
+
+[4, 4]
+
+32
+
+2
+
+[3, 3]
+
+32
+
+1
+
+OUTPUT SIZE 128
+
+OUTPUT SIZE
+
+128 32
+
+#ACTIONS #ACTIONS #ACTIONS OUTPUT SIZE
+128 OUTPUT SIZE
+32
+
+#BINS #ACTIONS × #BINS
+32
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+Table 4: Scores for each game evaluated with 30 random human starts. Reactor was evaluated by averaging scores over 200 episodes. All scores (except for Reactor) were taken from Wang et al. (2015), Mnih et al. (2016) and Hessel et al. (2017).
+
+GAME AGENT
+ALIEN AMIDAR ASSAULT ASTERIX ASTEROIDS ATLANTIS BANK HEIST BATTLEZONE BEAM RIDER BERZERK BOWLING BOXING BREAKOUT CENTIPEDE CHOPPER COMMAND CRAZY CLIMBER DEFENDER DEMON ATTACK DOUBLE DUNK ENDURO FISHING DERBY FREEWAY FROSTBITE GOPHER GRAVITAR H.E.R.O. ICE HOCKEY JAMES BOND 007 KANGAROO KRULL KUNG-FU MASTER MONTEZUMA'S REVENGE MS. PAC-MAN NAME THIS GAME PHOENIX PITFALL! PONG PRIVATE EYE Q*BERT RIVER RAID ROAD RUNNER ROBOTANK SEAQUEST SKIING
+SOLARIS SPACE INVADERS STARGUNNER SURROUND TENNIS TIME PILOT TUTANKHAM UP'N DOWN VENTURE VIDEO PINBALL WIZARD OF WOR YARS' REVENGE ZAXXON
+
+RANDOM
+128.3 11.8 166.9 164.5 871.3 13463.0 21.7 3560.0 254.6 196.1 35.2 -1.5 1.6 1925.5 644.0 9337.0 1965.5 208.3 -16.0 -81.8 -77.1 0.1 66.4 250.0 245.5 1580.3 -9.7 33.5 100.0 1151.9 304.0 25.0 197.8 1747.8 1134.4 -348.8 -18.0 662.8 183.0 588.3 200.0 2.4 215.5 15287.4 2047.2 182.6 697.0 -9.7 -21.4 3273.0 12.7 707.2 18.0 20452.0 804.0 1476.9 475.0
+
+HUMAN
+6371.3 1540.4 628.9 7536.0 36517.3 26575.0 644.5 33030.0 14961.0 2237.5 146.5 9.6 27.9 10321.9 8930.0 32667.0 14296.0 3442.8 -14.4 740.2 5.1 25.6 4202.8 2311.0 3116.0 25839.4 0.5 368.5 2739.0 2109.1 20786.8 4182.0 15375.0 6796.0 6686.2 5998.9 15.5 64169.1 12085.0 14382.2 6878.0 8.9 40425.8 -3686.6
+11032.6 1464.9 9528.0 5.4 -6.7 5650.0 138.3 9896.1 1039.0 15641.1 4556.0 47135.2 8443.0
+
+DQN
+634.0 178.4 3489.3 3170.5 1458.7 292491.0 312.7 23750.0 9743.2 493.4 56.5 70.3 354.5 3973.9 5017.0 98128.0 15917.5 12550.7 -6.0 626.7 -1.6 26.9 496.1 8190.4 298.0 14992.9 -1.6 697.5 4496.0 6206.0 20882.0 47.0 1092.3 6738.8 7484.8 -113.2 18.0 207.9 9271.5 4748.5 35215.0 58.7 4216.7 12142.1 1295.4 1293.8 52970.0 -6.0 11.1 4786.0 45.6 8038.5 136.0 154414.1 1609.0 4577.5 4412.0
+
+DDQN
+1033.4 169.1 6060.8 16837.0 1193.2 319688.0 886.0 24740.0 17417.2 1011.1 69.6 73.5 368.9 3853.5 3495.0 113782.0 27510.0 69803.4 -0.3 1216.6 3.2 28.8 1448.1 15253.0 200.5 14892.5 -2.5 573.0 11204.0 6796.1 30207.0 42.0 1241.3 8960.3 12366.5 -186.7 19.1 -575.5 11020.8 10838.4 43156.0 59.1 14498.0 11490.4 810.0 2628.7 58365.0 1.9 -7.8 6608.0 92.2 19086.9 21.0 367823.7 6201.0 6270.6 8593.0
+
+DUEL
+1486.5 172.7 3994.8 15840.0 2035.4 445360.0 1129.3 31320.0 14591.3 910.6 65.7 77.3 411.6 4881.0 3784.0 124566.0 33996.0 56322.8 -0.8 2077.4 -4.1 0.2 2332.4 20051.4 297.0 15207.9 -1.3 835.5 10334.0 8051.6 24288.0 22.0 2250.6 11185.1 20410.5 -46.9 18.8 292.6 14175.8 16569.4 58549.0 62.0 37361.6 11928.0 1768.4 5993.1 90804.0 4.0 4.4 6601.0 48.0 24759.2 200.0 110976.2 7054.0 25976.5 10164.0
+
+PRIOR
+1334.7 129.1 6548.9 22484.5 1745.1 330647.0 876.6 25520.0 31181.3 865.9 52.0 72.3 343.0 3489.1 4635.0 127512.0 23666.5 61277.5 16.0 1831.0 9.8 28.9 3510.0 34858.8 269.5 20889.9 -0.2 3961.0 12185.0 6872.8 31676.0 51.0 1865.9 10497.6 16903.6 -427.0 18.9 670.7 9944.0 11807.2 52264.0 56.2 25463.7 10169.1 2272.8 3912.1 61582.0 5.9 -5.3 5963.0 56.9 12157.4 94.0 295972.8 5727.0 4687.4 9474.0
+
+PRIOR. DUEL.
+823.7 238.4 10950.6 364200.0 1021.9 423252.0 1004.6 30650.0 37412.2 2178.6 50.4 79.2 354.6 5570.2 8058.0 127853.0 34415.0 73371.3 -10.7 2223.9 17.0 28.2 4038.4 105148.4 167.0 15459.2 0.5 585.0 861.0 7658.6 37484.0 24.0 1007.8 13637.9 63597.0 -243.6 18.4 1277.6 14063.0 16496.8 54630.0 24.7 1431.2 18955.8 280.6 8978.0 127073.0 -0.2 -13.2 4871.0 108.6 22681.3 29.0 447408.6 10471.0 58145.9 11320.0
+
+A3C LSTM
+945.3 173.0 14497.9 17244.5 5093.1 875822.0 932.8 20760.0 24622.2 862.2 41.8 37.3 766.8 1997.0 10150.0 138518.0 233021.5 115201.9 0.1 -82.5 22.6 0.1 197.6 17106.8 320.0 28889.5 -1.7 613.0 125.0 5911.4 40835.0 41.0 850.7 12093.7 74786.7 -135.7 10.7 421.1 21307.5 6591.9 73949.0 2.6 1326.1 14863.8 1936.4 23846.0 164766.0 -8.3 -6.4 27202.0 144.2 105728.7 25.0 470310.5 18082.0 5615.5 23519.0
+
+RAINBOW
+6022.9 202.8 14491.7 280114.0 2249.4 814684.0 826.0 52040.0 21768.5 1793.4 39.4 54.9 379.5 7160.9 10916.0 143962.0 47671.3 109670.7 -0.6 2061.1 22.6 29.1 4141.1 72595.7 567.5 50496.8 -0.7 18142.3 10841.0 6715.5 28999.8 154.0 2570.2 11686.5 103061.6 -37.6 19.0 1704.4 18397.6 15608.1 54261.0 55.2 19176.0 11685.8 2860.7 12629.0 123853.0 7.0 -2.2 11190.5 126.9 92640.6 45.0 506817.2 14631.5 93007.9 19658.0
+
+REACTOR ND 5 924.1 174.8 15041.2 7269.8 3764.4 897803.5 852.8 84985.0 9298.9 1221.3 63.7 60.2 459.0 3974.5 17312.0 151295.0 162327.5 120682.2 22.2 2054.3 23.2 19.4 3497.8 36286.2 544.0 22673.3 11.1 12655.3 9111.0 7450.1 48781.5 45.0 1102.4 11359.7 8650.4 -99.2 18.5 5638.1 18117.8 12074.0 58568.5 67.1 3802.3 -9461.8
+2000.1 1240.9 47532.0 0.3 22.5 15860.5 162.3 123798.7 26.0 273249.0 15265.5 87928.9 14155.5
+
+REACTOR
+2763.9 423.0 9994.2 26240.8 2771.3 280809.5 710.1 52300.0 9941.6 1186.0 72.4 75.1 465.5 2584.0 33150.0 182399.0 110446.3 101435.4 11.0 2127.0 17.7 26.9 4358.7 60743.2 583.0 30253.7 0.9 6741.0 5143.5 7815.9 49767.9 984.0 1714.6 8288.8 34956.5 -138.8 17.9 5751.4 20689.3 11987.3 66247.0 63.7 10694.0 11809.5 1740.7 2010.2 67384.5 5.1 22.1 17205.0 164.6 48148.6 782.0 484384.2 10995.0 82113.5 20644.0
+
+REACTOR 500M
+4958.6 503.2 6713.8 191948.0 4215.0 274196.0 876.0 57075.0 12877.0 1643.4 76.0 55.6 478.4 2674.3 71442.5 209784.0 221671.0 113853.0 22.0 2138.3 21.7 26.9 4743.5 89306.8 779.8 37833.4 4.9 13987.5 5587.5 7621.8 55357.7 1045.5 2540.1 8207.7 41426.7 -146.9 18.0 5309.4 19505.8 13032.9 97663.5 64.2 25887.9 11904.4 1728.3 7950.9 74451.5 5.5 22.8 16929.5 162.9 49310.4 810.0 538975.0 16731.5 129871.0 25147.5
+
+17
+
+Under review as a conference paper at ICLR 2018
+
+Table 5: Scores for each game evaluated with 30 random noop starts. Reactor was evaluated by averaging scores over 200 episodes. All scores (except for Reactor) were taken from Wang et al. (2015) and Hessel et al. (2017).
+
+GAME AGENT
+ALIEN AMIDAR ASSAULT ASTERIX ASTEROIDS ATLANTIS BANK HEIST BATTLEZONE BEAM RIDER BERZERK BOWLING BOXING BREAKOUT CENTIPEDE CHOPPER COMMAND CRAZY CLIMBER DEFENDER DEMON ATTACK DOUBLE DUNK ENDURO FISHING DERBY FREEWAY FROSTBITE GOPHER GRAVITAR H.E.R.O. ICE HOCKEY JAMES BOND 007 KANGAROO KRULL KUNG-FU MASTER MONTEZUMA'S REVENGE MS. PAC-MAN NAME THIS GAME PHOENIX PITFALL! PONG PRIVATE EYE Q*BERT RIVER RAID ROAD RUNNER ROBOTANK SEAQUEST SKIING
+SOLARIS SPACE INVADERS STARGUNNER SURROUND TENNIS TIME PILOT TUTANKHAM UP'N DOWN VENTURE VIDEO PINBALL WIZARD OF WOR YARS' REVENGE ZAXXON
+
+RANDOM
+227.8 5.8 222.4 210.0 719.1 12850.0 14.2 2360.0 363.9 123.7 23.1 0.1 1.7 2090.9 811.0 10780.5 2874.5 152.1 -18.6 0.0 -91.7 0.0 65.2 257.6 173.0 1027.0 -11.2 29.0 52.0 1598.0 258.5 0.0 307.3 2292.3 761.4 -229.4 -20.7 24.9 163.9 1338.5 11.5 2.2 68.4 17098.1 1236.3 148.0 664.0 -10.0 -23.8 3568.0 11.4 533.4 0.0 16256.9 563.5 3092.9 32.5
+
+HUMAN
+7127.7 1719.5 742.0 8503.3 47388.7 29028.1 753.1 37187.5 16926.5 2630.4 160.7 12.1 30.5 12017.0 7387.8 35829.4 18688.9 1971.0 -16.4 860.5 -38.7 29.6 4334.7 2412.5 3351.4 30826.4 0.9 302.8 3035.0 2665.5 22736.3 4753.3 6951.6 8049.0 7242.6 6463.7 14.6 69571.3 13455.0 17118.0 7845.0 11.9 42054.7 -4336.9
+12326.7 1668.7 10250.0 6.5 -8.3 5229.2 167.6 11693.2 1187.5 17667.9 4756.5 54576.9 9173.3
+
+DQN
+1620.0 978.0 4280.4 4359.0 1364.5 279987.0 455.0 29900.0 8627.5 585.6 50.4 88.0 385.5 4657.7 6126.0 110763.0 23633.0 12149.4 -6.6 729.0 -4.9 30.8 797.4 8777.4 473.0 20437.8 -1.9 768.5 7259.0 8422.3 26059.0 0.0 3085.6 8207.8 8485.2 -286.1 19.5 146.7 13117.3 7377.6 39544.0 63.9 5860.6 13062.3 3482.8 1692.3 54282.0 -5.6 12.2 4870.0 68.1 9989.9 163.0 196760.4 2704.0 18098.9 5363.0
+
+DDQN
+3747.7 1793.3 5393.2 17356.5 734.7 106056.0 1030.6 31700.0 13772.8 1225.4 68.1 91.6 418.5 5409.4 5809.0 117282.0 35338.5 58044.2 -5.5 1211.8 15.5 33.3 1683.3 14840.8 412.0 20130.2 -2.7 1358.0 12992.0 7920.5 29710.0 0.0 2711.4 10616.0 12252.5 -29.9 20.9 129.7 15088.5 14884.5 44127.0 65.1 16452.7 -9021.8
+3067.8 2525.5 60142.0 -2.9 -22.8 8339.0 218.4 22972.2 98.0 309941.9 7492.0 11712.6 10163.0
+
+DUEL
+4461.4 2354.5 4621.0 28188.0 2837.7 382572.0 1611.9 37150.0 12164.0 1472.6 65.5 99.4 345.3 7561.4 11215.0 143570.0 42214.0 60813.3 0.1 2258.2 46.4 0.0 4672.8 15718.4 588.0 20818.2 0.5 1312.5 14854.0 11451.9 34294.0 0.0 6283.5 11971.1 23092.2 0.0 21.0 103.0 19220.3 21162.6 69524.0 65.3 50254.2 -8857.4
+2250.8 6427.3 89238.0 4.4 5.1 11666.0 211.4 44939.6 497.0 98209.5 7855.0 49622.1 12944.0
+
+PRIOR
+4203.8 1838.9 7672.1 31527.0 2654.3 357324.0 1054.6 31530.0 23384.2 1305.6 47.9 95.6 373.9 4463.2 8600.0 141161.0 31286.5 71846.4 18.5 2093.0 39.5 33.7 4380.1 32487.2 548.5 23037.7 1.3 5148.0 16200.0 9728.0 39581.0 0.0 6518.7 12270.5 18992.7 -356.5 20.6 200.0 16256.5 14522.3 57608.0 62.6 26357.8 -9996.9
+4309.0 2865.8 63302.0 8.9 0.0 9197.0 204.6 16154.1 54.0 282007.3 4802.0 11357.0 10469.0
+
+PRIOR. DUEL.
+3941.0 2296.8 11477.0 375080.0 1192.7 395762.0 1503.1 35520.0 30276.5 3409.0 46.7 98.9 366.0 7687.5 13185.0 162224.0 41324.5 72878.6 -12.5 2306.4 41.3 33.0 7413.0 104368.2 238.0 21036.5 -0.4 812.0 1792.0 10374.4 48375.0 0.0 3327.3 15572.5 70324.3 0.0 20.9 206.0 18760.3 20607.6 62151.0 27.5 931.6 19949.9 133.4 15311.5 125117.0 1.2 0.0 7553.0 245.9 33879.1 48.0 479197.0 12352.0 69618.1 13886.0
+
+RAINBOW
+9491.7 5131.2 14198.5 428200.3 2712.8 826659.5 1358.0 62010.0 16850.2 2545.6 30.0 99.6 417.5 8167.3 16654.0 168788.5 55105.0 111185.2 -0.3 2125.9 31.3 34.0 9590.5 70354.6 1419.3 55887.4 1.1 19809.0 14637.5 8741.5 52181.0 384.0 5380.4 13136.0 108528.6 0.0 20.9 4234.0 33817.5 22920.8 62041.0 61.4 15898.9 12957.8 3560.3 18789.0 127029.0 9.7 0.0 12926.0 241.0 125754.6 5.5 533936.5 17862.5 102557.0 22209.5
+
+REACTOR ND 5
+4199.4 1546.8 17543.8 16121.0 4467.4 968179.5 1236.8 98235.0 8811.8 1515.7 59.3 99.7 509.5 7267.2 19901.5 173274.0 181074.3 122782.5 23.0 2211.3 33.1 22.3 7136.7 36279.1 1804.8 27833.0 15.7 14524.0 13349.0 10237.8 61621.5 0.0 4416.9 12636.5 10261.4 -3.7 20.7 15198.0 21222.5 16957.3 66790.5 71.8 5071.6 10632.9 2236.0 2387.1 48942.0 0.9 23.4 18871.5 263.2 194989.5 0.0 261720.2 18484.0 109607.5 16525.0
+
+REACTOR
+6482.1 833.0 11013.5 36238.5 2780.4 308258.0 988.7 61220.0 8566.5 1641.4 75.4 99.4 518.4 3402.8 37568.0 194347.0 113128.0 100189.0 11.4 2230.1 23.2 31.4 8042.1 69135.1 1073.8 35542.2 3.4 7869.2 10484.5 9930.8 59799.5 2643.5 2724.3 9907.2 40092.2 -3.5 20.7 15177.1 22956.5 16608.3 71168.0 68.5 8425.8 10753.4 2760.0 2448.6 70038.0 6.7 23.3 19401.0 272.6 64354.2 1597.5 469366.0 13170.5 102760.0 25215.5
+
+REACTOR 500M
+12689.1 1015.8 8323.3 205914.0 3726.1 302831.0 1259.7 64070.0 11033.4 2303.1 81.0 99.4 514.8 3422.0 107779.0 236422.0 223025.0 115154.0 23.0 2224.2 30.4 31.5 7932.2 89851.0 2041.8 43360.4 10.7 16056.2 11266.5 9896.0 65836.5 2643.5 3749.2 9543.8 46536.4 -8.9 20.6 15188.8 21509.2 17380.7 111310.0 70.4 20994.1 10870.6 2099.6 10153.9 79521.5 7.0 23.6 18841.5 275.4 70790.4 1653.5 496101.0 19530.5 148855.0 27582.5
+
+18
+
+

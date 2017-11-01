@@ -1,0 +1,634 @@
+Under review as a conference paper at ICLR 2018
+DEEP VOICE 3: 2000-SPEAKER NEURAL TEXT-TO-SPEECH
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We present Deep Voice 3, a fully-convolutional attention-based neural textto-speech (TTS) system. Deep Voice 3 matches state-of-the-art neural speech synthesis systems in naturalness while training ten times faster. We scale Deep Voice 3 to dataset sizes unprecedented for TTS, training on more than eight hundred hours of audio from over two thousand speakers. In addition, we identify common error modes of attention-based speech synthesis networks, demonstrate how to mitigate them, and compare several different waveform synthesis methods. We also describe how to scale inference to ten million queries per day on a single GPU server.
+1 INTRODUCTION
+Artificial speech synthesis, also called text-to-speech (TTS), is traditionally done with complex multi-stage hand-engineered pipelines (Taylor, 2009). Recent work on neural TTS has demonstrated impressive results ­ yielding pipelines with simpler features, fewer components, and higher quality synthesized speech. There is not yet a consensus on the optimal neural network architecture for TTS. However, sequence-to-sequence models (Wang et al., 2017; Sotelo et al., 2017; Arik et al., 2017) have shown to be quite promising. In this paper, we propose a novel fully-convolutional architecture for speech synthesis, scale it to very large audio data sets, and address several real-world issues that come up when attempting to deploy an attention-based TTS system. Specifically, we make the following contributions:
+1. We propose a fully-convolutional character-to-spectrogram architecture, which enables fully parallel computation and trains an order of magnitude faster than analogous architectures using recurrent cells (e.g., Wang et al., 2017).
+2. We show that our architecture trains quickly and scales to the LibriSpeech dataset (Panayotov et al., 2015), which consists of nearly 820 hours of audio data from 2484 speakers.
+3. We demonstrate that we can generate monotonic attention behavior, avoiding error modes commonly affecting sequence-to-sequence models.
+4. We compare the quality of several waveform synthesis methods, including WORLD (Morise et al., 2016), Griffin-Lim (Griffin & Lim, 1984), and WaveNet (Oord et al., 2016).
+5. We describe the implementation of an inference kernel for Deep Voice 3, which can serve up to ten million queries per day on one single-GPU server.
+2 RELATED WORK
+Our work builds upon the state-of-the-art in neural speech synthesis and attention-based sequenceto-sequence learning. Several recent works tackle the problem of synthesizing speech with neural networks, including Deep Voice 1 (Arik et al., 2017), Deep Voice 2 (Arik et al., 2017), Tacotron (Wang et al., 2017), Char2Wav (Sotelo et al., 2017), VoiceLoop (Taigman et al., 2017), SampleRNN (Mehri et al., 2017), and WaveNet (Oord et al., 2016). Deep Voice 1 & 2 retain the traditional structure of TTS pipelines, separating grapheme-to-phoneme conversion, duration and frequency prediction, and waveform synthesis. In contrast to Deep Voice 1 & 2, Deep Voice 3 employs an attention-based sequenceto-sequence model, yielding a more compact architecture. Similar to Deep Voice 3, Tacotron and
+1
+
+Under review as a conference paper at ICLR 2018
+Char2Wav are the two proposed sequence-to-sequence models for neural TTS. Tacotron is a neural text-to-spectrogram conversion model, used with Griffin-Lim for spectrogram-to-waveform synthesis. Char2Wav predicts the parameters of WORLD vocoder (Morise et al., 2016) and uses a SampleRNN conditioned upon WORLD parameters for waveform generation. In contrast to Char2Wav and Tacotron, Deep Voice 3 avoids Recurrent Neural Networks (RNNs) 1 to speed up training and alleviates several challenging error modes of attention models. Thus, Deep Voice 3 makes attentionbased TTS feasible for a production TTS system with no compromise on accuracy. Finally, WaveNet and SampleRNN are neural vocoder models for waveform synthesis. There are also numerous alternatives for high-quality hand-engineered vocoders in the literature, such as STRAIGHT (Kawahara et al., 1999), Vocaine (Agiomyrgiannakis, 2015), and WORLD (Morise et al., 2016). Deep Voice 3 adds no novel vocoder, but has the potential to be integrated with different waveform synthesis methods with slight modifications of its architecture.
+Automatic speech recognition (ASR) datasets are often larger than traditional TTS corpora but tend to be less clean, as they typically involve multiple microphones and background noise. Although prior work has applied TTS methods to ASR datasets (Yamagishi et al., 2010)), Deep Voice 3 is, to the best of our knowledge, the first TTS system to scale to thousands of speakers with a single model, synthesizing distinct voices for each one.
+Sequence-to-sequence models (Sutskever et al., 2014; Cho et al., 2014) encode a variable-length input into hidden states, which are then processed by a decoder to produce a target sequence. An attention mechanism allows a decoder to adaptively select encoder hidden states to focus on while generating the target sequence (Bahdanau et al., 2015). Attention-based sequence-to-sequence models are widely applied in machine translation (Bahdanau et al., 2015), speech recognition (Chorowski et al., 2015), and text summarization (Rush et al., 2015). Recent improvements in attention mechanisms relevant to Deep Voice 3 include enforced-monotonic attention during training (Raffel et al., 2017), fully-attentional non-recurrent architectures (Vaswani et al., 2017), and convolutional sequenceto-sequence models (Gehring et al., 2017). Deep Voice 3 demonstrates the utility of monotonic attention during training in TTS, a new domain where monotonicity is expected. Alternatively, we show that with a simple heuristic to only enforce monotonicity during inference, a standard attention mechanism can work just as well or even better. Deep Voice 3 also builds upon the convolutional sequence-to-sequence architecture from Gehring et al. (2017) by introducing a positional encoding similar to that used in Vaswani et al. (2017), augmented with a rate adjustment to account for the mismatch between input and output domain lengths.
+3 MODEL ARCHITECTURE
+In this section, we present our fully-convolutional sequence-to-sequence architecture for TTS (see Fig. 1). Our architecture is capable of converting a variety of textual features (characters, phonemes, stresses) into multiple acoustic features (mel-band spectrograms, linear-scale log magnitude spectrograms), or a set of vocoder features (fundamental frequency, spectral envelope, and aperiodicity parameters). These acoustic features can be used as inputs for audio waveform synthesis models. The Deep Voice 3 architecture consists of three components:
+· Encoder: A fully-convolutional encoder, which converts textual features to an internal learned representation.
+· Decoder: A fully-convolutional causal decoder, which decodes the learned representation with a multi-hop convolutional attention mechanism into a low-dimensional audio representation (mel-band spectrograms) in an autoregressive manner.
+· Converter: A fully-convolutional post-processing network, which predicts final output features (depending on the waveform synthesis method) from the decoder hidden states. Unlike the decoder, the converter is non-causal and can thus depend on future context information.
+The overall objective function to be optimized is a linear combination of the losses from the decoder (Section 3.4) and the converter (Section 3.6). The whole model is trained in an end-to-end manner, excluding the vocoder (WORLD, Griffin-Lim, or WaveNet). In multi-speaker scenario, trainable speaker embeddings as in Arik et al. (2017) are used across encoder, decoder and converter. Next,
+1RNNs introduce sequential dependencies that limit model parallelism.
+2
+
+Under review as a conference paper at ICLR 2018
+
+(key, value) Encoder
+Encoder PostNet xN
+ConvoluxtiNon Block
+Encoder PreNet
+Text Embedding
+
+Wave Griffin-Lim Converter
+
+Wave WORLD Converter
+
+Done
+" FC
+
+Wave WaveNet Mel Output
+FC
+
+Decoder Attention Block
+
++ xN query Convolution Block (Causal)
+
+Decoder PreNet
+
+Speaker-Embedding
+
+Mel Input
+
+Figure 1: Deep Voice 3 uses residual convolutional layers to encode textual features into per-timestep key and value vectors for an attention-based decoder. The decoder uses these to predict the mel-band log magnitude spectrograms that correspond to the output audio. (Light blue dotted arrows depict the autoregressive synthesis process during inference.) The hidden states of the decoder are then fed to a converter network to predict the acoustic features for waveform synthesis. Please see Appendix A for more details.
+
+we describe each of these components and the data preprocessing in detail. Model hyperparameters are available in Table 4 within Appendix C.
+
+3.1 TEXT PREPROCESSING
+Text preprocessing is crucial for good performance. Feeding raw text (characters with spacing and punctuation) yields acceptable performance on many utterances. However, some utterances will have mispronunciations of rare words, or have skipped words and repeated words. We alleviate these issues by normalizing the input text as follows:
+1. We uppercase all characters in the input text. 2. We remove all intermediate punctuation marks. 3. We end every utterance with a period or question mark. 4. We replace spaces between words with special separator characters which indicate the du-
+ration of pauses inserted by the speaker between words 2.
+3.2 JOINT REPRESENTATION OF CHARACTERS AND PHONEMES
+Deployed TTS systems (e.g., Capes et al., 2017; Gonzalvo et al., 2016) should include a way to modify pronunciations to correct common mistakes (which typically include proper nouns, foreign words, and domain-specific jargon). A conventional way to do this is maintaining a dictionary mapping words to their phonetic representations and manually editing it in the case of errors.
+Our model can directly convert characters (including punctuation and spacing) to acoustic features, and hence it learns an implicit grapheme-to-phoneme model. This implicit conversion is difficult to correct when the model makes mistakes. Thus, in addition to character models, we also train phoneme-only models and mixed character-and-phoneme models by allowing phoneme input option explicitly. These models are identical to character-only models, except that the input layer of the encoder sometimes receives phoneme and phoneme stress embeddings instead of character embeddings.
+A phoneme-only model requires a preprocessing step to convert words to their phoneme representations (by using an external phoneme dictionary or a separately trained grapheme-to-phoneme
+2We use four different word separators, indicating slurred-together words, standard pronunciation and space characters, a short pause between words, and a long pause between words. The pause durations can be obtained through either manual labeling or by estimated by a text-audio aligner such as Gentle (Ochshorn & Hawkins, 2017). For example, the sentence "Either way, you should shoot very slowly," with a long pause after "way" and a short pause after "shoot", would be written as "Either way%you should shoot/very slowly%." with % representing a long pause and / representing a short pause for encoding convenience. Our single-speaker dataset is labeled by hand and our multi-speaker datasets are annotated using Gentle.
+
+3
+
+...
+...
+...
+...
+... ...
+... ...
+
+FC
+
+
+
++ ock
+
+ Ndecoder
+
+lock
+
+ReLu
+
+FC  Nprenet
++
+
+dropout
+
+t
+
+raisetopower
+
+WORLD features
+
+WORLD Block
+Linear SpectrograUm nder rCeovnviBelwock as a conference paper at ICLR 2018
+
+FC upsamplebyrepetition
+
+FC
+Conv Block
+model)3. A mixed character-and-phoneme model requires a similar preprocessing step, except for CwonovrBdloscknot in the phoneme dictionary. These out-of-vocabulary words are input as characters, allowing the model to use its implicitly learned grapheme-to-phoneme model. While training a mixed character-and-phoneme model, every word is replaced with its phoneme representation with some fixed probability at each training iteration. We find that augmenting phonemes as input improves performance in terms of pronunciation accuracy and minimizing attention errors, especially when generalizing to utterances longer than those seen during training. More importantly, models that support phonemes representation allow us to correct mispronunciations using a phoneme dictionary, a desirable feature of production TTS systems.
+
+3.3 ENCODER
+
+Attention Block
+Output
+onverter
+FC
+WORLD features
+/ sqrt
+WORLD Block
+#oftimesteps
+Conv Blo·ck
+dropout
+upsamplebyrepetition
+softmaxORmonotonicattention
+
+FCinferencemask(optional)
+·
+nv Block
+FC FC
+
+onal
+ninvgBlock
+
++
+
+query
+
++ keys
+
+Positional Encoding
+
+The encoder network (depicted in Fig. 1) begins with an embedding layer, which converts characters or phonemes into trainable vector representations. These embeddings he are projected via a fullyconnected layer from the embedding dimension to a target dimensionality, go through a series of
+convolution blocks (Fig. 2a), and then are projected back to the embedding dimension to create the attention key vectors hk. The attention value vectors are given by hv = 0.5(hk + he). The key vectors hk are used by each attention block to compute attention weights, whereas the final context vector is computed as a weighted average over the value vectors hv (see Section 3.5).
+
+Done FC "
+FC
+values
+
+Conv Block Output
+
+
+p 0.5
+
++
+
+
+
+Decoder
+
++"
+
+cc
+
+softsign
+
+split
+
+Mel Output 2c
+FC conv
+
+dropout c
+Speaker EmbeddFinCg Input
+
+(a)
+
+Conv Block
+
+Output
+
+WORLD Block
+
+
+
+Vpoiced
+
+Aperiodicity
+
+0.5 Spectral
+
+Voiced
+
+WORLD Block Aperiodicity
+
+" Envelope
+
+F0 Spectral
+
++
+FC FC
+
+" Envelope
+FC FC
+
+F0
+
+
+
+FC FC
+
+FC FC
+
+cc
+
+" c
+
+split
+
+2c
+
+conv c
+
+Input
+
+Input
+
+Input
+(b)
+
+U values U keys
+
+Figure 2: (a) The convolution block consists of a 1-D convolution with gated linear unit (Dauphin et al., 2A0t1te7nt)ioannBdlocrkesidual connection. (b) Four fully-connected layers generate WORLD features.
+The conAvttoenltuiotnioBnlocbklocks (depicted in Fig. 2a) used in our encoder and elsewhere in the architecture consist of a convolution, a gated-linear unit as the nonlinear activation, a residual connection to the inpRuetL,uand a scalingRefLauctor of 0.54. To preserve the sequence length, inputs are padded with k - 1 timesteps of zeros on the left (for causal convolutions) or (k - 1)/2 timesteps of zeros on the left andFoCn the right (forFsCtandarNd non-causal convolutions), where k is an odd convolution filter width 5. Ddroroppoouutt is applieddrtoopotuhte inputs prior to the convolution.
+
+3.4 DECMOelDinEpuRt
+
+Attention Block
+
+The decoder (depicted in Fig. 1) generates audio in an autorOeugtpruetssive manner by predicting a group
+of future audio frames given all past audio frames. Since the decoder is autoregressive, it must use exclusively causal convolutions. Audio frames are proFcCessed in groups of r frames and are represented by a low-dimensional mel-band log-magnitude sp/ectrogsrqartm. The choice of r can have a significant impact on the performance, as decoding several frames together is better than simply decoding one, which confirms a similar result from Wang et a·l. (2t0im1e7st)e.ps
+
+3We use CMUDict 0.6b.
+
+dropout
+
+4The scaling factor lution filter weights as
+
+ensures that we preserve thseofitnmpauxtOvRamrioannoctoeneicaartltyenitniontraining. in Gehring et al. (2017) to start training with zero-mean and
+
+We initialize unit-variance
+
+the convoactivations
+
+throughout the entire network.
+
+inferencemask(optional)
+
+5We restrict to odd convolution widths to simplify the convolution arithmetic.
+·
+
+Positional 4
+Encoding (rate )
+
+FC +
+
+FC +
+
+Positional Encoding (rate 1)
+
+FC
+
+query keys
+
+values
+
+Text Embeddings
+
+softsign +
+
+ Nprenet +
+
+UnSdpeearkerreEvmibeewddinags a confereFnCce pdaroppeourt at ICLR 2dr0o1po8ut
+Mel input
+
+The decoder network consists of several fully-connected layers with rectified linear unit (ReLU) nonlinearities, a series of attention blocks (described in Section 3.5), and finally fully-connected output layers which predict the next group of r audio frame and also a binary "final frame" prediction (indicating whether the last frame of the utterance has been synthesized). Dropout is applied before each fully-connected layer prior to the attention blocks, except for the very first one. An L1 loss is computed using the output spectrograms and a binary cross-entropy loss is computed using the "done" prediction.
+
+3.5 ATTENTION BLOCK
+
+Attention Block Output
+
+FC
+
+key (can be a constant)
+
+/ sqrt #oftimesteps
+· dropout
+softmaxORmonotonicattention
+
+query (can be a constant)
+
+inferencemask(optional)
+
+initial  2  "" FC FC
+
+Positional Encoding
+
+· FC FC
+++
+
+Positional Encoding
+
+FC
+
+Speaker Embedding
+
+query keys
+
+values
+
+Conv Block Output
+
+
+p 0.5
+
++
+
+
+
+softsign FC
+
++" cc
+split 2c
+conv
+
+dropout c
+Speaker Embedding Input
+
+Figure 3: Positional encodings are added to both keys and query vectors, with rates of key and query respectively. Forced monotonocity can be applied at inference by adding a mask of large negative values to the logits. One of two possible attention schemes is used: softmax or monotonic attention from Raffel et al. (2017). During training, attention weights are dropped out.
+
+We use a dot-product attention mechanism (depicted in Fig. 3) similar to Vaswani et al. (2017). The attention mechanism uses a query vector (the hidden state of the decoder) and the per-timestep key vectors from the encoder to compute attention weights, and then outputs a context vector computed from the weighted average of the value vectors.
+In addition to the embeddings generated by the encoder and decoder, we add a positional encoding to both the key and the query vectors. These positional encodings hp are computed as hp(i) = sin (si/10000k/d) (for even i) or cos (si/10000k/d) (for odd i), where i is the timestep index, k is the channel index in the positional encoding, d is the total number of channels in the positional encoding, and s is the position rate of the encoding. The position rate dictates the average slope of the line in the attention distribution, roughly corresponding to speed of speech. For a single speaker, s is set to one for the decoder and fixed for the encoder to the ratio of output timesteps to input timesteps (computed across the entire dataset). For multi-speaker datasets, s is computed for both the encoder and decoder from the speaker embedding for each speaker (depicted in Fig. 3). As sine and cosine functions form an orthonormal basis, this initialization creates a favorable inductive bias for the model as the attention distribution due to positional encodings is effectively a straight diagonal line (Fig. 4).
+We initialize the fully-connected layer weights used to compute hidden attention vectors to the same values for the query projection and the key projection. Positional encodings are used in all attention blocks. We use context normalization as in (Gehring et al., 2017). A fully-connected layer is applied to the context vector to generate the output of the attention block.
+Positional encodings greatly improve quality and are key to having a functional convolutional attention mechanism. Despite the presence of positional encodings, the model will sometimes repeat or skip words. We propose two different strategies to alleviate this. Our first strategy is to constrain attention weights at inference to be monotonic: instead of computing the softmax over the entire
+
+5
+
+Under review as a conference paper at ICLR 2018
+(a) (b) (c) Figure 4: Attention distributions (a) before training, (b) after training, but without inference constraints, (c) with inference constraints applied to the first and third layers. (We empirically observe that fixing the attention of one or two dominant layers is sufficient for high-quality output.)
+input, we instead compute the softmax only over a fixed window starting at the last attended-to position and going forward several timesteps 6. The initial position is set to zero and later computed as the index of the highest attention weight within the current window. This approach's attention distribution is shown in Fig. 4. Our second strategy relies on the monotonic attention introduced in Raffel et al. (2017). This strategy incorporates monotonicity during training, unlike the constraint based approach. In practice, both strategies create a clear, monotonic attention curve, however monotonic attention results in the model frequently mumbling words.
+3.6 CONVERTER
+The converter network takes as inputs the activations from the last hidden layer of the decoder, applies several non-causal convolution blocks, and then predicts parameters for downstream waveform generation models. Unlike the decoder, the converter is non-causal and non-autoregressive, so it can use future context from the decoder to predict its outputs. The loss function of converter network depends on the type of downstream vocoders:
+1. L1 loss on linear-scale (log-magnitude) spectrograms for use with Griffin-Lim, 2. L1 and cross entropy losses on parameters of WORLD vocoder (see Fig. 2b), 3. L1 loss on linear-scale (log-magnitude) spectrograms for use with WaveNet neural vocoder.
+For Griffin-Lim audio synthesis, we also find that using a pre-emphasis along with raising the spectrogram to a power before waveform synthesis is helpful for improved audio quality, as suggested in Wang et al. (2017). For the WORLD vocoder, we predict a boolean value (whether the current frame is voiced or unvoiced), an F0 value (if the frame is voiced), the spectral envelope, and the aperiodicity parameters. We use a cross-entropy loss for the voiced-unvoiced prediction, and L1 losses for all other predictions. In the WaveNet vocoder, we use mel-scale spectrograms from the decoder to condition a Wavenet, which was trained separated 7
+4 RESULTS
+In this section, we present several different experiments and metrics that have been useful for the development of a production-quality speech synthesis system. We quantify the performance of our system and compare it to other recently published neural TTS systems. Data: For single-speaker synthesis, we use an internal English speech data set containing approximately 20 hours data with the sampling rate of 48 KHz. For multi-speaker synthesis, we use VCTK (Yamagishi et al., 2009) and LibriSpeech data sets. VCTK dataset consists audios for 108
+6We use a window size of 3 in our experiments. 7Note that this differs from Arik et al. (2017), where Wavenet was conditioned by linear-scale log-magnitude spectrograms instead. We observed better performance with lower dimensional Wavenet conditioner.
+6
+
+Under review as a conference paper at ICLR 2018
+
+Text Input Characters-only Phonemes & Characters Phonemes & Characters Phonemes & Characters
+
+Attention Inference constraint
+
+Dot-Product
+
+Yes
+
+Dot-Product
+
+No
+
+Dot-Product
+
+Yes
+
+Monotonic
+
+No
+
+Repeat Mispronounce Skip 3 35 19 12 10 15 1 43 5 9 11
+
+Table 1: Attention error counts for single-speaker Deep Voice 3 models on the 100-sentence test set, given in Appendix E. "Phonemes & Characters" refers to the model trained with a joint character and phoneme representation, as discussed in Section 3.2. We did not include phoneme-only models because the test set contains out-of-vocabulary words. All models use Griffin-Lim as their vocoder. One or more mispronunciations, skips, and repeats count as a single mistake per utterance.
+
+Model Deep Voice 3 (Griffin-Lim)
+Deep Voice 3 (WORLD) Deep Voice 3 (WaveNet)
+Tacotron (Griffin-Lim) Tacotron (WaveNet)
+Deep Voice 2 (WaveNet)
+
+Mean Opinion Score (MOS)
+3.62 ± 0.31 3.63 ± 0.27 3.78 ± 0.30 1.77 ± 0.19 3.78 ± 0.34 2.74 ± 0.35
+
+Table 2: Mean Opinion Score (MOS) ratings with 95% confidence intervals using different waveform synthesis methods. We use the crowdMOS toolkit (Ribeiro et al., 2011); batches of samples from these models were presented to raters on Mechanical Turk. Since batches contained samples from all models, the experiment naturally induces a comparison between the models.
+
+speakers, with a total duration of 44 hours. LibriSpeech data set consists audios for 2484 speakers, with a total duration of 820 hours. The sampling rate for VCTK is 48 KHz, whereas for LibriSpeech is 16 KHz.
+Fast Training: We compare Deep Voice 3 to Tacotron, a recently published attention-based TTS system. For our system on single-speaker data, the average training iteration time (for batch size 4) is 0.06 seconds using one GPU as opposed to 0.59 seconds for Tacotron, indicating a ten-fold increase in training speed. In addition, Deep Voice 3 converges after  500K iterations for all three datasets in our experiment, while Tacotron requires  2M iterations as suggested in Wang et al. (2017). This significant speedup is due to the fully-convolutional architecture of Deep Voice 3, which highly exploits the parallelism of a GPU during training.
+Attention Error Modes: Attention-based neural TTS systems hit several error modes which can reduce synthesis quality ­ including mispronunciations, skipped words, and repeated words. One reason is that the attention-based architecture does not impose a monotonically progressing distribution. In order to track the occurrence of these errors, we construct a custom 100-sentence test set (see Appendix E) that includes particularly-challenging cases from deployed TTS systems (e.g. dates, acronyms, URLs, repeated words, proper nouns, foreign words etc.) Attention error counts are listed in Table 1 and indicate that the model with joint representation of characters and phonemes, trained with standard attention mechanism but enforced the monotonic constraint at inference, largely outperforms other approaches.
+Naturalness: We demonstrate that choice of waveform synthesis matters for naturalness ratings and compare it to other published neural TTS systems. Results in Table 2 indicate that WaveNet, a neural vocoder, achieves the highest MOS of 3.78, followed by WORLD and Griffin-Lim at 3.63 and 3.62, respectively. Thus, we show that the most natural waveform synthesis can be done with a neural vocoder and that basic spectrogram inversion techniques can match advanced vocoders. The WaveNet vocoder sounds more natural as the WORLD vocoder introduces various noticeable artifacts. Yet, lower inference latency may render WORLD vocoder preferable: the heavily engineered WaveNet implementation runs at 3X realtime per CPU core (Arik et al., 2017), while in our testing WORLD runs up to 40X realtime per CPU core (see the subsection below).
+Multi-Speaker Synthesis: To demonstrate that our model is capable of handling multi-speaker speech synthesis effectively, we train our models on the VCTK and LibriSpeech data sets. For LibriSpeech (an ASR dataset), we apply a preprocessing step of standard denoising (using SoX (Bag-
+7
+
+Under review as a conference paper at ICLR 2018
+
+Model Deep Voice 3 (Griffin-Lim)
+Deep Voice 3 (WORLD) Deep Voice 2 (WaveNet)
+Tacotron (Griffin-Lim) Ground truth
+
+MOS (VCTK)
+3.01 ± 0.29 3.44 ± 0.32 3.69 ± 0.23 2.07 ± 0.31 4.69 ± 0.04
+
+MOS (LibriSpeech) 2.09 ± 0.31 -
+-
+4.60 ± 0.16
+
+Table 3: MOS ratings with 95% confidence intervals for audio clips from neural TTS systems on multi-speaker datasets. To obtain MOS, we also use crowdMOS toolkit as detailed in Table 2.
+
+well, 2017)) and splitting long utterances into multiple at pause locations (which are determined by Gentle (Ochshorn & Hawkins, 2017)). We use Griffin-Lim and WORLD as the vocoder for VCTK and only Griffin-Lim for LibriSpeech. Results are presented in Table 3. We purposefully include ground-truth samples in the set being evaluated, because the accents in datasets are likely to be unfamiliar to our North American crowdsourced raters and will thus be rated poorly due to the accent rather than the model quality. Our model with WORLD vocoder archives a comparable MOS of 3.44 on VCTK in contrast to 3.66 from Deep Voice 2, which is the state-of-the-art multi-speaker neural TTS using WaveNet as vocoder and seperately optimized duration and frequency prediction building blocks. We expect further improvement by using WaveNet for multi-speaker synthesis, although it may substantially slow down the system at inference. The MOS on LibriSpeech is lower, which we mainly attribute to the lower quality of the training dataset due to the recording conditions and background noise. Lastly, we observe that the learned speaker embeddings lie in a meaningful latent space (see Fig. 6 in Appendix D).
+Optimizing Inference for Deployment: In order to deploy a neural TTS system in a cost-effective manner, the system must be able to handle as much traffic as alternative systems on a comparable amount of hardware. To do so, we target a throughput of ten million queries per day or 116 queries per second (QPS) 8 on a single-GPU server with twenty CPU cores, which we find is comparable in cost to commercially deployed TTS systems. By implementing custom GPU kernels for the Deep Voice 3 architecture and parallelizing WORLD synthesis across CPUs, we demonstrate that our model can handle ten million queries per day. We provide more details on the implementation in Appendix B.
+5 CONCLUSION
+We introduce Deep Voice 3, a neural text-to-speech system based on a novel fully-convolutional sequence-to-sequence acoustic model with a position-augmented attention mechanism. We describe common error modes in sequence-to-sequence speech synthesis models and show that we successfully avoid these common error modes with Deep Voice 3. We show that our model is agnostic of the waveform synthesis method, and adapt it for Griffin-Lim spectrogram inversion, WaveNet, and WORLD vocoder synthesis. We demonstrate also that our architecture is capable of multispeaker speech synthesis by augmenting it with trainable speaker embeddings, a technique described in Deep Voice 2. Finally, we describe the production-ready Deep Voice 3 system in full including text normalization and performance characteristics, and demonstrate state-of-the-art quality through extensive MOS evaluations. Future work will involve improving the implicitly learned grapheme-tophoneme model, jointly training with a neural vocoder, and training on cleaner and larger datasets to scale to model the full variability of human voices and accents from hundreds of thousands of speakers.
+
+8A query is defined as synthesizing the audio for a one second utterance. 8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Yannis Agiomyrgiannakis. Vocaine the vocoder and applications in speech synthesis. In ICASSP, 2015.
+Sercan O¨ . Arik, Mike Chrzanowski, Adam Coates, Gregory Diamos, Andrew Gibiansky, Yongguo Kang, Xian Li, John Miller, Jonathan Raiman, Shubho Sengupta, and Mohammad Shoeybi. Deep Voice: Real-time neural text-to-speech. In ICML, 2017.
+Sercan O¨ . Arik, Gregory Diamos, Andrew Gibiansky, John Miller, Kainan Peng, Wei Ping, Jonathan Raiman, and Yanqi Zhou. Deep Voice 2: Multi-speaker neural text-to-speech. In NIPS, 2017b.
+Chris Bagwell. Sox - sound exchange. https://sourceforge.net/p/sox/code/ci/ master/tree/, 2017.
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly learning to align and translate. In ICLR, 2015.
+Tim Capes, Paul Coles, Alistair Conkie, Ladan Golipour, Abie Hadjitarkhani, Qiong Hu, Nancy Huddleston, Melvyn Hunt, Jiangchuan Li, Matthias Neeracher, et al. Siri on-device deep learningguided unit selection text-to-speech system. In Interspeech, 2017.
+Kyunghyun Cho, Bart Van Merrie¨nboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio. Learning phrase representations using RNN encoder-decoder for statistical machine translation. In EMNLP, 2014.
+Jan K Chorowski, Dzmitry Bahdanau, Dmitriy Serdyuk, Kyunghyun Cho, and Yoshua Bengio. Attention-based models for speech recognition. In NIPS, 2015.
+Yann Dauphin, Angela Fan, Michael Auli, and David Grangier. Language modeling with gated convolutional networks. In ICML, 2017.
+Jonas Gehring, Michael Auli, David Grangier, Denis Yarats, and Yann Dauphin. Convolutional sequence to sequence learning. In ICML, 2017.
+Xavi Gonzalvo, Siamak Tazari, Chun-an Chan, Markus Becker, Alexander Gutkin, and Hanna Silen. Recent advances in Google real-time HMM-driven unit selection synthesizer. In Interspeech, 2016.
+Daniel Griffin and Jae Lim. Signal estimation from modified short-time fourier transform. IEEE Transactions on Acoustics, Speech, and Signal Processing, 1984.
+Hideki Kawahara, Ikuyo Masuda-Katsuse, and Alain De Cheveigne. Restructuring speech representations using a pitch-adaptive time­frequency smoothing and an instantaneous-frequency-based f0 extraction: Possible role of a repetitive structure in sounds. Speech communication, 1999.
+Soroush Mehri, Kundan Kumar, Ishaan Gulrajani, Rithesh Kumar, Shubham Jain, Jose Sotelo, Aaron Courville, and Yoshua Bengio. SampleRNN: An unconditional end-to-end neural audio generation model. In ICLR, 2017.
+Masanori Morise, Fumiya Yokomori, and Kenji Ozawa. WORLD: A vocoder-based high-quality speech synthesis system for real-time applications. IEICE Transactions on Information and Systems, 2016.
+Robert Ochshorn and Max Hawkins. Gentle. https://github.com/lowerquality/ gentle, 2017.
+Aaron van den Oord, Sander Dieleman, Heiga Zen, Karen Simonyan, Oriol Vinyals, Alex Graves, Nal Kalchbrenner, Andrew Senior, and Koray Kavukcuoglu. WaveNet: A generative model for raw audio. arXiv:1609.03499, 2016.
+Vassil Panayotov, Guoguo Chen, Daniel Povey, and Sanjeev Khudanpur. Librispeech: an ASR corpus based on public domain audio books. In Acoustics, Speech and Signal Processing (ICASSP), 2015 IEEE International Conference on, pp. 5206­5210. IEEE, 2015.
+9
+
+Under review as a conference paper at ICLR 2018
+Colin Raffel, Thang Luong, Peter J Liu, Ron J Weiss, and Douglas Eck. Online and linear-time attention by enforcing monotonic alignments. In ICML, 2017.
+Fla´vio Ribeiro, Dinei Flore^ncio, Cha Zhang, and Michael Seltzer. Crowdmos: An approach for crowdsourcing mean opinion score studies. In IEEE ICASSP, 2011.
+Alexander M Rush, Sumit Chopra, and Jason Weston. A neural attention model for abstractive sentence summarization. In EMNLP, 2015.
+Tim Salimans and Diederik P Kingma. Weight normalization: A simple reparameterization to accelerate training of deep neural networks. In NIPS, 2016.
+Jose Sotelo, Soroush Mehri, Kundan Kumar, Joao Felipe Santos, Kyle Kastner, Aaron Courville, and Yoshua Bengio. Char2wav: End-to-end speech synthesis. In ICLR workshop, 2017.
+Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks. In NIPS, 2014.
+Yaniv Taigman, Lior Wolf, Adam Polyak, and Eliya Nachmani. Voice synthesis for in-the-wild speakers via a phonological loop. arXiv:1707.06588, 2017.
+Paul Taylor. Text-to-Speech Synthesis. Cambridge University Press, New York, NY, USA, 1st edition, 2009. ISBN 0521899273, 9780521899277.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. arXiv:1706.03762, 2017.
+Yuxuan Wang, RJ Skerry-Ryan, Daisy Stanton, Yonghui Wu, Ron Weiss, Navdeep Jaitly, Zongheng Yang, Ying Xiao, Zhifeng Chen, Samy Bengio, Quoc Le, Yannis Agiomyrgiannakis, Rob Clark, and Rif A. Saurous. Tacotron: Towards end-to-end speech synthesis. In Interspeech, 2017.
+Junichi Yamagishi, Takashi Nose, Heiga Zen, Zhen-Hua Ling, Tomoki Toda, Keiichi Tokuda, Simon King, and Steve Renals. Robust speaker-adaptive hmm-based text-to-speech synthesis. IEEE Transactions on Audio, Speech, and Language Processing, 2009.
+Junichi Yamagishi, Bela Usabaev, Simon King, Oliver Watts, John Dines, Jilei Tian, Yong Guan, Rile Hu, Keiichiro Oura, Yi-Jian Wu, et al. Thousands of voices for hmm-based speech synthesis­ analysis and application of tts systems built on various asr corpora. IEEE Transactions on Audio, Speech, and Language Processing, 2010.
+10
+
+Under review as a conference paper at ICLR 2018
+
+Appendices
+
+A DETAILED MODEL ARCHITECTURE OF DEEP VOICE 3
+The detailed model architecture in depicted in Fig. 5.
+
+... ... ...
+...
+
+p Encoder
+
+0.5 
+
+values
+
++ keys
+
++ softsign FC FC Conv Block
+
+Conv Block FC
++ softsign FC
+Text Embeddings
+
+Speaker Embedding
+
+Decoder Done
+
+Mel Output FC   
+FC FC
+
+p 0.5
+
+ +  +
+Attention Block Causal Conv Block
+
+ Ndecoder
+
+ReLu
+
+ReLu
+
+FC softsign +
+
+
+
+FC  Nprenet
++
+
+FC dropout
+
+dropout
+
+Mel input
+
+Wave Griffin-Lim
+
+Wave WORLD Synthesis
+
+Wave WaveNet
+
+Converter raise to power
+Linear Spectrogram
+
+WORLD features WORLD Block
+Conv Block
+
+FC upsample by repetition
+
+FC Conv Block
+
+Conv Block
+
+Figure 5: Deep Voice 3 uses a deep residual convolutional network to encode text and/or phonemes into per-timestep key and value vectors for an attentional decoder. The decoder uses these to predict the mel-band log magnitude spectrograms that correspond to the output audio. (Light blue dotted arrows depict the autoregressive synthesis process during inference.) The hidden state of the decoder then gets fed to a converter network to output linear spectrograms for Griffin-Lim or parameters for WORLD, which can be used to synthesize the final waveform. Weight normalization (Salimans & Kingma, 2016) is applied to all convolution filters and fully-connected layer weight matrices in the model.
+
+B OPTIMIZING DEEP VOICE 3 FOR DEPLOYMENT
+Running inference with a TensorFlow graph turns out to be prohibitively expensive, averaging approximately 1 QPS 9. Instead, we implement custom GPU kernels for Deep Voice 3 inference. Due to the complexity of the model and the large number of output timesteps, launching individual kernels for different operations in the graph (convolutions, matrix multiplications, unary and binary operations etc.) is impractical: the overhead of launch a CUDA kernel is approximately 50 µs, which, when aggregated across all operations in the model and all output timesteps, limits throughput to approximately 10 QPS. Thus, we implement a single kernel for the entire model, which avoids the overhead of launching many CUDA kernels. Finally, instead of batching computation in the kernel, our kernel operates on a single utterance and we launch as many concurrent streams as there are Streaming Multiprocessors (SMs) on the GPU. Every kernel is launched with one block, so we expect the GPU to schedule one block per SM, allowing us to scale inference speed linearly with the number of SMs.
+On a single P100 GPU with 56 SMs, we achieve an inference speed of 115 QPS, which corresponds to our target ten million queries per day. We parallelize WORLD synthesis across all 20 CPUs on
+9The poor TensorFlow performance is due to the overhead of running the graph evaluator over hundreds of nodes and hundreds of timesteps. Using a technology such as XLA with TensorFlow could speed up evaluation but is unlikely to match the performance of a hand-written kernel.
+11
+
+Under review as a conference paper at ICLR 2018
+
+the server, permanently pinning threads to CPUs in order to maximize cache performance. In this setup, GPU inference is the bottleneck, as WORLD synthesis on 20 cores is faster than 115 QPS.
+We believe that inference can be made significantly faster through more optimized kernels, smaller models, and fixed-precision arithmetic; we leave these aspects to future work.
+
+C MODEL HYPERPARAMETERS
+
+All hyperparameters of the models used in this paper are shown in Table 4.
+
+Parameter FFT Size
+FFT Window Size / Shift Audio Sample Rate Reduction Factor r Mel Bands Sharpening Factor
+Character Embedding Dim. Encoder Layers / Conv. Width / Channels
+Decoder Affine Size Decoder Layers / Conv. Width
+Attention Hidden Size Position Weight / Initial Rate Converter Layers / Conv. Width / Channels
+Dropout Probability Number of Speakers Speaker Embedding Dim. ADAM Learning Rate Anneal Rate / Anneal Interval
+Batch Size Max Gradient Norm Gradient Clipping Max. Value
+
+Single-Speaker 4096
+2400 / 600 48000 4 80 1.4 256
+7 / 5 / 64 128, 256
+4/5 128 1.0 / 6.3 5 / 5 / 256 0.95 1
+0.001
+16 100 5
+
+VCTK 4096 2400 / 600 48000
+4 80 1.4 256 7 / 5 / 128 128, 256 6/5 256 0.1 / 7.6 6 / 5 / 256 0.95 108 16 0.0005 0.98 / 30000 16 100 5
+
+LibriSpeech 4096
+1600 / 400 16000 4 80 1.4 256
+7 / 5 / 256 128, 256
+8/5 256 0.1 / 2.6 8 / 5 / 256 0.99 2484 32 0.0005 0.95 / 30000 16 50.0 5
+
+Table 4: Hyperparameters used for best models for the three datasets used in the paper.
+
+D LATENT SPACE OF THE LEARNED EMBEDDINGS
+Similar to Arik et al. (2017), we apply principal component analysis to the learned speaker embeddings and analyze the speakers based on their ground truth genders. Fig. 6 shows the genders of the speakers in the space spanned by the first two principal components. We observe a very clear separation between male and female genders, suggesting the low-dimensional speaker embeddings constitute a meaningful latent space.
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+Second principal component
+
+2.0
+
+1.5
+
+1.0
+
+0.5
+
+0.0
+
+0.5
+
+1.0
+
+1 0 First prin1cipal compon2ent
+
+(a)
+
+1.5
+
+Female Male
+
+1.0
+
+0.5
+
+0.0
+
+0.5
+
+1.0
+
+Male Female
+34
+
+Second principal component
+
+1.0 0F.5irst pr0in.0cipal co0m.5ponen1t.0 1.5
+(b) Figure 6: The first two principal components of the learned embeddings for (a) VCTK dataset (108 speakers) and (b) LibriSpeech dataset (2484 speakers).
+E 100-SENTENCE TEST SET
+The 100 sentences used to quantify the results in Table 1 are listed below (note that % symbol corresponds to pause):
+
+13
+
+Under review as a conference paper at ICLR 2018 14
+
+Under review as a conference paper at ICLR 2018 15
+
+

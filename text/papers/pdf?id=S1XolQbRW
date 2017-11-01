@@ -1,0 +1,1385 @@
+Under review as a conference paper at ICLR 2018
+MODEL COMPRESSION VIA DISTILLATION AND QUANTIZATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Deep neural networks (DNNs) continue to make significant advances, solving tasks from image classification to translation or reinforcement learning. One aspect of the field receiving considerable attention is efficiently executing deep models in resource-constrained environments, such as mobile or embedded devices. This paper focuses on this problem, and proposes two new compression methods, which jointly leverage weight quantization and distillation of larger teacher networks into smaller student networks. The first method we propose is called quantized distillation and leverages distillation during the training process, by incorporating distillation loss, expressed with respect to the teacher, into the training of a student network whose weights are quantized to a limited set of levels. The second method, differentiable quantization, optimizes the location of quantization points through stochastic gradient descent, to better fit the behavior of the teacher model. We validate both methods through experiments on convolutional and recurrent architectures. We show that quantized shallow students can reach similar accuracy levels to full-precision teacher models, while providing order of magnitude compression, and inference speedup that is linear in the depth reduction. In sum, our results enable DNNs for resource-constrained environments to leverage architecture and accuracy advances developed on more powerful devices.
+1 INTRODUCTION
+Background. Neural networks have showed tremendous performance in several real world problems, like image classification (Krizhevsky et al., 2012; He et al., 2016a), translation (Vaswani et al., 2017), voice synthesis (Oord et al., 2016) or reinforcement learning (Mnih et al., 2013; Silver et al., 2016). At the same time, modern neural network architectures are often compute, space and power hungry, typically requiring powerful GPUs to train and evaluate. The debate is still ongoing on whether large models are necessary for good accuracy. It is known that individual network weights can be redundant, and may not carry significant information, e.g. Han et al. (2015). At the same time, large models often have the ability to completely memorize datasets (Zhang et al., 2016), yet they do not, but instead appear to learn generic task solutions. A standing hypothesis for why overcomplete representations are necessary is that they make learning possible by transforming local minima into saddle points (Dauphin et al., 2014) or to discover robust solutions, which do not rely on precise weight values (Hochreiter & Schmidhuber, 1997; Keskar et al., 2016).
+If large models are only needed for robustness during training, then significant compression of these models should be achievable, without impacting accuracy. This intuition is strengthened by two related, but slightly different research directions. The first direction is the work on training quantized neural networks, e.g. Courbariaux et al. (2015); Rastegari et al. (2016); Hubara et al. (2016); Wu et al. (2016); Mellempudi et al. (2017); Ott et al. (2016), which showed that neural networks can converge to good task solutions even when weights are constrained to having values from a set of integer levels. The second direction aims to compress already-trained models, while preserving their accuracy. To this end, various elegant compression techniques have been proposed, e.g. Han et al. (2015); Iandola et al. (2016); Wen et al. (2016); Gysel et al. (2016), which combine quantization, weight sharing, and careful coding of network weights, to reduce the size of state-of-the-art deep models by orders of magnitude, while at the same time speeding up inference.
+Both these research directions are extremely active, and have been shown to yield significant compression and accuracy improvements, which can be crucial when making such models available on embedded devices or phones. However, the literature on compressing deep networks focuses ex-
+1
+
+Under review as a conference paper at ICLR 2018
+
+clusively on finding good compression schemes for a given model, without significantly altering the structure of the model. On the other hand, recent parallel work (Ba & Caruana, 2013; Hinton et al., 2015) introduces the process of distillation, which can be used for transferring the behaviour of a given model to any other structure. This can be used for compression, e.g. to obtain compact representations of ensembles (Hinton et al., 2015). However the size of the student model needs to be large enough for allowing learning to succeed. A model that is too shallow, too narrow, or which misses necessary units, can result in considerable loss of accuracy (Urban et al., 2016).
+In this work, we examine whether distillation and quantization can be jointly leveraged for better compression. We start from the intuition that 1) the existence of highly-accurate, full-precision teacher models should be leveraged to improve the performance of quantized models, while 2) quantizing a model can provide better compression than a distillation process attempting the same space gains by purely decreasing the number of layers or layer width. While our approach seems natural and perhaps obvious in hindsight, interesting research questions arise when these two ideas are combined.
+Contribution. We present two methods which allow the user to compound compression in terms of depth, by distilling a shallower student network with similar accuracy to a deeper teacher network, with compression in terms of width, by quantizing the weights of the student to a limited set of integer levels, and using less weights per layer. The basic idea is that quantized models can leverage distillation loss (Hinton et al., 2015), which is a weighted average between the correct targets (represented by the labels) and soft targets (represented by the teacher's outputs).
+We implement this intuition via two different methods. The first, called quantized distillation, aims to leverage distillation loss during the training process, by incorporating it into the training of a student network whose weights are constrained to a limited set of levels. The second method, which we call differentiable quantization, takes a different approach, by attempting to converge to the optimal location of quantization points through stochastic gradient descent. We validate both methods empirically through a range of experiments on convolutional and recurrent network architectures. We show that quantized shallow students can reach similar accuracy levels to full-precision teacher models on datasets such as CIFAR and OpenNMT, while providing order of magnitude compression, and inference speedup that is linear in the depth1.
+
+2 PRELIMINARIES
+2.1 THE QUANTIZATION PROCESS
+We start by defining a scaling function sc : Rn  [0, 1], which normalizes vectors whose values come from an arbitrary range, to vectors whose values are in [0, 1]. Given such a function, the general structure of the quantization functions is as follows:
+
+Q(v) = sc-1 Q^ (sc(v)) ,
+
+(1)
+
+where sc-1 is the inverse of the scaling function, and Q^ is the actual quantization function that only accepts values in [0, 1]. We always assume v to be a vector; in practice, of course, the weight vectors can be multi-dimensional, but we can reshape them to one dimensional vectors and restore the original dimensions after the quantization.
+
+Scaling. There are various specifications for the scaling function; in this paper, we will use linear
+
+scaling,
+
+e.g.
+
+He
+
+et
+
+al.
+
+(2016b),
+
+that
+
+is
+
+sc(v)
+
+=
+
+v- 
+
+,
+
+with
+
+
+
+=
+
+maxi vi
+
+-
+
+mini vi
+
+and
+
+
+
+=
+
+mini
+
+vi
+
+which results in the target values being in [0, 1], and the quantization function
+
+Q(v) = Q^ v -  + . 
+
+(2)
+
+Bucketing. One problem with this formulation is that an identical scaling factor is used for the whole vector, whose dimension might be huge. Magnitude imbalance can result in a significant loss of precision, where most of the elements of the scaled vector are pushed to zero. To avoid this, we will use bucketing, e.g. Alistarh et al. (2016), that is, we will apply the scaling function separately
+1Code will be made available once the paper becomes de-anonymized.
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+to buckets of consecutive values of a certain fixed size. The trade-off here is that we obtain better quantization accuracy for each bucket, but will have to store two floating-point scaling factors for each bucket. We characterize the compression comparison in Section 5. The function Q^ can also be defined in several ways. We will restrict our attention to uniform and non-uniform quantization.
+Uniform Quantization. We fix a parameter s  1, describing the number of quantization levels employed. Intuitively, uniform quantization considers s + 1 equally spaced points between 0 and 1 (including these endpoints). The deterministic version will assign each (scaled) vector coordinate vi to the closest quantization point, while in the stochastic version we perform rounding probabilistically, such that the resulting value is an unbiased estimator of vi, of minimal variance.
+Formally, the uniform quantization function with s + 1 levels is defined as
+
+Q^(v, s)i =
+
+vis s
+
++ i , s
+
+(3)
+
+where i is the rounding function. For the deterministic version, we define ki = svi - vis and set
+
+i =
+
+1, 0,
+
+if
+
+ki
+
+>
+
+1 2
+
+otherwise,
+
+(4)
+
+while for the stochastic version we will set i  Bernoulli(ki). Note that ki is the normalized distance between the original point vi and the closest quantization point that is smaller than vi and that the vector components are quantized independently.
+Non-Uniform Quantization. Non-uniform quantization takes as input a set of s quantization points {p1, . . . , ps} and quantizes each element vi to the closest of these points. For simplicity, we only define the deterministic version of this function.
+
+2.2 STOCHASTIC QUANTIZATION IS EQUIVALENT TO ADDING GAUSSIAN NOISE
+In this section we list some interesting mathematical properties of the uniform quantization function. Clearly, stochastic uniform quantization is an unbiased estimator of its input, i.e. E[Q(v)] = v. What interests us is applying this function to neural networks; as the scalar product is the most common operation performed by neural networks, we would like to study the properties of Q(v)T x, where v is the weight vector of a certain layer in the network and x are the inputs. We are able to show that
+
+Q(v)T x = vT x + 
+
+(5)
+
+where  is a random variable that is asymptotically normally distributed, i.e.
+
+1 n
+
+
+
+-D
+
+N (0, 1).
+
+Convergence occurs with the dimension n. For a formal statement and proof, see Section B.1 in the
+
+Appendix.
+
+This means that quantizing the weights is equivalent to adding to the output of each layer (before the activation function) a zero-mean error term that is asymptotically normally distributed. The variance of this error term depends on s. This presents an interesting connection to work that advocates adding noise to intermediary activations of neural networks as a regularizer, e.g. Gulcehre et al. (2016).
+
+3 QUANTIZED DISTILLATION
+The context is the following: given a task, we consider a trained state-of-the-art deep model solving it­the teacher, and a compressed student model. The student is compressed in the sense that 1) it is shallower than the teacher; and 2) it is quantized, in the sense that its weights are expressed at limited bit width. The strategy, as for standard distillation (Ba & Caruana, 2013; Hinton et al., 2015) is for the student to leverage the converged teacher model to reach similar accuracy. We note that distillation has been used previously to obtain compact high-accuracy encodings of ensembles (Hinton et al., 2015); however, we believe this is the first time it is used for model compression via quantization.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+quantize
+
+SGD step distil
+
+SGD step quantize distil
+
+SGD step quantize distil
+
+model
+
+quantized teacher model
+
+model
+
+quantized teacher model
+
+model
+
+quantized teacher model
+
+Figure 1: Depiction of the steps of quantized distillation. Note the accumulation over multiple steps of gradients in the unquantized model leads to a switch in quantization (e.g. top layer left most square).
+
+Given this setup, there are two questions we need to address. The first is how to transfer knowledge from the teacher to the student. For this, the student will use the distillation loss, as defined by Hinton et al. (2015), as the weighted average between two objective functions: cross entropy with soft targets, controlled by the temperature parameter T , and the cross entropy with the correct labels. We refer the reader to Hinton et al. (2015) for the precise definition of distillation loss.
+The second question is how to employ distillation loss in the context of a quantized neural network. An intuitive approach is to rely on projected gradient descent, where a gradient step is taken as in full-precision training, and then the new parameters are projected to the set of valid solutions. Critically, we accumulate the error at each projection step into the gradient for the next step. One can think of this process as if collecting evidence for whether each weight needs to move to the next quantization point or not. Crucially, the error accumulation prevents the algorithm from getting stuck in the current solution if gradients are small, which would occur in a naive projected gradient approach. This is simillar to the approach taken by BinaryConnect technique, with some differences. Li et al. (2017) also examines these dynamics in detail. Compared to BinnaryConnect, we use distillation rather than learning from scratch, hence learning more effeciently. We also do not restrict ourselves to binary representation, but rather use variable bit-width quantization frunctions and bucketing, as defined in Section 2.
+An alternative view of this process, illustrated in Figure 1, is that we perform the SGD step on the full-precision model, but computing the gradient on the quantized model, expressed with respect to the distillation loss. With all this in mind, the algorithm we propose is:
+
+Algorithm 1 Quantized Distillation
+
+1: procedure QUANTIZED DISTILLATION
+
+2: Let w be the network weights
+
+3: loop
+
+4: wq  quant function(w, s) 5: Run forward pass and compute distillation loss l(wq)
+
+6:
+
+Run
+
+backward
+
+pass
+
+and
+
+compute
+
+l(wq wq
+
+)
+
+7:
+
+Update
+
+original
+
+weights
+
+using
+
+SGD
+
+in
+
+full
+
+precision
+
+w
+
+=
+
+w
+
+-
+
+
+
+·
+
+l(wq ) wq
+
+8: Finally quantize the weights before returning: wq  quant function(w, s)
+
+9: return wq
+
+4 DIFFERENTIABLE QUANTIZATION
+4.1 GENERAL DESCRIPTION
+We introduce differentiable quantization as a general method of improving the accuracy of a quantized neural network, by exploiting non-uniform quantization point placement. In particular, we are going to use the non-uniform quantization function defined in Section 2.1. Experimentally, we have found little difference between stochastic and deterministic quantization in this case, and therefore will focus on the simpler deterministic quantization function here.
+4
+
+Under review as a conference paper at ICLR 2018
+
+Let p = (p1, . . . , ps) be the vector of quantization points, and let Q(v, p) be our quantization function, as defined previously. Ideally, we would like to find a set of quantization points p which minimizes the accuracy loss when quantizing the model using Q(v, p). The key observation is that to find this set p, we can just use stochastic gradient descent, because we are able to compute the gradient of Q with respect to p.
+
+A major problem in quantizing neural networks is the fact that the decision of which pi should
+
+Q(v, p)
+
+replace a given weight is discrete, hence the gradient is zero:
+
+= 0, almost everywhere.
+
+v
+
+This implies that we cannot backpropagate the gradients through the quantization function. To
+
+solve this problem, typically a variant of the straight-through estimator is used, see e.g. Bengio
+
+et al. (2013); Hubara et al. (2016). On the other hand, the model as a function of the chosen pi
+
+is continuous and can be differentiated; the gradient of Q(v, p)i with respect to pj is well defined
+
+almost everywhere, and it is simply
+
+Q(v, p)i = i, if vi has been quantized to pj pj 0, otherwise,
+
+(6)
+
+where i is i-th element of the scaling factor, assuming we are using a bucketing scheme. If no bucketing is used, then i =  for every i. Otherwise it changes depending on which bucket the weight vi belongs to.
+Therefore, we can use the same loss function we used when training the original model, and with Equation (6) and the usual backpropagation algorithm we are able to compute its gradient with respect to the quantization points p. Then we can minimize the loss function with respect to p with the standard SGD algorithm. The algorithm then becomes the following:
+
+Algorithm 2 Differentiable Quantization
+
+1: procedure DIFFERENTIABLE QUANTIZATION
+
+2: Let w be the networks weights and p the initial quantization points
+
+3: loop
+
+4: wq  quant function(w, p)
+
+5: Run forward pass and compute loss l(wq)
+
+6:
+
+Run
+
+backward
+
+pass
+
+and
+
+compute
+
+l(wq wq
+
+)
+
+7:
+
+Use
+
+equation
+
+above
+
+to
+
+compute
+
+l(wq ) p
+
+8:
+
+Update
+
+quantization
+
+points
+
+using
+
+SGD
+
+or
+
+similar:
+
+p
+
+=
+
+p
+
+-
+
+
+
+·
+
+l(wq ) p
+
+9: return p
+
+Note on Efficiency. Optimizing the points p can be slower than training the original network, since we have to perform the normal forward and backward pass, and in addition we need to quantize the weights of the model and perform the backward pass to get to the gradients w.r.t. p. However, in our experience differential quantization requires an order of magnitude less iterations to converge to a good solution, and can be implemented efficiently.
+Weight Sharing. Upon close inspection, this method can be related to weight sharing Han et al. (2015). Weight sharing uses a k-mean clustering algorithm to find good clusters for the weights, adopting the centroids as quantization points for a cluster. The network is trained modifying the values of the centroids, aggregating the gradient in a similar fashion. The difference is in the initial assignment of points to centroids, but also, more importantly, in the fact that the assignment of weights to centroids never changes. By contrast, at every iteration we re-assign weights to the closest quantization point, and use a different initialization.
+
+4.2 DISCUSSION AND ADDITIONAL HEURISTICS
+While the loss is continuous w.r.t. p, there are indirect effects when changing the way each weight gets quantized. This can have drastic effect on the learning process. As an extreme example, we could have degeneracies, where all weights get represented by the same quantization point, making learning impossible. Or diversity of pi gets reduced, resulting in very few weights being represented at a really high precision while the rest are forced to be represented in a much lower resolution.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+To avoid such issues, we rely on the following set of heuristics. Future work will look at adding a reinforcement learning loss for how the pi are assigned to weights.
+Choose good starting points. One way to initialize the starting quantization points is to make them uniformly spaced, which would correspond to use as a starting point the uniform quantization function. The differentiable quantization algorithm needs to be able to use a quantization point in order to update it; therefore, to make sure every quantization point is used we initialize the points to be the quantiles of the weight values. This ensures that every quantization point is associated with the same number of values and we are able to update it.
+Redistribute bits where it matters. Not all layers in the network need the same accuracy. A measure of how important each weight is to the final prediction is the norm of the gradient of each weight vector. So in an initial phase we run the forward and backward pass a certain number of times to estimate the gradient of the weight vectors in each layer, we compute the average gradient across multiple minibatches and compute the norm; we then allocate the number of points associated with each weight according to a simple linear proportion. In short we estimate
+
+l E v 2
+
+(7)
+
+where l is the loss function,v is the vector of weights in a particular layer and
+
+l v
+
+i
+
+=
+
+l vi
+
+and we
+
+use this value to determine which layers are most sensitive to quantization.
+
+When using this process, we will use more than the indicated number of bits in some layers, and less in others. We can reduce the impact of this effect with the use of Huffman encoding, see Section 5; in any case, the effective number of bits used when using this redistribution can be higher than the number of bits that was originally indicated.
+
+Use the distillation loss. In the algorithm delineated above, the loss refers to the loss we used to train the original model with. Another possible specification is to treat the unquantized model as the teacher model, the quantized model as the student, and to use as loss the distillation loss between the outputs of the unquantized and quantized model. In this case, then, we are optimizing our quantized model not to perform best with respect to the original loss, but to mimic the results of the unquantized model, which should be easier to learn for the model and provide better results.
+
+Hyperparameter optimization. The algorithm above is an optimization problem very similar to the original one. As usual, to obtain the best results one should experiment with hyperparameters optimization, and different variants of gradient descent.
+
+5 COMPRESSION
+
+We now analyze the space savings when using b bits and bucket size of k. Let f be the size of full
+
+precision weights (32 bit) and let N be the size of the "vector" we are quantizing. Full precision
+
+requires
+
+fN
+
+bits,
+
+while
+
+the
+
+quantized
+
+vector
+
+requires
+
+bN
+
++
+
+2f N k
+
+.
+
+(We
+
+use
+
+b
+
+bits
+
+per
+
+weight,
+
+plus
+
+the
+
+scaling
+
+factors
+
+
+
+and
+
+
+
+for
+
+every
+
+bucket).
+
+The
+
+size
+
+gain
+
+is
+
+therefore
+
+g(b, k; f )
+
+=
+
+kf kb+2f
+
+.
+
+For differentiable quantization, we also have to store the values of the quantization points. Since
+this number does not depend on N , the amount of space required is negligible and we ignore it for simplicity. For example, at 256 bucket size, using 2 bits per component yields 14.2× space savings w.r.t. full precision, while 4 bits yields 7.52× space savings. At 512 bucket size, the 2 bit savings are 15.05×, while 4 bits yields 7.75× compression.
+
+Huffman encoding. To save additional space, we can use Huffman encoding to represent the quantized values. In fact, each quantized value can be thought as the pointer to a full precision value; in the case of non uniform quantization is pk, in the case of uniform quantization is k/s. We can then compute the frequency for every index across all the weights of the model and compute the optimal Huffman encoding. The mean bit length of the optimal encoding is the amount of bits we actually use to encode the values. This explains the presence of fractional bits in some of our size gain tables from the Appendix.
+
+We emphasize that we only use these compression numbers as a ballpark figure, since additional implementation costs might mean that these savings are not always easy to translate to practice Han et al. (2015).
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+6 EXPERIMENTAL RESULTS
+Datasets and Tasks. We test the methods presented above on several datasets using different models. For image classification, we consider CIFAR-10 and CIFAR-100 (Krizhevsky, 2009). For neural machine translation (NMT), we consider the OpenNMT integration test dataset, a German-English translation task consisting of 200K sentences Klein et al. (2017). We refer the reader to Appendix A for further details of the datasets and models we consider.
+Methods. We will compare the performance of the methods described in the following way: we consider as baseline the teacher model, the distilled model and a smaller model: the distilled and smaller models have the same architecture, but the distilled model is trained using distillation loss on the teacher, while the smaller model is trained directly on targets. Further, we compare the performance of Quantized Distillation and Differentiable Quantization. In addition, we will also use PM ("post-mortem") quantization, which uniformly quantizes the weights after training without any additional operation, with and without bucketing. All the results are obtained with a bucket size of 256, which we found to empirically provide a good compression-accuracy trade-off.
+CIFAR-10 Experiments. For image classification on CIFAR-10, we tested the impact of different training techniques on the accuracy of the distilled model, while varying the parameters of a CNN architecture, such as quantization levels and model size. Table 1 contains the results for full-precision training, PM quantization with and without bucketing, as well as our methods. The percentages on the left below the student models definition are the accuracy of the normal and the distilled model respectively (trained with full precision). Details about the resulting size of the models are reported in table 7 in the appendix.
+
+Table 1: CIFAR10 accuracy. Teacher model: 5.3M param, 21 MB, accuracy 89.71 %.Details about the resulting size of the models are reported in table 7 in the appendix.
+
+Student model 1 1M param - 4 MB
+84.5% - 88.8%
+Student model 2 0.3M param - 1.27 MB
+80.3% - 84.3%
+Student model 3 0.1M param - 0.45 MB
+71.6% - 78.2%
+
+PM Quant.(No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+
+2 bits 9.30 % 10.53 % 82.4 % 80.43%
+10.15 % 11.89 % 74.22 % 72.79 %
+10.15 % 10.38 % 67.02 % 57.84 %
+
+4 bits 67.99 % 87.18 % 88.00 % 88.31 %
+68.05 % 81.96 % 83.92 % 83.49 %
+61.30 % 72.44 % 77.75 % 77.36 %
+
+8 bits 88.91 % 88.80 % 88.82 %
+----
+84.38 % 84.38 % 84.22 %
+----
+78.04 % 78.10 % 77.92 %
+----
+
+Overall, quantized distillation appears to be the method with best accuracy across the whole range of bit widths and architectures. It outperforms PM significantly for 2bit and 4bit quantization, achieves accuracy within 0.2% of the teacher at 8 bits on the larger student model, and relatively minor accuracy loss at 4bit quantization. Differentiable quantization is a close second on all experiments. Further, we highlight the good accuracy of the much simpler PM quantization method with bucketing at higher bit width (4 and 8 bits).
+CIFAR-100 Experiments. Next, we perform image classification on the same dataset, but with the full 100 classes. Here, we focus on 2bit and 4bit quantization, and on a single student architecture. The baseline architecture is a wide residual network with 28 layers, and 36.5M parameters Zagoruyko & Komodakis (2016). The student has depth and width reduced by 20%, and half the parameters. It is chosen so that reaches the same accuracy as the teacher model when distilled at full precision. Accuracy results are given in Table 2. Details about the resulting size of the models are reported in table 10 in the appendix.
+The results confirm the trend from the previous dataset, with distilled and differential quantization preserving accuracy within less than 1% at 4bit precision. However, we note that accuracy loss is catastrophic at 2bit precision, probably because of reduced model capacity. Differentiable quantization is able to best recover accuracy for this harder task.
+7
+
+Under review as a conference paper at ICLR 2018
+
+Table 2: CIFAR100 accuracy and model size. Teacher model: 36.5M param, 146 MB, accuracy 77.21 %.
+
+Student model 17.2M param - 68.8 MB
+77.08% - 77.24%
+
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+
+2 bits 1.38 % - 3.18 MB 1.00 % - 3.9 MB 27.84 % - 4.3 MB 49.32 % - 7.9 MB
+
+4 bits 1.29 % - 5.77 MB 73.5 % - 8.2 MB 76.31 % - 8.2 MB 77.07 % - 12.4 MB
+
+OpenNMT Experiments. The OpenNMT integration test dataset (Ope) consists of 200K train sentences and 10K test sentences for a German-English translation task. To train and test the models we will use the OpenNMT pytorch codebase (Klein et al., 2017). We modified the code, in particular by adding the quantization algorithms and the distillation loss. As measure of fit we will use perplexity and the BLEU score, the latter computed using the multi-bleu.perl code from the moses project (mos).
+Our target models consist of an embedding layer, an encoder consisting of n layers of LSTM, a decoder consisting of n layers of LSTM, and a linear layer. The decoder also uses the global attention mechanism described in Luong et al. (2015). For the teacher network we set n = 2, for a total of 4 LSTM layers with LSTM size 500. For the student networks we choose n = 1, for a total of 2 LSTM layers. We vary the LSTM size of the student networks and for each one, we compute the distilled model and the quantized versions for varying bit width. Results are summarized in Table 3. The BLEU scores below the student model refer to the BLEU scores of the normal and distilled model respectively (trained with full precision). Details about the resulting size of the models are reported in table 13 in the appendix.
+
+Table 3: OpenNMT dataset BLEU score and perplexity (ppl). Teacher model: 84.8M param, 340 MB, 26.1 ppl, 15.88 BLEU. Details about the resulting size of the models are reported in table 13 in the appendix.
+
+Student model 1 81.6M param - 326 MB
+14.97 - 16.13 BLEU
+Student model 2 64.8M param - 249 MB
+14.22 - 15.48 BLEU
+Student model 3 57.2M param - 228 MB
+12.45 - 13.8 BLEU
+
+PM Quant.(No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+
+2 bits 0.00 - 2 · 1017 ppl 4.12 - 125.1 ppl
+0.00 - 6645 ppl 0.7 - 249 ppl 0.00 - 5 · 108 ppl 1.72 - 286.98 ppl 0.00 - 4035 ppl 0.28 - 306 ppl 0.00 - 3 · 108 ppl 0.24 - 1984 ppl 0.14 - 731 ppl 0.26 - 306 ppl
+
+4 bits 0.24 - 2 · 106 ppl 16.29 - 26.2 ppl 15.73 - 25.43 ppl 15.01 - 28.8 ppl
+6.65 - 71.78 ppl 15.19 - 28.95 ppl 15.26 - 29.1 ppl 13.86 - 31.33 ppl
+5.47 - 106.5 ppl 12.64 - 36.56 ppl
+12 - 37 ppl 12.06 - 38.44 ppl
+
+Our intuition was that recurrent neural networks should in theory be harder to quantize than convolutional neural networks, as quantization errors do not average out when executing repeatedly through the same cell, but accumulate. Results contradict this intuition. In particular, medium and large-sized students are able to essentially recover the same scores as the teacher model on this dataset. Perhaps surprisingly, bucketing PM and quantized distillation perform equally well for 4bit quantization. This suggests that the straightforward choice, PM, can be significantly improved by simply controlling the added noise via bucketing. Further, as expected, cell size is an important indicator for accuracy, although halving both cell size and the number of layers can be done without significant loss.
+Distillation Loss versus Normal Loss. One key question we are interested in is whether distillation loss is a consistently better metric when quantizing, compared to standard loss. We tested this for CIFAR-10, comparing the performance of quantized training with respect to each loss. At 2bit precision, the student converges to 67.22% accuracy with normal loss, and to 82.40% with distillation loss. At 4bit precision, the student converges to 86.01% accuracy with normal loss, and to 88.00% with distillation loss. On OpenNMT, we observe a similar gap: the 4bit quantized student converges
+
+8
+
+Under review as a conference paper at ICLR 2018
+to 32.67 perplexity and 15.03 BLEU when trained with normal loss, and to 25.43 perplexity (better than the teacher) and 15.73 BLEU when trained with distillation loss. This strongly suggests that distillation loss is superior when quantizing. For details, see Section A.3.1 in the Appendix.
+Impact of Heuristics on Differentiable Quantization. We also performed an in-depth study of how the various heuristics impact accuracy. We found that, for differentiable quantization, redistributing bits according to the gradient norm of the layers is absolutely essential for good accuracy; quantiles and distillation loss also seem to provide an improvement, albeit smaller. Due to space constraints, we defer the results and their discussion to Section A.3.2 of the Appendix.
+7 DISCUSSION
+We have examined the impact of combining distillation and quantization when compressing deep neural networks. Our main finding is that, when quantizing, one can (and should) leverage large, accurate models via distillation loss, if such models are available. We have given two methods to do just that, namely quantized distillation, and differentiable quantization. The former acts directly on the training process of the student model, while the latter provides a way of optimizing the quantization of the student so as to best fit the teacher model.
+Our experimental results suggest that these methods can compress existing models by an order of magnitude in terms of size, on small image classification and NMT tasks, while preserving accuracy. At the same time, we note that distillation also provides an automatic improvement in inference speed, since it generates shallower models. In our GPU implementation, the improvement in inference speed was linear with respect to the reduction in model depth. One of our more surprising findings is that naive uniform quantization with bucketing appears to perform well in a wide range of scenarios. Our analysis in Section 2.2 suggests that this may be because bucketing provides a way to parametrize the Gaussian-like noise induced by quantization. Given its simplicity, it could be used consistently as a baseline method.
+In our experimental results, we performed manual architecture search for the depth and bit width of the student model, which is time-consuming and error-prone. In future work, we plan to examine the potential of reinforcement learning or evolution strategies to discover the structure of the student for best performance given a set of space and latency constraints. The second, and more immediate direction, is to examine the practical speedup potential of these methods, and use them together and in conjunction with existing compression methods such as weight sharing Han et al. (2015) and with existing low-precision computation frameworks, such as NVIDIA TensorRT, or FPGA platforms. Moreover, we are currently expanding these methods to medium and large-scale tasks, in particular image classification on ImageNet, and NMT on larger corpora.
+REFERENCES
+Opennmt integration testing. https://github.com/OpenNMT/OpenNMT-py. Accessed: 2017-10-25.
+Moses baseline. http://www.statmt.org/moses/?n=moses.baseline. Accessed: 2017-10-25.
+Dan Alistarh, Jerry Li, Ryota Tomioka, and Milan Vojnovic. Qsgd: Randomized quantization for communication-optimal stochastic gradient descent. arXiv preprint arXiv:1610.02132, 2016.
+Lei Jimmy Ba and Rich Caruana. Do deep nets really need to be deep? CoRR, abs/1312.6184, 2013. URL http://arxiv.org/abs/1312.6184.
+Yoshua Bengio, Nicholas Le´onard, and Aaron C. Courville. Estimating or propagating gradients through stochastic neurons for conditional computation. CoRR, abs/1308.3432, 2013. URL http://arxiv.org/abs/1308.3432.
+Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre David. Binaryconnect: Training deep neural networks with binary weights during propagations. CoRR, abs/1511.00363, 2015. URL http: //arxiv.org/abs/1511.00363.
+Yann Dauphin, Razvan Pascanu, C¸ aglar Gu¨lc¸ehre, Kyunghyun Cho, Surya Ganguli, and Yoshua Bengio. Identifying and attacking the saddle point problem in high-dimensional non-convex optimization. CoRR, abs/1406.2572, 2014. URL http://arxiv.org/abs/1406.2572.
+9
+
+Under review as a conference paper at ICLR 2018
+Caglar Gulcehre, Marcin Moczulski, Misha Denil, and Yoshua Bengio. Noisy activation functions. In International Conference on Machine Learning, pp. 3059­3068, 2016.
+Philipp Gysel, Mohammad Motamedi, and Soheil Ghiasi. Hardware-oriented approximation of convolutional neural networks. arXiv preprint arXiv:1604.03168, 2016.
+Song Han, Huizi Mao, and William J. Dally. Deep compression: Compressing deep neural network with pruning, trained quantization and huffman coding. CoRR, abs/1510.00149, 2015. URL http://arxiv.org/abs/1510.00149.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770­778, 2016a.
+Qinyao He, He Wen, Shuchang Zhou, Yuxin Wu, Cong Yao, Xinyu Zhou, and Yuheng Zou. Effective quantization methods for recurrent neural networks. CoRR, abs/1611.10176, 2016b. URL http: //arxiv.org/abs/1611.10176.
+G. Hinton, O. Vinyals, and J. Dean. Distilling the Knowledge in a Neural Network. ArXiv e-prints, March 2015.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Flat minima. Neural Computation, 9(1):1­42, 1997.
+Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Quantized neural networks: Training neural networks with low precision weights and activations. CoRR, abs/1609.07061, 2016. URL http://arxiv.org/abs/1609.07061.
+Forrest N Iandola, Song Han, Matthew W Moskewicz, Khalid Ashraf, William J Dally, and Kurt Keutzer. Squeezenet: Alexnet-level accuracy with 50x fewer parameters and¡ 0.5 mb model size. arXiv preprint arXiv:1602.07360, 2016.
+Nitish Shirish Keskar, Dheevatsa Mudigere, Jorge Nocedal, Mikhail Smelyanskiy, and Ping Tak Peter Tang. On large-batch training for deep learning: Generalization gap and sharp minima. arXiv preprint arXiv:1609.04836, 2016.
+G. Klein, Y. Kim, Y. Deng, J. Senellart, and A. M. Rush. OpenNMT: Open-Source Toolkit for Neural Machine Translation. ArXiv e-prints, 2017.
+Alex Krizhevsky. Learning multiple layers of features from tiny images. Technical report, 2009.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classification with deep convolutional neural networks. In Advances in neural information processing systems, pp. 1097­1105, 2012.
+Hao Li, Soham De, Zheng Xu, Christoph Studer, Hanan Samet, and Tom Goldstein. Training quantized nets: A deeper understanding. CoRR, abs/1706.02379, 2017. URL http://arxiv. org/abs/1706.02379.
+Minh-Thang Luong, Hieu Pham, and Christopher D. Manning. Effective approaches to attentionbased neural machine translation. CoRR, abs/1508.04025, 2015. URL http://arxiv.org/ abs/1508.04025.
+Naveen Mellempudi, Abhisek Kundu, Dheevatsa Mudigere, Dipankar Das, Bharat Kaul, and Pradeep Dubey. Ternary neural networks with fine-grained quantization. arXiv preprint arXiv:1705.01462, 2017.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Alex Graves, Ioannis Antonoglou, Daan Wierstra, and Martin Riedmiller. Playing atari with deep reinforcement learning. arXiv preprint arXiv:1312.5602, 2013.
+Aaron van den Oord, Sander Dieleman, Heiga Zen, Karen Simonyan, Oriol Vinyals, Alex Graves, Nal Kalchbrenner, Andrew Senior, and Koray Kavukcuoglu. Wavenet: A generative model for raw audio. arXiv preprint arXiv:1609.03499, 2016.
+Joachim Ott, Zhouhan Lin, Ying Zhang, Shih-Chii Liu, and Yoshua Bengio. Recurrent neural networks with limited numerical precision. arXiv preprint arXiv:1608.06902, 2016.
+10
+
+Under review as a conference paper at ICLR 2018
+
+Mohammad Rastegari, Vicente Ordonez, Joseph Redmon, and Ali Farhadi. Xnor-net: Imagenet classification using binary convolutional neural networks. CoRR, abs/1603.05279, 2016. URL http://arxiv.org/abs/1603.05279.
+David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, et al. Mastering the game of go with deep neural networks and tree search. Nature, 529(7587):484­489, 2016.
+G. Urban, K. J. Geras, S. Ebrahimi Kahou, O. Aslan, S. Wang, R. Caruana, A. Mohamed, M. Philipose, and M. Richardson. Do Deep Convolutional Nets Really Need to be Deep and Convolutional? ArXiv e-prints, March 2016.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762, 2017.
+Wei Wen, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Learning structured sparsity in deep neural networks. In Advances in Neural Information Processing Systems, pp. 2074­2082, 2016.
+Jiaxiang Wu, Cong Leng, Yuhang Wang, Qinghao Hu, and Jian Cheng. Quantized convolutional neural networks for mobile devices. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 4820­4828, 2016.
+S. Zagoruyko and N. Komodakis. Wide Residual Networks. ArXiv e-prints, May 2016.
+Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht, and Oriol Vinyals. Understanding deep learning requires rethinking generalization. arXiv preprint arXiv:1611.03530, 2016.
+
+A FULL EXPERIMENTAL RESULTS
+A.1 CIFAR10
+The model used to train CIFAR10 is the one described in Urban et al. (2016) with some minor modifications. We use standard data augmentation techniques, including random cropping and random flipping. The learning rate schedule follows the one detailed in the paper. The structure of the models we experiment with consists of some convolutional layers, mixed with dropout layers and max pooling layers, followed by one or more linear layers.
+The model used are defined in Table 4. The c indicates a convolutional layer, mp a max pooling layer, dp a dropout layer, fc a linear (fully connected) layer. The exponent indicates how many consecutive layers of the same type are there, while the number in front of the letter determines the size of the layer. In the case of convolutional layers is the number of filters. All convolutional layers of the teacher are 3x3, while the convolutional layers in the smaller models are 5x5.
+
+Teacher model Smaller model 1 Smaller model 2 Smaller model 3
+
+Table 4: CIFAR10: model specifications
+76c2-mp-dp-126c2-mp-dp-148c4-mp-dp-1200fc-dp-1200fc 75c-mp-dp-50c2-mp-dp-25c-mp-dp-500fc-dp 50c-mp-dp-25c2-mp-dp-10c-mp-dp-400fc-dp 25c-mp-dp-10c2-mp-dp-5c-mp-dp-300fc-dp
+
+Following the authors of the paper, we don't use dropout layers when training the models using distillation loss. Distillation loss is computed with a temperature of T = 5.
+Table 5 reports the accuracy of the models trained (in full precision) and their size. Table 6 reports the accuracy achieved with each method, and table 7 reports the optimal mean bit length using Huffman encoding and resulting model size.
+
+11
+
+Under review as a conference paper at ICLR 2018
+
+Table 5: CIFAR10: Teacher and distilled model accuracy, full precision
+
+Model name Test accuracy # of parameters Size (MB)
+
+Teacher model
+
+89.7 %
+
+5.3 millions 21.3 MB
+
+Smaller model 1 Distilled model 1
+
+84.5 % 88.8 %
+
+1.0 millions 1.0 millions
+
+4.00 MB 4.00 MB
+
+Smaller model 2 Distilled model 2
+
+80.3 % 84.3 %
+
+0.3 millions 0.3 millions
+
+1.27 MB 1.27 MB
+
+Smaller model 3 Distilled model 3
+
+71.6 % 78.2 %
+
+0.1 millions 0.1 millions
+
+0.45 MB 0.45 MB
+
+Table 6: CIFAR10: Test accuracy for quantized models. Results computed with bucket size = 256
+
+PM Quant. 1 (No bucket) PM Quant. 1 (with bucket)
+Quantized Distill. 1 Differentiable Quant. 1
+
+2 bits 9.30 % 10.53 % 82.4 % 80.43%
+
+4 bits 67.99 % 87.18 % 88.00 % 88.31 %
+
+8 bits 88.91 % 88.80 % 88.82 %
+--
+
+PM Quant. 2 (No bucket) PM Quant. 2 (with bucket)
+Quantized Distill. 2 Differentiable Quant. 2
+
+10.15 % 11.89 % 74.22 % 72.79 %
+
+68.05 % 81.96 % 83.92 % 83.49 %
+
+84.38 % 84.38 % 84.22 %
+--
+
+PM Quant. 3 (No bucket) PM Quant. 3 (with bucket)
+Quantized Distill. 3 Differentiable Quant. 3
+
+10.15 % 10.38 % 67.02 % 57.84 %
+
+61.30 % 72.44 % 77.75 % 77.36 %
+
+78.04 % 78.10 % 77.92 %
+--
+
+Table 7: CIFAR10: Optimal length Huffman encoding and resulting model size. Bucket size = 256
+
+PM Quant. 1 (No bucket) PM Quant. 1 (with bucket)
+Quantized Distill. 1 Differentiable Quant. 1
+
+2 bits 1.34 bits - 0.17 MB 1.58 bits - 0.22 MB 1.7 bits - 0.24 MB 3.18 bits - 0.43 MB
+
+4 bits 2.43 bits - 0.3 MB
+3.52 - 0.47 MB 3.64 bits - 0.48 MB 5.34 bits - 0.7 MB
+
+8 bits 6.48 bits - 0.81 MB 7.58 bits - 0.98 MB
+7.7 bits - 1 MB ----
+
+PM Quant. 2 (No bucket) PM Quant. 2 (with bucket)
+Quantized Distill. 2 Differentiable Quant. 2
+
+1.43 bits - 0.05 MB 1.6 bits - 0.07 MB 1.7 bits - 0.08 MB 3.16 bits - 0.13 MB
+
+2.6 bits - 0.1 MB 3.58 bits - 0.15 MB 3.55 bits - 0.15 MB 5.34 bits - 0.22 MB
+
+6.65 bits - 0.26 MB 7.64 bits - 0.31 MB 7.64 bits - 0.31 MB
+----
+
+PM Quant. 3 (No bucket) PM Quant. 3 (with bucket)
+Quantized Distill. 3 Differentiable Quant. 3
+
+1.46 bits - 0.02 MB 1.58 bits - 0.026 MB 1.64 bits - 0.027 MB 3.12 bits - 0.04 MB
+
+2.62 bits - 0.03 MB 3.51 bits - 0.053 MB 3.53 bits - 0.053 MB 5.41 bits - 0.08 MB
+
+6.66 bits - 0.09 MB 7.56 bits - 0.1 MB 7.59 bits - 0.11 MB
+----
+
+A.2 CIFAR100 For our CIFAR100 experiments, we use an implementation of wide residual networks found on GitHub 2. The wide factor is a multiplicative factor controlling the amount of filters in each layer;
+2https://github.com/meliketoy/wide-resnet.pytorch
+12
+
+Under review as a conference paper at ICLR 2018
+
+for more details please refer to the original paper Zagoruyko & Komodakis (2016). We train for 200 epochs with an initial learning rate of 0.1.
+For the CIFAR100 experiments we focused on one student model. Distillation loss is computed with a temperature of T = 5.
+
+Table 8: CIFAR100: Teacher and distilled model accuracy, full precision
+
+Model name Teacher model Smaller model Distilled model
+
+Structure depth = 28, wide factor = 10 depth = 22, wide factor = 8 depth = 22, wide factor = 8
+
+Test accuracy 77.21 % 77.08 % 77.24 %
+
+# of parameters 36.5 millions 17.2 millions 17.2 millions
+
+Size (MB) 146 MB 68.8 MB 68.8 MB
+
+Table 9: CIFAR100: Test accuracy for quantized models. Results computed with bucket size = 256
+
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+
+2 bits 1.38% 1.00 % 27.84% 49.32%
+
+4 bits 1.29% 73.47% 76.31% 77.07%
+
+Table 10: CIFAR100: Optimal length Huffman encoding and resulting model size. Bucket size = 256
+
+PM Quant. (No bucket) PM Quant. (with bucket)
+Quantized Distill. Differentiable Quant.
+
+2 bits 1.47 bits - 3.18 MB 1.56 bits - 3.90 MB 1.73 bits - 4.27 MB 3.23 bits - 7.84 MB
+
+4 bits 2.68 bits - 5.77 MB 3.55 bits - 8.18 MB 3.54 bits - 8.16 MB 5.53 bits - 12.44 MB
+
+A.3 OPENTNMT INTEGRATION TEST DATASET
+As mentioned in the main text, we use the openNMT-py codebase. We slightly modify it to add distillation loss and the quantization methods proposed. We mostly use standard options to train the model; in particular, the learning rate starts at 1 and is halved every epoch starting from the first epoch where perplexity doesn't drop on the test set. We train every model for 15 epochs. Distillation loss is computed with a temperature of T = 1.
+
+Table 11: openNMT integ: Teacher and distilled models perplexity and BLEU, full precision
+
+Model name
+
+Structure
+
+Perplexity BLEU # of parameters Size (MB)
+
+Teacher model 4 LSTM layer, 500 cell size 26.21 15.88 84.8 millions 339.28 MB
+
+Smaller model 1 2 LSTM layer, 512 cell size Distilled model 1 2 LSTM layer, 512 cell size
+
+33.03 25.55
+
+14.97 81.6 millions 326.57 MB 16.13 81.6 millions 326.57 MB
+
+Smaller model 2 2 LSTM layer, 256 cell size Distilled model 2 2 LSTM layer, 256 cell size
+
+34.5 27.7
+
+14.22 64.8 millions 249.56 MB 15.48 64.8 millions 249.56 MB
+
+Smaller model 3 2 LSTM layer, 128 cell size Distilled model 3 2 LSTM layer, 128 cell size
+
+39.5 33.78
+
+12.45 57.2 millions 228.85 MB 13.8 57.2 millions 228.85 MB
+
+A.3.1 DISTILLATION VERSUS STANDARD LOSS FOR QUANTIZATION In this section we highlight the positive effects of using distillation loss during quantization. We take models with the same architecture and we train them with the same number of bits; one of the
+13
+
+Under review as a conference paper at ICLR 2018
+
+Table 12: openNMT integ: Test accuracy for quantized models. Results computed with bucket size = 256
+
+PM Quant. 1 (No bucket) PM Quant. 1 (with bucket)
+Quantized Distill. 1 Differentiable Quant. 1
+
+2 bits 2 · 1017 ppl - 0.00 BLEU 125.1 ppl - 4.12 BLEU
+6645 ppl - 0.00 BLEU 249 ppl - 0.7 BLEU
+
+4 bits 2.7 · 106 ppl - 0.24 BLEU 26.21 ppl - 16.29 BLEU 25.43 ppl - 15.73 BLEU
+28.8 ppl - 15.01 BLEU
+
+PM Quant. 2 (No bucket) PM Quant. 2 (with bucket)
+Quantized Distill. 2 Differentiable Quant. 2
+
+5 · 108 ppl - 0.00 BLEU 286.98 ppl - 1.72 BLEU 4035 ppl - 0.00 BLEU
+306 ppl - 0.28 BLEU
+
+71.78 ppl - 6.65 BLEU 28.95 ppl - 15.19 BLEU 29.1 ppl - 15.26 BLEU 31.33 ppl - 13.86 BLEU
+
+PM Quant. 3 (No bucket) PM Quant. 3 (with bucket)
+Quantized Distill. 3 Differentiable Quant. 3
+
+3 · 108 ppl - 0.00 BLEU 1984 ppl - 0.24 BLEU 731 ppl - 0.14 BLEU 306 ppl - 0.26 BLEU
+
+106.5 ppl - 5.47 BLEU 36.56 ppl - 12.64 BLEU
+37 ppl - 12 BLEU 38.4 ppl - 12.06 BLEU
+
+Table 13: openNMT integ: Optimal length Huffman encoding and resulting model size. Bucket size = 256
+
+PM Quant. 1 (No bucket) PM Quant. 1 (with bucket)
+Quantized Distill. 1 Differentiable Quant. 1
+
+2 bits 1.36 bits - 13.93 MB 1.65 bits - 19.47 MB 1.75 bits - 20.4 MB 1.72 bits - 20.1 MB
+
+4 bits 1.77 bits - 18.10 MB 3.69 bits - 40.26 MB 3.66 bits - 39.97 MB 4.38 bits - 47.32 MB
+
+PM Quant. 2 (No bucket) PM Quant. 2 (with bucket)
+Quantized Distill. 2 Differentiable Quant. 2
+
+1.34 bits - 10.89 MB 1.65 bits - 15.4 MB 1.85 bits - 17.05 MB 1.93 bits - 17.67 MB
+
+1.86 bits - 15.09 MB 3.68 bits - 31.91 MB 3.68 bits - 31.91 MB 4.17 bits - 35.83 MB
+
+PM Quant. 3 (No bucket) PM Quant. 3 (with bucket)
+Quantized Distill. 3 Differentiable Quant. 3
+
+1.47 bits - 10.54 MB 1.65 bits - 13.6 MB 1.86 bits - 15.13 MB 1.99 bits - 16.04 MB
+
+2.13 bits - 15.24 MB 3.68 bits - 28.14 MB 3.68 bits - 28.18 MB 4.25 bits - 31.18 MB
+
+models is trained with normal loss, the other with the distillation loss with equal weighting between soft cross entropy and normal cross entropy (that is, it is the quantized distilled model). Table 14 shows the results on the CIFAR10 dataset; the models we train have the same structure as the Smaller model 1, see Section A.1. Table 15 shows the results on the openNMT integration test dataset; the models trained have the same structure of Smaller model 1, see Section A.3. Notice that distillation loss can significantly improve the accuracy of the quantized models.
+Table 14: CIFAR10: Distillation loss vs normal loss when quantizing 2 bits 4 bits
+Normal loss 67.22 % 86.01 % Distillation loss 82.40 % 88.00 %
+These results suggest that quantization works better when combined with distillation, and that we should try to take advantage of this whenever we are quantizing a neural network.
+14
+
+Under review as a conference paper at ICLR 2018
+
+Table 15: openNMT integ: Distillation loss vs normal loss when quantizing
+4 bits Normal loss 32.67 ppl 15.03 BLEU Distillation loss 25.43 ppl 15.73 BLEU
+
+A.3.2 DIFFERENT HEURISTICS FOR DIFFERENTIABLE QUANTIZATION
+To test the different heuristics presented in Section 4.2, we train with differentiable quantization the Smaller model 1 architecture specified in Section A.1 on the cifar10 dataset. The same model is trained with different heuristics to provide a sense of how important they are; the experiments is performed with 2 and 4 bits.
+Results suggests that when using 4 bits, the method is robust and works regardless. When using 2 bits, redistributing bits according to the gradient norm of the layers is absolutely essential for this method to work ; quantiles starting point also seem to provide an small improvement, while using distillation loss in this case does not seem to be crucial.
+
+Table 16: Results with automatically redistributed bits
+
+2 bits 4 bits
+
+Distillation loss Normal loss
+Distillation loss Normal loss
+
+Quantiles 82.94 % 83.67 % 88.93 % 88.80 %
+
+Uniform 78.76 % 76.60 % 88.50 % 88.74 %
+
+Table 17: Results without automatically redistributed bits
+
+2 bits 4 bits
+
+Distillation loss Normal loss
+Distillation loss Normal loss
+
+Quantiles 19.69 % 25.28 % 88.39 % 88.43 %
+
+Uniform 22.81 % 22.11 % 88.67 % 88.44 %
+
+B QUANTIZATION IS EQUIVALENT TO ASYMPTOTICALLY NORMALLY DISTRIBUTED NOISE
+
+In this section we will prove some results about the uniform quantization function, including the fact that is asymptotically normally distributed, see subsection B.1 below. Clearly, we refer to the stochastic version, see Section 2.1.
+Unbiasedness
+We first start proving the unbiasedness of Q^;
+
+E[Q^(v^)i] =
+
+v^is s
+
+1 + s E[i] =
+
+v^is s
+
++
+
+1 s (sv^i
+
+-
+
+v^is ) = v^i
+
+Then it is immediate that
+
+(8)
+
+E[Q(v)] = E Q^ v - 
+
+v-
+
++ =
+
++ =v
+
+
+
+(9)
+
+Bounds on second and third moment
+We will write out bounds on Q^; the analogous bounds on Q are then straightforward. For convenience, let us call ^li = v^is
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+E[Q^(v^)2i ]
+
+=
+
+^li2 s2
+
++
+
+1 s2
+
+E
+
+[i2]
+
++
+
+2
+
+^li s2
+
+E[i]
+
+=
+
+=
+
+^li2 s2
+
++
+
+1 s2 (sv^i
+
+-
+
+^li)
+
++
+
+2
+
+^li s2
+
+(sv^i
+
+-
+
+^li)
+
+=
+
+1 = s2
+
+v^is(1 + 2^li) - ^li(^li + 1)
+
+And given that ^li  v^is  ^li + 1, we readily find
+
+For the third moment, we have
+
+^li2 s2
+
+
+
+E[Q^(v^)2i ]
+
+
+
+(^li
+
++ 1)2 s2
+
+(10) (11) (12)
+(13)
+
+E[Q^(v^)i3]
+
+=
+
+^li3 s3
+
++
+
+1 s3
+
+E
+
+[i3]
+
++
+
+3
+
+^li s3
+
+E[i2
+
+]
+
++
+
+3
+
+^li2 s3
+
+E
+
+[i
+
+]
+
+=
+
+=
+
+^li3 s3
+
++
+
+1 s3 (sv^i
+
+-
+
+^li)
+
++
+
+3
+
+^li s3
+
+(sv^i
+
+-
+
+^li)
+
++
+
+3
+
+^li2 s3
+
+(sv^i
+
+-
+
+^li)
+
+=
+
+1 = s3
+
+v^is(3^li2 + 3^li + 1) - ^li(2^li2 + 3^li + 1)
+
+And as before, the bounds are
+
+(14) (15) (16)
+
+^li3 s3
+
+
+
+E[Q^(v^)3i ]
+
+
+
+(^li
+
++ 1)3 s3
+
+(17)
+
+B.1 ASYMPTOTIC NORMALITY
+
+Most of neural networks operations are scalar product computation. Therefore, the scalar product of the quantized weights and the inputs is an important quantity:
+
+n
+Q(v)T x = Q(vi)xi
+i=1
+We already know from section B that the quantization function is unbiased; hence we know that
+
+nn
+Q(vi)xi = vixi + n
+i=1 i=1
+
+(18)
+
+with n is a zero-mean random variable. We will show that n tends in distribution to a normal random variable. To prove asymptotic normality, we will use a generalized version of the central
+
+limit theorem due to Lyapunov:
+
+Theorem B.1 (Lyapunov Central Limit Theorem). Let {X1, X2, . . . } be a sequence of independent
+
+random variables, each with finite expected value µi and variance i2. Define s2n =
+
+n i=1
+
+i2.
+
+If,
+
+for
+
+some  > 0, the Lyapunov condition
+
+is satisfied, then
+
+1
+
+lim
+n
+
+sn2+
+
+n
+E
+i=1
+
+|Xi - µi|2+
+
+=0
+
+(19)
+
+1 sn
+
+n
+(Xi - µi)
+i=1
+
+-D
+
+N (0, 1)
+
+(20)
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+We can now state the theorem:
+
+Theorem B.2. Let v, x be two vectors with n elements. Let Q be the uniform quantization func-
+
+tion with s levels defined in 2.1 and define sn2 =
+
+n i=1
+
+V
+
+ar[Q(vi
+
+)xi
+
+].
+
+If
+
+the
+
+elements
+
+of
+
+v, x
+
+are
+
+uniformly bounded by M 3 and limn sn = , then
+
+with E[n] = 0 and
+
+nn
+Q(vi)xi = vixi + n
+i=1 i=1
+
+(21)
+
+1
+
+lim
+n
+
+sn
+
+n
+
+-D
+
+N (0, 1)
+
+(22)
+
+Proof. Using the same notation as theorem B.1, let Xi = Q(vi)xi, µi = E[Xi] = vixi. We already mentioned in 2.1 that these are independent random variables. We will show that the Lyapunov
+condition holds with  = 1.
+
+We know that
+
+E
+
+|Xi - µi|3
+
+=E
+
+(Xi - µi)2|Xi - µi|
+
+ M2 E s
+
+(Xi - µi)2
+
+(23)
+
+In fact,
+
+|Xi - µi| = |xi||Q(vi) - vi| = |xi| iQ^
+
+vi - i i
+
++ i - vi 
+
+ |xi| i
+
+vi - i + 1 i s
+
++ i - vi 
+
+
+
+|xi|
+
+M s
+
+
+
+M2 s
+
+(24) (25) (26)
+
+since during quantization we have bins hypothesis M  i, xi for every i.
+
+of
+
+size
+
+1 s
+
+,
+
+so
+
+that
+
+is
+
+the
+
+largest
+
+error
+
+we
+
+can
+
+make.
+
+Also,
+
+by
+
+Hence
+
+0
+
+
+
+1 s3n
+
+n i=1
+
+E
+
+|Xi - µi|3
+
+
+
+1 s3n
+
+M2 s
+
+n
+E
+i=1
+
+(Xi - µi)2)
+
+= M2 · 1 s sn
+
+(27)
+
+and since limn sn = , we have that the Lyapunov condition is satisfied. Hence
+
+1 sn
+
+n
+(Xi - µi) =
+i=1
+
+1 sn
+
+n
+(Q(vi)xi - vixi) =
+i=1
+
+1 sn n
+
+-D
+
+N (0, 1)
+
+(28)
+
+Note about the hypothesis The two hypothesis that were used to prove the theorem are reasonable
+
+and should be satisfied by any practical dataset. Typically we know or we can estimate the range
+
+of the values of inputs and weights, so the assumption that they don't get arbitrarily large with n
+
+is satisfied. The assumption on the variance is also reasonable; in fact, sn2 =
+
+n i=1
+
+V
+
+ar[Q(vi)xi]
+
+consists of a sum of n values. While it is possible for all these values to be 0 (if all vi are in the
+
+form k/s, for example, then s2n = 0) it is unlikely that a real world dataset would present this
+
+characteristic. In fact, it suffices that there exist  > 0 and 0 <   1 such that at least -percent of
+
+i2  . This implies sn2  n  .
+
+3i.e. there exists a constant M such that for all n, |vi|  M , |xi|  M for all i  {1, . . . , n} 17
+
+

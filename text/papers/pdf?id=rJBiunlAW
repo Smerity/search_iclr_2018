@@ -1,0 +1,574 @@
+Under review as a conference paper at ICLR 2018
+TRAINING RNNS AS FAST AS CNNS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Common recurrent neural network architectures scale poorly due to the intrinsic difficulty in parallelizing their state computations. In this work, we propose the Simple Recurrent Unit (SRU) architecture, a recurrent unit that simplifies the computation and exposes more parallelism. In SRU, the majority of computation for each step is independent of the recurrence and can be easily parallelized. SRU is as fast as a convolutional layer and 5-10x faster than an optimized LSTM implementation. We study SRUs on a wide range of applications, including classification, question answering, language modeling, translation and speech recognition. Our experiments demonstrate the effectiveness of SRU and the tradeoff it enables between speed and performance.
+1 INTRODUCTION
+Recurrent neural networks (RNN) are at the core of state-of-the-art approaches for a large number of natural language tasks, including machine translation (Cho et al., 2014; Bahdanau et al., 2015; Jean et al., 2015; Luong et al., 2015), language modeling (Zaremba et al., 2014; Gal & Ghahramani, 2016; Zoph & Le, 2016), opinion mining (Irsoy & Cardie, 2014), situated language understanding (Mei et al., 2016; Misra et al., 2017), and question answering (Seo et al., 2016; Chen et al., 2017). Key to many of these advancements are architectures of increasing capacity. However, these networks are difficult to scale. During learning, the sequential dependencies that are central to recurrent architectures limit parallelization potential. This results in slow development and makes rigorous parameter tuning intractable. Similar problems occur during deployment when slow inference creates challenges for real-time systems at scale. In this paper, we describe the Simple Recurrent Unit (SRU), a recurrent architecture that balances serial and parallelized computation. We evaluate SRU and show the speed gains it provides generalize across a set of core tasks, while maintaining and even improving overall performance over common architectures.
+Recurrent networks process sequences of symbols (e.g., words in a sentence) one symbol at a time. In commonly used architectures, including Long Short-term Memory (LSTM; Hochreiter & Schmidhuber, 1997) and Gated Recurrent Units (GRU; Cho et al., 2014), the computation in each step depends on completing the previous step. As a result, in contrast to operations such as convolution and attention, recurrent computations are less amenable to parallelization. We propose to do the majority of the computation for each step without depending on completing previous computations, which allows for to easily parallelize it. The result of this computation are then combined via a fast recurrent structure. Figure 1 illustrates the difference between the approaches.
+While even a naive implementation of our approach leads to improvements in performance, one of its key advantage is enabling optimization particularly fitting to existing hardware architectures. Removing the dependencies between time steps for the most expensive operations allows to parallelize across different dimensions and time steps. We also perform a CUDA-level optimization by compiling element-wise operations of the computations into a single kernel function call. Figure 2 compares our architecture's runtimes to common architectures.
+We experiment with a diverse set of core problems to evaluate our architecture, including text classification, question answering, language modeling, machine translation, and speech recognition. Our approach is competitive and even outperforms common recurrent and convolutional architectures, while delivering significant speedups. We also study the relation between speed and performance, and show SRU provides fine-grained control of the tradeoff between the two.
+1
+
+Under review as a conference paper at ICLR 2018
+
+x1 x2 x3 x4 xn x1 x2 x3 x4 xn
+Figure 1: Illustration of the difference between common RNN architectures (left) and our approach (right). In common architectures, the entire computation (gray block) for each step xt, t = 1, . . . , n depends on completing the previous step. This impedes any parallelization between steps. In contrast, we propose to process the input at each step independently of the other inputs (larger gray block) and do the recurrent combination with relatively lightweight computation (small gray block). The majority of the computation (surrounded by the dashed line) can then be easily parallelized.
+
+cuDNN LSTM
+
+l = 32, d = 256
+
+l = 128, d = 512
+
+conv2d (k=3)
+
+conv2d (k=2) proposed
+
+forward backward
+
+0246
+
+0 10 20 30 40
+
+Figure 2: Average processing time (in milliseconds) of a batch of 32 samples using cuDNN LSTM, word-level convolution conv2d, and the proposed SRU. l number of tokens per sequence, d: feature
+
+dimension and k: feature width. See Section 4 for details of the setup used.
+
+2 METHOD
+2.1 SIMPLE RECURRENT UNITS
+Most recurrent architectures, including LSTM and GRU, use gating to control the information flow to alleviate vanishing and exploding gradient problems. We define a gate to be composed of a single-layer feed-forward network with a sigmoid activation.The gate output is used in a point-wise multiplication operation to combine two inputs, for example the current and previous time stamps. The computation of the feed-forward network, especially the matrix multiplication, is the most expensive operation in this process, while the point-wise multiplication is relatively lightweight. The key design decision in SRU is making the gate computation dependent only on the current input of the recurrence. This leaves only the point-wise multiplication computation as dependent on previous steps. The matrix multiplications involved in the feed-forward network can then be easily parallelized. The basic form of SRU includes a single forget gate. Given an input xt at time t, we compute a linear transformation x~t (Lei et al., 2017; Lee et al., 2017) and the forget gate ft:
+x~t = Wxt ft = (Wf xt + bf ) .
+This computation depends on xt only, which enables computing it in parallel across all time steps. The forget gate is used to modulate the internal state ct, which is used to compute the output state ht:
+ct = ft ct-1 + (1 - ft) x~t ht = g(ct) ,
+where g(·) is an activation function used to produce the output state ht. The complete architecture also includes skip connections, which have been shown to improve training of deep networks with a large number of layers (He et al., 2016; Srivastava et al., 2015; Wu et al., 2016). We use highway connections (Srivastava et al., 2015), and add a reset gate rt computed similar to the forget gate ft. The reset gate is used to compute the output state ht as a combination of
+2
+
+Under review as a conference paper at ICLR 2018
+
+the internal state g(ct) and the input xt. The complete architecture is:
+x~t = Wxt ft = (Wf xt + bf ) rt = (Wrxt + br) ct = ft ct-1 + (1 - ft) x~t ht = rt g(ct) + (1 - rt) xt
+
+(1) (2) (3) (4) (5)
+
+2.2 RELATION TO COMMON ARCHITECTURES
+Existing RNN architectures use the previous output state ht-1 in the recurrence computation. For example, in LSTM, the forget gate vector is computed by ft = (Wf xt + Rf ht-1 + bf ). Including Rht-1 breaks independence and parallelization: each dimension of the hidden state ht depends on ht-1, and the computation of ht has to wait until ht-1 is fully computed. Similar design choices are present in GRU and other RNN variants, where ht-1 is used throughout the computation.
+We propose to completely drop the connection between the gating computations of step t and the states of step t - 1, ht-1 and ct-1. Given a sequence of input vectors {x1, · · · , xn}, {x~t, ft, rt} for different t = 1 · · · n are independent and can be computed in parallel. The computation bottleneck of our architecture is the three matrix multiplications in Equations 1-3. After computing x~t, ft and rt, Equations 4 and 5, where all operations are element-wise, are fast to compute.
+
+2.3 CUDA-LEVEL OPTIMIZATION
+Optimizing SRU is similar to how LSTM is optimized in cuDNN LSTM (Appleyard et al., 2016). The SRU formulation permits two optimizations. First, matrix multiplications across all time steps can be batched, which significantly improves the computation intensity and GPU utilization. Grouping the matrix multiplications in Equations 1-3 into a single batch is formulated as
+W U = Wf [x1, x2, · · · , xn] ,
+Wr
+where n is the sequence length, U  Rn×3d is the resulting matrix, and d is the hidden state size. When the input is a mini-batch of k sequences, U would be a tensor of size (n, k, 3d). Second, all element-wise operations of the sequence can be fused into one kernel function and parallelized across the dimensionality of the hidden state d. Without the fusion, operations such as addition + and sigmoid activation () would each invoke a separate function call, and incur additional kernel launching latency and data moving costs. Algorithm 1 shows the pseudocode of the fused kernel function. The implementation of a bidirectional SRU is similar: the matrix multiplications of both directions are batched, and a fused kernel is created to handle and parallelize both directions.
+
+3 RELATED WORK
+Improving on common architectures for sequence processing has recently received significant attention (Greff et al., 2015; Balduzzi & Ghifary, 2016; Miao et al., 2016; Zoph & Le, 2016; Lee et al., 2017; Vaswani et al., 2017). Our approach is closely related to recent work on recurrent convolutions (RCNN; Lei et al., 2015; 2016), kernel networks (KNN; Lei et al., 2017), and QuasiRNN (Bradbury et al., 2017). Both RCNN and Quasi-RNN incorporate word-level convolutions into recurrent unit with sequential gated pooling. KNN generalizes RCNN and provides a theoretical view by linking the model class to sequence kernels. SRU can be viewed as a simplified version, or a special case, of RCNN, KNN, and Quasi-RNN, where the window size is set to 1 and highway connections Srivastava et al. (2015) are added to facilitate increased network depth. We discuss the relation of SRU to Quasi-RNN in more detail and evaluate the effect of the differences in Appendix A.
+Various strategies have been proposed to scale network training (Goyal et al., 2017) or specifically to speed up recurrent networks (Diamos et al., 2016; Kuchaiev & Ginsburg, 2017; Shazeer et al., 2017). Our CUDA-level optimization for SRU is inspired by cuDNN LSTM (Appleyard et al., 2016). While cuDNN LSTM requires six optimization steps, SRU only requires two optimizations to produce
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 Mini-batch version of the forward pass defined in Equations 1-5.
+
+Indices: Sequence length n, l = 1, · · · , n; mini-batch size k, i = 1, · · · , k; hidden state dimension
+
+d, j = 1, · · · , d; and j = 1, · · · , 3d.
+
+Input: Input sequences batch x[l, i, j]; grouped matrix multiplication result U[l, i, j ]; bias terms
+
+bf [j] and br[j]; and initial state c0[i, j]. Output: Output h[·, ·, ·] and internal c[·, ·, ·] states.
+
+Initialize h[·, ·, ·] and c[·, ·, ·] as two n × k × d tensors.
+
+for i = 1, · · · , k; j = 1, · · · , d do
+
+// Parallelize over i and j
+
+c = c0[i, j]
+
+for l = 1, · · · , n do
+
+f =  ( U[l, i, j + d] + bf [j] )
+
+// Forget gate
+
+r =  ( U[l, i, j + d × 2] + br[j] ) // Reset gate
+
+c = f × c + (1 - f ) × U[l, i, j]
+
+// Current internal state
+
+h = f × g(c) + (1 - r) × x[l, i, j] // Current output state
+
+c[l, i, j] = c
+
+h[l, i, j] = h
+
+return h[·, ·, ·] and c[·, ·, ·]
+
+significant speed-up. The convolution-based Quasi-RNN architecture (Bradbury et al., 2017) uses similar CUDA-level optimizations such as conv2d operation or batched matrix multiplications. The topic of improving learning times was also studied. For example, Goyal et al. (2017) addressed stability issues of distributed training with large mini-batches to improve training time. Our approach can be combined with such training procedures.
+The design of simple recurrent architectures, such as SRU and other related architectures, raises questions about representational power. Balduzzi & Ghifary (2016) applies type-preserving transformations to the discuss the capacity of various simplified RNN architectures. Recent work has demonstrated the connection between neural networks and kernels (Anselmi et al., 2015; Daniely et al., 2016; Zhang et al., 2016). In particular, Lei et al. (2017) shows that a broad model class, including SRU and word-level CNN, can be seen as embedding sequence similarity functions, such as string kernels (Lodhi et al., 2002), into a hidden space. Layer stacking can then be interpreted as using higher-order sequence similarities, which introduces more non-linearity and representational power. We empirically show SRU can achieve compelling results by stacking multiple layers.
+4 EXPERIMENTS
+We evaluate SRU with text classification, question answering, language modeling, machine translation, and speech recognition tasks. This set of tasks provides broad coverage of application and computation challenges. Training time on these benchmarks ranges from minutes (classification) to days (speech).
+Unless noted otherwise, timing experiments are performed on PyTorch and a desktop machine with a single Nvidia GeForce GTX 1070 GPU, Intel Core i7-7700K Processor, CUDA 8 and cuDNN 6021. We use variational dropout (Gal & Ghahramani, 2016) in addition to the standard dropout for RNN regularization. We set g(·) = tanh for all our experiments, unless specified otherwise.
+The main question we study is the performance-speed trade-off SRU provides in comparison to other recurrent architectures. We stack multiple layers of SRU to directly substitute other recurrent or convolutional modules. We minimize hyper-parameter tuning and architecture engineering for a fair comparison. Such efforts have a non-trivial impact on the results, which are beyond the scope of our experiments. As much as possible, the model configurations are identical to prior work.
+4.1 CLASSIFICATION
+Dataset We use six classification tasks from Kim (2014):1 movie review sentiment (MR; Pang & Lee, 2005), subjectivity (SUBJ; Pang & Lee, 2004), customer reviews polarity (CR; Hu & Liu, 2004), TREC question type (TREC; Li & Roth, 2002), MPQA opinion polarity (MPQA; Wiebe et al.,
+1https://github.com/harvardnlp/sent-conv-torch
+4
+
+Under review as a conference paper at ICLR 2018
+
+Model
+CNN (Kim, 2014) LSTM SRU
+
+CR
+82.2 ±2.2 82.7 ±2.9 84.8 ±1.3
+
+SUBJ
+92.9 ±0.7 92.4 ±0.6 93.4 ±0.8
+
+MR
+79.1 ±1.5 80.3 ±1.5 82.2 ±0.9
+
+TREC
+93.2 ±0.5 93.1 ±0.9 93.9 ±0.6
+
+MPQA
+88.8 ±1.2 89.2 ±1.0 89.7 ±1.1
+
+SST
+85.3 ±0.4 87.9 ±0.6 89.1 ±0.3
+
+Table 1: Classification (Section 4.1) test accuracies on six benchmarks.
+
+CR 85
+
+TREC 90
+
+80 85
+
+75 80
+
+70 75
+
+0
+
+50 100 150 200
+
+0 25 50 75 100 125 150
+
+SUBJ 96 94 92 90
+
+94 MPQA 92 90 88
+
+88 86
+
+0 100 200 300 400 500
+
+0 25 50 75 100 125 150
+
+84 MR 82 80 78 76 74 72
+0 100 200 300 400
+
+92 SST
+
+90
+
+88
+
+86
+
+84 cuDNN LSTM
+
+82
+
+SRU CNN
+
+80
+
+0 250 500 750 1000 1250
+
+Table 2: Mean validation accuracies (y-axis) of LSTM, CNN, and SRU for the first 100 epochs on the six classification benchmarks. X-axis: training time used (in seconds).
+
+2005), and the Stanford sentiment treebank (SST; Socher et al., 2013).2 Following (Kim, 2014), we use word2vec embeddings trained on 100 billion Google News tokens. Word embeddings are normalized to unit vectors and are fixed during training.
+Setup We train RNN encoders and use the last output state to predict the class label for a given sentence. We use a two-layer RNN encoder with 128 hidden dimensions. For SST, which provides more data, we use a four-layer RNN. We also compare to the CNN model of Kim (2014), with the same filter windows of 3, 4, and 5 as the original work. We use Adam (Kingma & Ba, 2014) with default 0.001 learning rate and 0 weight decay. We train for 100 epochs, and perform 10-fold cross validation when no standard split is specified. The result on SST is averaged over five independent trials. We tune dropout probability among {0.1, 0.3, 0.5, 0.7} and report the best results.
+Results Table 1 presents test results on the six benchmarks. Our model consistently outperforms the other models across the datasets. Figure 2 shows validation performance relative to training time for SRU, cuDNN LSTM, and the CNN model. Our SRU implementation is significantly faster than cuDNN LSTM. For example, on the movie review task (MR), our model completes 100 training epochs within 40 seconds, while cuDNN LSTM takes more than 450 seconds.
+2We use the binary version of the Stanford sentiment treebank.
+5
+
+Under review as a conference paper at ICLR 2018
+
+Model
+
+# layers d
+
+Size Dev EM Dev F1 Time / epoch RNN Total
+
+Chen et al. (2017)
+Bi-LSTM Bi-LSTM
+
+3
+3 4
+
+128 4.1m
+128 4.1m 128 5.8m
+
+69.5
+69.6 69.6
+
+78.8 -
+
+-
+
+78.7 534s 670s 78.9 729s 872s
+
+Bi-SRU Bi-SRU Bi-SRU
+
+3 128 2.0m 69.1 78.4 60s 179s 4 128 2.4m 69.7 79.1 74s 193s 5 128 2.8m 70.3 79.5 88s 207s
+
+Table 3: Exact match (EM) and F1 scores of various models on SQuAD (Section 4.2). We also report the total processing time per epoch and the time spent in RNN computations. SRU outperforms the LSTM models, and is more than six times faster than cuDNN LSTM.
+
+4.2 QUESTION ANSWERING
+Dataset We use the Stanford Question Answering Dataset (SQuAD; Rajpurkar et al., 2016). SQuAD is one of the largest machine comprehension datasets, and includes over 100K questionanswer pairs extracted from Wikipedia articles. We use the standard train and development sets.
+Setup We experiment with the Document Reader model (Chen et al., 2017), and compare variants that use LSTM, as in the original setup, and SRU. We use the open source re-implementation.3 Due to minor differences, this version performs 1% worse compared to the reported results when using the same training options. Following the author suggestions, we use a learning rate of 0.001 instead of 0.002, the Adamax (Kingma & Ba, 2014) optimizer, and separately tuned dropout rates for the RNN and word embeddings. This gives results comparable to the original paper. All models are trained for up to 50 epochs, batch size 32, a fixed learning rate of 0.001, and hidden dimensionality of 128. We use a dropout of 0.5 for input word embeddings, 0.2 for SRU layers, and 0.3 for LSTM layers.
+Results Table 3 summarizes our results. LSTM models achieve 69.6% exact match and 78.9% F1 score. These results are comparable to the original work (Chen et al., 2017). SRU models achieve 70.3% exact match and 79.5% F1 score, outperforming the LSTM models. Moreover, SRU exhibits 6x to 10x speed-up, more than 69% reduction in total training time.
+4.3 LANGUAGE MODELING
+Dataset We use the Penn Treebank corpus (PTB). The processed data and splits are taken from Mikolov et al. (2010). The data contains about 1M tokens with a truncated vocabulary of 10k. Following standard practice, the training data is treated as a long sequence split to mini batches, the models are trained using truncated back-propagation-through-time (BPTT; Williams & Peng, 1990).
+Setup We largely follow the configuration of prior work (Zaremba et al., 2014; Gal & Ghahramani, 2016; Zoph & Le, 2016). We use a batch size of 32 and truncated back-propagation with 35 steps. The dropout probability is 0.75 for the input embedding and output softmax layer. The standard dropout and variational dropout probability are 0.2 for stacked RNN layers. We use SGD with an initial learning rate of 1.0 and gradient clipping. We train up to 300 epochs, and start to decrease the learning rate by a factor of 0.98 after 175 epochs. We use the identity activation function for g(·).
+Results Table 4 shows perplexity results. We use a parameter budget of 24 million for a fair comparison. cuDNN LSTM obtains a perplexity of 71.4 with 73-79 seconds per epoch. This result is worse than most prior work. We attribute this difference to the lack of variational dropout support in the cuDNN implementation. SRU obtains better perplexity compared to cuDNN LSTM and prior work, reaching 64.7 with three recurrent layers and 60.3 with six layers.4 SRU also provides better speed-perplexity trade-off: training a six-layer RNN takes 47 seconds per epoch.
+3https://github.com/hitvoice/DrQA 4Melis et al. (2017) recently demonstrated that LSTM models can achieve a perplexity of 58 via careful regularization and hyper-parameter tuning. We leave these optimizations for future work.
+6
+
+Under review as a conference paper at ICLR 2018
+
+Model
+
+# layers Size Dev Test Time / epoch RNN Total
+
+LSTM (Zaremba et al., 2014) LSTM (Press & Wolf, 2017) LSTM (Inan et al., 2016) RHN (Zilly et al., 2017) KNN (Lei et al., 2017) NAS (Zoph & Le, 2016) NAS (Zoph & Le, 2016)
+
+2 2 2 10 4 -
+
+66m 82.2 78.4 51m 75.8 73.2 28m 72.5 69.0 23m 67.9 65.4 20m - 63.8 25m - 64.0 54m - 62.4
+
+cuDNN LSTM cuDNN LSTM
+
+2 24m 73.3 71.4 53s 73s 3 24m 78.8 76.2 64s 79s
+
+SRU 3 24m 68.0 64.7 21s 44s SRU 4 24m 65.8 62.5 23s 44s SRU 5 24m 63.9 61.0 27s 46s SRU 6 24m 63.4 60.3 28s 47s
+
+Table 4: Language modeling perplexities on the PTB dataset. Models in comparison are trained using similar regularization and learning strategy: variational dropout is used except for (Zaremba et al., 2014), (Press & Wolf, 2017) and cuDNN LSTM; input and output word embeddings are tied except for (Zaremba et al., 2014); SGD with learning rate decay is used for all models.(Section 4.3).
+
+4.4 MACHINE TRANSLATION
+Dataset We use the WMT 2014 EnglishGerman translation task. We pre-process the training corpus following standard practice (Peitz et al., 2014; Li et al., 2014; Jean et al., 2015). About 4M translation pairs are left after processing. The news-test-2014 data is used as the test set and the concatenation of news-test-2012 and news-test-2013 is used as the development set.
+Setup We use OpenNMT (Klein et al., 2017), and extend the Pytorch version5 with our SRU implementation. OpenNMT uses a seq2seq model in a recurrent encoder-decoder architecture with attention (Luong et al., 2015). By default, the model provides ht-1, the hidden state of decoder at step t - 1, as input to step t. Although this can potentially improve translation quality, it impedes parallelization and slows down training. We disable this option. All models are trained with hidden state and word embedding size of 500, 15 epochs, SGD with initial learning rate of 1.0, and batch size 64. We modify the default of OpenNMT, and use a dropout rate of 0.1 and a weight decay of 10-5. This leads to better results for both RNN implementations.
+Results Table 5 shows the translation results. We obtain better BLEU scores compared to the reports OpenNMT results (Klein et al., 2017). SRU with 10 stacked layers achieves a BLEU score of 20.7 while cuDNN LSTM achieves 20.45 using more parameters and more training time. SRU scales better, and we can stack many layers of SRU without significant time increase. Each additional SRU layer in encoder and decoder adds four minutes per training epoch, while adding an LSTM layer adds 23 minutes. In comparison, the other operations (e.g., attention and output softmax) take about 95 minutes. We do not observe over-fitting on the development set, even when using 10 layers.
+4.5 SPEECH RECOGNITION
+Dataset We use the Switchboard-1 corpus (Godfrey et al., 1992). The training data includes about 300 hours of speech from 4, 870 sides of conversations between 520 speakers. The test data includes about two hours of speech from 40 sides of conversations from the 2000 Hub5 evaluation.
+Setup We use Kaldi (Povey et al., 2011) for feature extraction, decoding, and training of initial HMM-GMM models. We use the standard Kaldi recipes to train maximum likelihood-criterion context-dependent speaker adapted acoustic models with Mel-Frequency Cepstral Coefficient (MFCC). We apply forced alignment to generate labels for neural network acoustic model training.
+5https://github.com/OpenNMT/OpenNMT-py
+7
+
+Under review as a conference paper at ICLR 2018
+
+OpenNMT default setup
+Klein et al. (2017) Klein et al. (2017) + BPE cuDNN LSTM (wd = 0) cuDNN LSTM (wd = 10-5)
+Our setup
+cuDNN LSTM cuDNN LSTM cuDNN LSTM
+SRU SRU SRU SRU
+
+# layers
+2 2 2 2
+2 3 5
+3 5 6 10
+
+Size
+--85m 10m 85m 10m
+
+Test BLEU
+17.60 19.34 18.04 19.99
+
+Time in RNNs
+149 min 149 min
+
+84m 9m 88m 13m 96m 21m
+81m 6m 84m 9m 85m 10m 91m 16m
+
+19.67 19.85 20.45
+18.89 19.77 20.17 20.70
+
+46 min 69 min 115 min
+12 min 20 min 24 min 40 min
+
+Table 5: English-German translation results (Section 4.4). We list the total number of parameters and the number excluding word embeddings. Our setup disables ht-1 input, which significantly reduces the training time. Timings are performed on a single Nvidia Titan X Pascal GPU.
+
+Model
+LSTM LSTM + Seq Bi-LSTM Bi-LSTM + Seq
+LSTM with highway (remove h) LSTM with highway
+SRU SRU + sMBR Bi-SRU Bi-SRU + sMBR
+Very Deep CNN + sMBR (Saon et al., 2016) LSTM + LF-MMI (Povey et al., 2016) Bi-LSTM + LF-MMI (Povey et al., 2016)
+
+# layers
+5 5 5 5
+12 12
+12 12 12 12
+10 3 3
+
+# Parameters
+47M 47M 60M 60M
+56M 56M
+56M 56M 74M 74M
+
+WER
+11.9 10.8 11.2 10.4
+12.5 12.2
+11.6 10.0 10.5 9.5
+10.5 10.3 9.6
+
+Speed
+10.0K -
+5.0K -
+6.5K 4.6K
+12.0K -
+6.2K -
+-
+
+Table 6: Word error rate (WER) for speech recognition (Section 4.5). The timing numbers are based on a naive implementation of SRU in CNTK. No CUDA-level optimizations are performed.
+
+We use the Computational Network Toolkit (CNTK; Yu et al., 2014) instead of PyTorch. We experiment with uni-directional and bi-directional models, with and without state-level Minimum Bayes Risk (sMBR) training (Kingsbury et al., 2012). See Appendix B for the complete setup details.
+Results Table 6 summarizes the results. CNTK uses a special batching algorithms for RNNs, and hence we were not able to use our customized SRU kernel. However, even without any kernel optimization, the SRU is faster than an LSTM using the same number of parameters. SRU also achieves state-of-the-art results on WER. Adding the highway connections Srivastava et al. (2015) to the LSTM performs slightly worse than the baseline. Removing the dependency on the internal state h in the LSTM can improve the speed but causes a slight decrease in performance. Appendix C includes further experiments with different highway structures and number of layers.
+5 CONCLUSION
+We present Simple Recurrent Unit (SRU), a recurrent architecture that is as fast as CNN and easily scales to over 10 layers. Our evaluation on a variety of NLP and speech recognition tasks demonstrates the effectiveness of SRU. We open source our implementation to facilitate future research.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Fabio Anselmi, Lorenzo Rosasco, Cheston Tan, and Tomaso Poggio. Deep convolutional networks are hierarchical kernel machines. preprint arXiv:1508.01084, 2015.
+Jeremy Appleyard, Tomas Kocisky, and Phil Blunsom. Optimizing performance of recurrent neural networks on gpus. arXiv preprint arXiv:1604.01946, 2016.
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio. Neural machine translation by jointly learning to align and translate. In Proceedings of the International Conference on Learning Representations, 2015.
+David Balduzzi and Muhammad Ghifary. Strongly-typed recurrent neural networks. In Proceedings of 33th International Conference on Machine Learning (ICML), 2016.
+James Bradbury, Stephen Merity, Caiming Xiong, and Richard Socher. Quasi-recurrent neural networks. In ICLR, 2017.
+Danqi Chen, Adam Fisch, Jason Weston, and Antoine Bordes. Reading Wikipedia to answer open-domain questions. In Association for Computational Linguistics (ACL), 2017.
+Kyunghyun Cho, Bart van Merriënboer, Çaglar Gülçehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio. Learning phrase representations using rnn encoder­decoder for statistical machine translation. In Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP), pp. 1724­1734, 2014.
+Amit Daniely, Roy Frostig, and Yoram Singer. Toward deeper understanding of neural networks: The power of initialization and a dual view on expressivity. CoRR, abs/1602.05897, 2016.
+Yann N. Dauphin, Angela Fan, Michael Auli, and David Grangier. Language modeling with gated convolutional networks. In Proceedings of the 34th International Conference on Machine Learning, 2017.
+Greg Diamos, Shubho Sengupta, Bryan Catanzaro, Mike Chrzanowski, Adam Coates, Erich Elsen, Jesse Engel, Awni Hannun, and Sanjeev Satheesh. Persistent rnns: Stashing recurrent weights on-chip. In International Conference on Machine Learning, pp. 2024­2033, 2016.
+Yarin Gal and Zoubin Ghahramani. A theoretically grounded application of dropout in recurrent neural networks. In Advances in Neural Information Processing Systems 29 (NIPS), 2016.
+J. J. Godfrey, E. C. Holliman, and J. McDaniel. Switchboard: Telephone speech corpus for research and development. In Proc. International Conference on Acoustics, Speech and Signal Processing (ICASSP), pp. 517­520, 1992.
+Priya Goyal, Piotr Dollár, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch sgd: Training imagenet in 1 hour. arXiv preprint arXiv:1706.02677, 2017.
+Klaus Greff, Rupesh Kumar Srivastava, Jan Koutník, Bas R Steunebrink, and Jürgen Schmidhuber. Lstm: A search space odyssey. arXiv preprint arXiv:1503.04069, 2015.
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770­778, 2016.
+Geoffrey Hinton, Nitish Srivastava, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Improving neural networks by preventing co-adaptation of feature detectors. In arXiv, 2012.
+Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+W. Hsu, Y. Zhang, and J. Glass. A prioritized grid long short-term memory rnn for speech recognition. In Proc. SLT, 2016.
+9
+
+Under review as a conference paper at ICLR 2018
+Minqing Hu and Bing Liu. Mining and summarizing customer reviews. In Proceedings of the tenth ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 168­177. ACM, 2004.
+Hakan Inan, Khashayar Khosravi, and Richard Socher. Tying word vectors and word classifiers: A loss framework for language modeling. arXiv preprint arXiv:1611.01462, 2016.
+Ozan Irsoy and Claire Cardie. Opinion mining with deep recurrent neural networks. In Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP), pp. 720­728. Association for Computational Linguistics, 2014. doi: 10.3115/v1/D14-1080. URL http://aclanthology.coli.uni-saarland.de/pdf/D/D14/D14-1080.pdf.
+Sébastien Jean, Kyunghyun Cho, Roland Memisevic, and Yoshua Bengio. On using very large target vocabulary for neural machine translation. In Proceedings of the 53rd Annual Meeting of the Association for Computational Linguistics and the 7th International Joint Conference on Natural Language Processing (Volume 1: Long Papers), 2015.
+Nal Kalchbrenner, Edward Grefenstette, and Phil Blunsom. A convolutional neural network for modelling sentences. In Proceedings of the 52nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers). Association for Computational Linguistics, 2014.
+Yoon Kim. Convolutional neural networks for sentence classification. In Proceedings of the Empiricial Methods in Natural Language Processing (EMNLP 2014), 2014.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In Proceedings of the International Conference on Learning Representations, 2014.
+Brian Kingsbury, Tara Sainath, and Hagen Soltau. Scalable Minimum Bayes Risk Training of Deep Neural Network Acoustic Models Using Distributed Hessian-free Optimization. In INTERSPEECH, 2012.
+Guillaume Klein, Yoon Kim, Yuntian Deng, Jean Senellart, and Alexander Rush. Opennmt: Opensource toolkit for neural machine translation. In Proceedings of ACL 2017, System Demonstrations, 2017.
+Oleksii Kuchaiev and Boris Ginsburg. Factorization tricks for lstm networks. arXiv preprint arXiv:1703.10722, 2017.
+Kenton Lee, Omer Levy, and Luke Zettlemoyer. Recurrent additive networks. arXiv preprint arXiv:1705.07393, 2017.
+Tao Lei, Regina Barzilay, and Tommi Jaakkola. Molding cnns for text: non-linear, non-consecutive convolutions. In Proceedings of the 2015 Conference on Empirical Methods in Natural Language Processing. Association for Computational Linguistics, 2015.
+Tao Lei, Hrishikesh Joshi, Regina Barzilay, Tommi Jaakkola, Kateryna Tymoshenko, Alessandro Moschitti, and Lluís Màrquez. Semi-supervised question retrieval with gated convolutions. In Proceedings of the 2016 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies. Association for Computational Linguistics, 2016.
+Tao Lei, Wengong Jin, Regina Barzilay, and Tommi Jaakkola. Deriving neural architectures from sequence and graph kernels. ICML, 2017.
+Liangyou Li, Xiaofeng Wu, Santiago Cortes Vaillo, Jun Xie, Andy Way, and Qun Liu. The dcu-ictcas mt system at wmt 2014 on german-english translation task. In Proceedings of the Ninth Workshop on Statistical Machine Translation, 2014.
+Xin Li and Dan Roth. Learning question classifiers. In Proceedings of the 19th international conference on Computational linguistics-Volume 1. Association for Computational Linguistics, 2002.
+Huma Lodhi, Craig Saunders, John Shawe-Taylor, Nello Cristianini, and Chris Watkins. Text classification using string kernels. Journal of Machine Learning Research, 2(Feb):419­444, 2002.
+10
+
+Under review as a conference paper at ICLR 2018
+Minh-Thang Luong, Hieu Pham, and Christopher D. Manning. Effective approaches to attentionbased neural machine translation. In Empirical Methods in Natural Language Processing (EMNLP). Association for Computational Linguistics, 2015.
+Hongyuan Mei, Mohit Bansal, and R. Matthew Walter. What to talk about and how? selective generation using lstms with coarse-to-fine alignment. In Proceedings of the 2016 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, 2016. doi: 10.18653/v1/N16-1086. URL http://aclweb.org/anthology/ N16-1086.
+Gábor Melis, Chris Dyer, and Phil Blunsom. On the state of the art of evaluation in neural language models. arXiv preprint arXiv:1707.05589, 2017.
+Yajie Miao, Jinyu Li, Yongqiang Wang, Shi-Xiong Zhang, and Yifan Gong. Simplifying long shortterm memory acoustic models for fast training and decoding. In Acoustics, Speech and Signal Processing (ICASSP), 2016 IEEE International Conference on, pp. 2284­2288. IEEE, 2016.
+Tomas Mikolov, Martin Karafiát, Lukas Burget, Jan Cernocky`, and Sanjeev Khudanpur. Recurrent neural network based language model. In INTERSPEECH 2010, 11th Annual Conference of the International Speech Communication Association, Makuhari, Chiba, Japan, September 26-30, 2010, pp. 1045­1048, 2010.
+Dipendra Misra, John Langford, and Yoav Artzi. Mapping instructions and visual observations to actions with reinforcement learning. In Proceedings of the 2017 Conference on Empirical Methods in Natural Language Processing (EMNLP). Association for Computational Linguistics, 2017. Arxiv preprint: https://arxiv.org/abs/1704.08795.
+Bo Pang and Lillian Lee. A sentimental education: Sentiment analysis using subjectivity summarization based on minimum cuts. In Proceedings of the 42nd annual meeting on Association for Computational Linguistics, pp. 271. Association for Computational Linguistics, 2004.
+Bo Pang and Lillian Lee. Seeing stars: Exploiting class relationships for sentiment categorization with respect to rating scales. In Proceedings of the 43rd annual meeting on association for computational linguistics, pp. 115­124. Association for Computational Linguistics, 2005.
+Stephan Peitz, Joern Wuebker, Markus Freitag, and Hermann Ney. The rwth aachen german-english machine translation system for wmt 2014. In Proceedings of the Ninth Workshop on Statistical Machine Translation, 2014.
+Daniel Povey, Arnab Ghoshal, Gilles Boulianne, Lukas Burget, Ondrej Glembek, Nagendra Goel, Mirko Hannenmann, Petr Motlicek, Yanmin Qian, Petr Schwarz, Jan Silovsky, Georg Stemmer, and Karel Vesely. The Kaldi Speech Recognition Toolkit. In Automatic Speech Recognition and Understanding Workshop, 2011.
+Daniel Povey, Vijayaditya Peddinti, Daniel Galvez, Pegah Ghahremani, Vimal Manohar, Xingyu Na, Yiming Wang, and Sanjeev Khudanpur. Purely sequence-trained neural networks for asr based on lattice-free mmi. In INTERSPEECH, pp. 2751­2755, 2016.
+Ofir Press and Lior Wolf. Using the output embedding to improve language models. In Proceedings of the 15th Conference of the European Chapter of the Association for Computational Linguistics (EACL), 2017.
+P. Rajpurkar, J. Zhang, K. Lopyrev, and P. Liang. Squad: 100,000+ questions for machine comprehension of text. In Empirical Methods in Natural Language Processing (EMNLP), 2016.
+Tara N. Sainath, Oriol Vinyals, Andrew Senior, and Hasim Sak. Convolutional, Long Short-Term Memory, Fully Connected Deep Neural Networks. In IEEE International Conference on Acoustics, Speech and Signal Processing, 2015.
+Hasim Sak, Andrew Senior, and Francoise Françoise. Long Short-Term Memory Recurrent Neural Network Architectures for Large Scale Acoustic Modeling. In INTERSPEECH, 2014.
+George Saon, Tom Sercu, Steven Rennie, and Hong-Kwang J. Kuo. The ibm 2016 english conversational telephone speech recognition system. In https://arxiv.org/abs/1604.08242, 2016.
+11
+
+Under review as a conference paper at ICLR 2018
+Frank Seide, Gang Li, Xie Chen, and Dong Yu. Feature engineering in context-dependent deep neural networks for conversational speech transcription. In Automatic Speech Recognition and Understanding (ASRU), 2011 IEEE Workshop on, pp. 24­29. IEEE, 2011.
+Minjoon Seo, Aniruddha Kembhavi, Ali Farhadi, and Hannaneh Hajishirzi. Bidirectional attention flow for machine comprehension. In International Conference on Learning Representations, 2016.
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. Outrageously large neural networks: The sparsely-gated mixture-of-experts layer. arXiv preprint arXiv:1701.06538, 2017.
+Richard Socher, Alex Perelygin, Jean Wu, Jason Chuang, Christopher D. Manning, Andrew Y. Ng, and Christopher Potts. Recursive deep models for semantic compositionality over a sentiment treebank. In Proceedings of the 2013 Conference on Empirical Methods in Natural Language Processing, pp. 1631­1642, October 2013.
+Rupesh K Srivastava, Klaus Greff, and Jürgen Schmidhuber. Training very deep networks. In Advances in neural information processing systems, pp. 2377­2385, 2015.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762, 2017.
+Mingxuan Wang, Zhengdong Lu, Hang Li, Wenbin Jiang, and Qun Liu. gencnn: A convolutional architecture for word sequence prediction. In Proceedings of the 53rd Annual Meeting of the Association for Computational Linguistics and the 7th International Joint Conference on Natural Language Processing (Volume 1: Long Papers), 2015.
+Janyce Wiebe, Theresa Wilson, and Claire Cardie. Annotating expressions of opinions and emotions in language. Language resources and evaluation, 2005.
+Ronald J Williams and Jing Peng. An efficient gradient-based algorithm for on-line training of recurrent network trajectories. Neural computation, 2(4):490­501, 1990.
+Huijia Wu, Jiajun Zhang, and Chengqing Zong. An empirical exploration of skip connections for sequential tagging. In Proceedings of COLING 2016, the 26th International Conference on Computational Linguistics: Technical Papers, December 2016.
+D. Yu, A. Eversole, M. Seltzer, K. Yao, B. Guenter, O. Kuchaiev, F. Seide, H. Wang, J. Droppo, Z. Huang, Y. Zhang, G. Zweig, C. Rossbach, J. Currey, J. Gao, A. May, A. Stolcke, and M. Slaney. An introduction to computational networks and the computational network toolkit. Technical Report MSR, Microsoft Research, 2014. http://cntk.codeplex.com.
+Wojciech Zaremba, Ilya Sutskever, and Oriol Vinyals. Recurrent neural network regularization. arXiv preprint arXiv:1409.2329, 2014.
+Yu Zhang, Dong Yu, Michael L Seltzer, and Jasha Droppo. Speech recognition with predictionadaptation-correction recurrent neural networks. In Acoustics, Speech and Signal Processing (ICASSP), 2015 IEEE International Conference on, pp. 5004­5008. IEEE, 2015.
+Yuchen Zhang, Jason D. Lee, and Michael I. Jordan. 1-regularized neural networks are improperly learnable in polynomial time. In Proceedings of the 33nd International Conference on Machine Learning, 2016.
+Julian Georg Zilly, Rupesh Kumar Srivastava, Jan Koutník, and Jürgen Schmidhuber. Recurrent highway networks. In Proceedings of the 34th International Conference on Machine Learning (ICML), 2017.
+Barret Zoph and Quoc V Le. Neural architecture search with reinforcement learning. arXiv preprint arXiv:1611.01578, 2016.
+12
+
+Under review as a conference paper at ICLR 2018
+A COMPARISON OF MODEL VARIANTS AND QUASI-RNN
+SRU and Quasi-RNN (Bradbury et al., 2017) both were developed with the goal of speeding up the computation of recurrent neural networks. The Quasi-RNN design aims to combine k-gram convolutions with adaptive pooling (i.e., fo-pooling) instead of traditional order-oblivious pooling, such as max pooling or average pooling. Similar to other convolutional architectures (Kalchbrenner et al., 2014; Kim, 2014; Wang et al., 2015; Dauphin et al., 2017), a k-gram filter width > 1 is used throughout the experiments reported.
+While Quasi-RNN is based on adding light recurrence to convolutional network, SRU is an instance of the recurrent architectures introduced by Lei et al. (2017). While this prior work focused on theoretical characteristics of the networks and their generalization, we focus on the implementation details of SRU, including practical optimizations, and on its applicability to a wide range of tasks. The SRU computation is similar to the degenerate case of setting k = 1 in the k-gram filter in Quasi-RNN. The computation is then reduced to a simple feed-forward transformation (matrix multiplication), and loses the properties and quality of a convolution.
+The SRU architecture and results we present also differ from Quasi-RNN in key technical decisions:
+· CUDA Optimization: While the Quasi-RNN implementation of fo-pooling is done as a CUDA kernel function. The rest of the element-wise computation is performed via separate function calls on top of the software library (e.g., Chainer). This choice does not allow this type of architecture to achieve its full potential. In contrast, we implement element-wise fusion to enable further speed optimization (Section 2.3).
+· Activation and Highway Connections: SRU and Quasi-RNN differ in how the non-linear activation function is applied. Quasi-RNN follows the common practice with convolutional models, where the non-linear activation is applied with the convolution operation before pooling (i.e., x~ = tanh (W  x)). In contrast, in SRU the activation function g(·) is applied to compute the internal state (i.e., ht = g(ct)) following the derivation in (Lei et al., 2017). SRU also includes highway connections in the architecture for better generalization of deep networks.
+Effect of Element-wise Fusion We compare the speed of the fo-pooling implementation used in Quasi-RNN and the fused kernel implementation used in SRU. We implement a version of unidirectional and bi-directional SRU that uses fo-pooling and separate element-wise function calls in PyTorch. Figure 3 (left) presents the speed comparison on five classification tasks (Section 4.1) and SQuAD (Section 4.2). The fused element-wise kernel achieves 24% to 94% speed improvement across the six benchmarks.
+Effect of Activation and Highway Connection We compare the performance of SRU variants with different activation functions and Quasi-RNN with filter width k = 1 on the classification and SQuAD datasets. For the classification tasks, we train using using the Adam optimizer with default 0.001 learning rate, 0 weight decay, and dropout probability tuned from values {0.1, 0.3, 0.5, 0.7}. We perform three trials for 10-fold cross validation for each model and dataset. We report the average test accuracy of model configurations that achieve the best development results. For SQuAD, we train all models for a maximum of 100 epochs using the Admax optimizer with learning rate 0.001. We perform three independent trials, and report the average performance. Figure 3 (right), Table 4, and Table 5 summarize the results:
+· SRU performs at least as good as Quasi-RNN, and often outperforms it. This illustrates the advantages of the design choices in SRU, including the highway connections and activation implementation.
+· We observe that the optimal choice of activation function varies depending on the task. For example, we found ReLU activation to work best on the classification benchmarks, but the identity activation performs the best on SQuAD, while ReLU performs worst.
+· The effect of highway connections is best highlighted in the question answering dataset. Without the highway connections, we observe a performance decrease when stacking more than four recurrent layers (Table 5). In contrast, adding highway connections results in > 1% absolute improvement of exact match score. Figure 3 (right) also shows that no
+13
+
+Under review as a conference paper at ICLR 2018
+
+94% 68% 71%
+
+72 70
+
+24% 24% 30% CR SUBJ MR TREC MPQA SQuAD
+
+68
+66 0
+
+Q-RNN (k=1) SRU (tanh) SRU (identity) 50 100
+
+Figure 3: Left: relative speed improvement of fused kernel (SRU) over fo-pooling kernel (Quasi-RNN) on various benchmarks. Timings are performed on a desktop machine with GeForce GTX 1070 and Intel Core i7-7700K Processor. Right: mean exact match (EM) score of 5-layer SRU and Quasi-RNN on SQuAD as a function of the number of epochs. Models are trained for a maximum of 100 epochs using Admax optimizer with learning rate 0.001.
+
+Model
+Quasi-RNN (k = 1) Quasi-RNN (k = 1) + highway
+SRU (identity) SRU (tanh) SRU (ReLU)
+
+CR
+83.6 ±2.0 84.0 ±1.9
+84.1 ±1.9 84.2 ±1.7 84.7 ±1.9
+
+SUBJ
+93.3 ±0.8 93.4 ±0.8
+93.5 ±0.7 93.5 ±0.8 93.7 ±0.9
+
+MR
+81.6 ±1.1 82.1 ±1.2
+82.1 ±1.0 82.1 ±1.1 82.5 ±1.1
+
+TREC
+92.7 ±0.6 93.2 ±0.6
+93.8 ±0.4 93.9 ±0.6 93.7 ±0.5
+
+MPQA
+89.6 ±1.2 89.6 ±1.2
+89.7 ±1.1 89.8 ±1.0 89.8 ±1.0
+
+Figure 4: Comparison between Quasi-RNN and SRU on classification benchmarks. We perform 3 independent trials of 10-fold cross validation (3 × 10 runs) for each model and dataset. We report the
+average test accuracy of model configurations that achieve the best dev result. All models are trained using Adam optimizer with default learning rate = 0.001, weight decay = 0 and dropout probability tuned from values {0.1, 0.3, 0.5, 0.7}.
+
+Model
+Quasi-RNN (k = 1) Quasi-RNN (k = 1) + highway
+SRU (tanh) SRU (identity)
+
+Number of recurrent layers 456
+70.0 ±0.2 69.5 ±0.2 69.3 ±0.1 70.1 ±0.1 70.7 ±0.2 70.6 ±0.1
+70.3 ±0.1 70.9 ±0.2 70.7 ±0.2 70.5 ±0.2 71.0 ±0.1 71.1 ±0.1
+
+Figure 5: Comparison between Quasi-RNN and SRU on the SQuAD benchmark. We perform 3 independent trials with a maximum of 100 training epochs. We report the average exact match (EM) score of each model configuration. Models are trained using Admax with learning rate 0.001.
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+over-fitting occurs on the development set within 100 training epochs. This suggests that models with highway connections are likely to generalize better.
+
+B SPEECH RECOGNITION EXPERIMENTAL SETUP DETAILS
+Following Sainath et al. (2015), all weights are randomly initialized from the uniform distribution with range [-0.05, 0.05], and all biases are initialized to 0 without generative or discriminative pre-training (Seide et al., 2011). All neural network models, unless explicitly stated otherwise, are trained with a cross-entropy criterion using truncated BPTT. No momentum is used for the first epoch, and a momentum of 0.9 is used for subsequent epochs (Zhang et al., 2015). We apply an L2 constraint regularization with weight 10-5 (Hinton et al., 2012) .
+We experiment with uni-directional and bi-directional models. To train the uni-directional model, we unroll 20 frames and use 80 utterances in each mini-batch. We also delayed the output of the LSTMby 10 frames as suggested by Sak et al. (2014) to add more context. To train the bidirectional model, we use the latency-controlled method described in Zhang et al. (2015). We set Nc = 80 and Nr = 20 and processed 40 utterances simultaneously. In addition to our vanilla model, we also experiment state-level Minimum Bayes Risk (sMBR) training (Kingsbury et al., 2012). To train the recurrent model with the sMBR criterion, we adopted the two-forward-pass method described by Zhang et al. (2015), and processed 40 utterances simultaneously.
+The input features for all models are 80-dimensional log Mel filterbank features computed every ten milliseconds, with an additional 3-dimensional pitch features unless explicitly stated. The output targets are 8802-context-dependent triphone states, of which the numbers are determined by the last HMM-GMM training stage.
+Our setup can potentially improve if we incorporate some recent techniques that are applicable to SRU. For example, LF-MMI for sequence training, i-vectors for speaker adaptation, and speaker perturbation for data augmentation were applied by Povey et al. (2016). All of these techniques can also been used for SRU. Moreover, different highway variants such as grid LSTM (Hsu et al., 2016) can also further boost our model.
+
+C ADDITIONAL SPEECH RECOGNITION ANALYSIS
+Baseline To identify the LSTM baseline used in Section 4.5, we experiment with varying the number of layers and parameters. Table 7 shows the performance of different settings. We follow the setup of Sak et al. (2014).6 The best LSTM baseline is using five layers with 1024 units in each layer.
+
+Model
+LSTM with projection (Sak et al., 2014) LSTM LSTM (S) LSTM LSTM (L) LSTM
+
+# layers
+5 3 5 5 5 6
+
+#Parameters
+28M 30M 28M 47M 94M 56M
+
+WER
+12.2 12.5 12.5 11.9 12.0 12.3
+
+Table 7: LSTM baselines on the Switchboard-1 corpus (Section 4.5). LSTM has 1024 cells for each layer, LSTM (S) has 750 cells for each layer, and LSTM (L) has 1560 cells for each layer. LSTM with projection contains 1024 cells and a 512-node linear projection layer is added on top of each layer output.
+
+Effect of Highway Transform for SRU The dimensionality of the input xt and ht must be equal in the computation of ht (Equation 5). However, when this is not the case, for example as in the first layer of the SRU, we can use a linear projection Whl to match the dimensions at layer l. The
+6We do not a projection layer as we found the vanilla LSTM model performs better (Table 7).
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+modified version of Equation 5 will then be:
+ht = rt g(ct) + (1 - rt) Whl xt .
+We can also use a square matrix Whl for every layer. Table 8 shows that adding this transformation significantly reduces the word error rate from 12.6% to 11.8% when using the same number of parameters. This transformation is outside the recurrent loop, and can be parallelized to be computed efficiently.
+
+Model SRU (no Whl , l > 1) SRU
+
+# layers
+16 12
+
+#Parameters
+56M 56M
+
+WER
+12.6 11.8
+
+Table 8: Comparison of the effect of transformation in the highway connection. SRU (no Whl , l > 1) includes the transform in the first layer only to align the dimensionality. The second line includes the transformation for every layer.
+
+Effect of Depth for SRU We study the effect of SRU depth on performance. Table 9 shows word
+error rate for SRU with different number of layers. The SRU model outperforms the LSTM model
+with 10 layers and the same number of parameters, while provide a 1.4x speed-up, even though it is using a non-optimized implementation in CNTK.7 The speed gains are mainly a result of requiring
+less matrix multiplications. The best performance is achieved with 12 layers.
+
+Model
+LSTM
+SRU SRU SRU SRU
+
+# layers
+5
+10 12 16 20
+
+#Parameters
+47M
+47M 56M 72M 89M
+
+WER
+11.9
+11.8 11.5 11.5 11.8
+
+Speed
+10.0K
+14.0K 12.0K 9.3K 8.0K
+
+Table 9: Performance and speed as function of SRU depth.
+
+7The CNTK implementation does not use the customized SRU kernel. 16
+
+

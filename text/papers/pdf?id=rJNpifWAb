@@ -1,0 +1,1007 @@
+Under review as a conference paper at ICLR 2018
+FLIPOUT: EFFICIENT PSEUDO-INDEPENDENT WEIGHT PERTURBATIONS ON MINI-BATCHES
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Stochastic neural net weights are used in a variety of contexts, including regularization, Bayesian neural nets, exploration in reinforcement learning, and evolution strategies. Unfortunately, due to the large number of weights, all the examples in a mini-batch typically share the same weight perturbation, thereby limiting the variance reduction effect of large mini-batches. We introduce flipout, an efficient method for decorrelating the gradients within a mini-batch by implicitly sampling pseudo-independent weight perturbations for each example. Empirically, flipout achieves the ideal linear variance reduction for fully connected networks, convolutional networks, and RNNs. We find significant speedups in training neural networks with multiplicative Gaussian perturbations. Flipout allows us to vectorize evolution strategies, so that a single GPU with flipout can handle the same throughput at least as 40 CPU cores under existing methods, equivalent to a factorof-4 cost reduction on Amazon Web Services.
+1 INTRODUCTION
+Stochasticity is a key component of many modern neural net architectures and training algorithms. The most widely used regularization methods are based on randomly perturbing a network's computations (Srivastava et al., 2014; Ioffe & Szegedy, 2015). Bayesian neural nets can be trained with variational inference by perturbing the weights (Graves, 2011; Blundell et al., 2015). Weight noise was found to aid exploration in reinforcement learning (Plappert et al., 2017; Fortunato et al., 2017). Evolution strategies minimizes a black-box objective by evaluating many weight perturbations in parallel, and have recently seen impressive performance on robotic control tasks (Salimans et al., 2017).
+Some methods perturb a network's activations (Srivastava et al., 2014; Ioffe & Szegedy, 2015), while others perturb its weights (Graves, 2011; Blundell et al., 2015; Plappert et al., 2017; Fortunato et al., 2017; Salimans et al., 2017). Stochastic weights are appealing in the context of regularization or exploration because they can be viewed as a form of posterior uncertainty about the parameters. However, compared with stochastic activations, they have a serious drawback: because a network typically has many more weights than units, it is very expensive to compute and store separate weight perturbations for every example in a mini-batch. Therefore, stochastic weight methods are typically done with a single sample per mini-batch. In contrast, activations are easy to sample independently for different training examples within a mini-batch. This allows the training algorithm to see orders of magnitude more perturbations in a given amount of time, and the variance of the stochastic gradients decays as 1/N , where N is the mini-batch size. We believe this is the main reason stochastic activations are far more prevalent than stochastic weights for neural net regularization. In other settings, such as Bayesian neural nets and evolution strategies, one is forced to use weight perturbations and live with the resulting inefficiency.
+In order to achieve the ideal 1/N variance reduction, the gradients within a mini-batch need not be independent, but merely uncorrelated. In this paper, we present flipout, an efficient method for decorrelating the gradients between different examples while still giving unbiased gradient estimates. It applies to any perturbation distribution which factorizes by weight and is symmetric around 0 -- including DropConnect, multiplicative Gaussian perturbations, evolution strategies, and variational Bayesian neural nets -- and to a variety of architectures, including fully connected nets, convolutional nets, and RNNs.
+1
+
+Under review as a conference paper at ICLR 2018
+
+In Section 3, we introduce flipout, show that it gives unbiased stochastic gradients, and discuss its efficient vectorized implementation which incurs only a factor-of-2 computational overhead compared with shared perturbations. We then analyze the asymptotics of gradient variance with and without flipout, demonstrating strictly reduced variance. In Section 4, we measure the variance reduction effects on a variety of architectures. Empirically, flipout gives the ideal 1/N variance reduction in all architectures we have investigated, just as if the perturbations were done fully independently for each training example. We demonstrate that Flipout achieves competitive performance in regularizing LSTMs, compared to several methods that use dropout. We demonstrate significant speedups in training time in a large batch regime. Finally, we apply flipout to vectorize evolution strategies (Salimans et al., 2017), allowing a single GPU to handle the same throughput under 40 CPU cores using existing approaches; this corresponds to a factor-of-4 cost reduction on Amazon Web Services.
+
+2 BACKGROUND
+
+2.1 WEIGHT PERTURBATIONS
+
+We use the term "weight perturbation" to refer to a class of methods which sample the weights of a neural network stochastically at training time. More precisely, let f (x, W ) denote the output of a network with weights W on input x. The weights are sampled from some distribution q parameterized by . We aim to minimize the expected loss E(x,y)D,W q [L(f (x, W ), y)], where L is a loss function, and D denotes the data distribution. The distribution q can often be described in terms of perturbations: W = W + W , where W are the mean weights (typically represented explicitly as part of ) and W is a stochastic perturbation. We now give some specific examples
+of weight perturbations.
+
+Gaussian perturbations. If the entries Wij are sampled independently from Gaussian distribu-
+
+tions with variance i2j, this gives the distribution q(Wij) = N (Wij; W ij, i2j). Using the repa-
+
+rameterization trick (Kingma et al., 2015), this can be rewritten as Wij = W ij + ij ij, where ij  N (0, 1); this representation allows the gradients to be computed using backprop. A variant
+
+on this is multiplicative Gaussian perturbation, where the perturbations are scaled according to the
+
+weights:
+
+Wij
+
+
+
+N
+
+(W
+
+ij
+
+,
+
+i2j
+
+W
+
+2 ij
+
+),
+
+or
+
+Wij
+
+=
+
+W ij (1
+
++
+
+ij
+
+ij), where again
+
+ij  N (0, 1). Multi-
+
+plicative perturbations can be more effective than additive ones because the information content of
+
+the weights is the same, regardless of their scale.
+
+DropConnect. DropConnect (Wan et al., 2013) is a regularization method inspired by dropout (Srivastava et al., 2014) which randomly zeros out a random subset of the weights. In the case of a 50% drop rate, this can be thought of as weight perturbation where W = W/2 and each entry Wij is sampled uniformly from ±W ij.
+
+Variational Bayesian neural nets. Rather than fitting a point estimate of a neural net's weights, one
+can adopt a Bayesian approach of putting a prior distribution p(W ) over the weights and approximating the posterior distribution p(W |D)  p(W )p(D|W ), where D denotes the observed data. Graves (2011) observed that one could fit an approximation q(W )  p(W |D) using variational inference; in particular, one could maximize the evidence lower bound (ELBO) with respect to :
+
+F () = E [log p(D | W )] - DKL(q p).
+W q
+The negation of the second term can be viewed as the description length of the data, and the negation of the first term can be viewed as the description length of the weights (Hinton & Van Camp, 1993). Graves (2011) observed that if q is chosen to be a factorial Gaussian, it can be thought of as Gaussian weight perturbation, except where the variance is adapted to maximize F. (Note that the first term is proportional to the negative expected loss if we define L = - log p(y|x).) Blundell et al. (2015) later combined this insight with the reparameterization trick (Kingma & Welling, 2014) to derive unbiased stochastic estimates of the gradient of F.
+
+Evolution strategies. Evolution strategies (ES) (Eigen, 1973) is black box optimization algorithms which involves a heavy use of weight perturbation. It doesn't scale well to large dimensional space so it has limited use in neural networks until recently proposed as an alternative reinforcement learning algorithm (Schmidhuber et al., 2007; Salimans et al., 2017). ES generates a collection of weight perturbations as candidates and evaluates them by some objective functions. The gradient of
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+the parameters can be estimated given the evaluation result. ES is a highly parallelizable algorithm,
+since generating and evaluating perturbations can be done independently. Suppose N is the number
+of workers,  is the perturbation standard deviation and W is the model parameter. The algorithm is trying to maximize EW F W + W , where F (·) is the objective function. The gradient of the objective function and the update rule can be given as:
+
+1
+
+W E
+W
+
+F (W + W )
+
+=
+
+2
+
+E
+W
+
+W F (W + W )
+
+,
+
+where W  N (0, I)
+
+=
+
+1 W t+1 = W t +  N 2
+
+N
+
+F (W t + Wi)Wi
+
+i=1
+
+(1)
+
+where  is the learning rate, F (·) is the objective function, and Wi is the Gaussian noise generated at worker i.
+
+2.2 REPARAMETERIZATION GRADIENT
+
+As mentioned in Section 2.1, the reparameterization trick allows the gradients to be computed using backprop (Kingma & Welling, 2014). It is important to contrast this with regularizers such as dropout (Srivastava et al., 2014), which perturb activations rather than weights. Because activations can be perturbed independently for every training example within a mini-batch, the variance of the stochastic gradients decreases linearly with the size of the mini-batch. Unfortunately, it would be extremely expensive to explicitly sample an independent W for every training example -- this would require storing tens or hundreds of copies of the parameters in memory. Therefore, weight perturbation gradients are typically computed using only a single perturbation per mini-batch.
+
+The variance reduction effect of mini-batches is one of the key advantages of activation perturbations over weight perturbations. It is possible to derive efficient independent weight perturbation methods in particular cases; for instance, independent DropConnect masks could be stored since they require only one bit per weight Wan et al. (2013). Kingma et al. (2015) showed that in the case of fully connected networks with no weight sharing, unbiased stochastic gradients could be computed without explicit weight perturbations using the local reparameterization trick (LRT). Specifically, suppose X is the input mini-batch, W is the weight matrix and B = XW is the activation. The LRT samples activation B rather than the weights W . In the case of a Gaussian posterior, the local reparameterization trick is given as:
+
+q(Wi,j ) = N (µi,j , i2,j )
+m,j = xm,iµi,j ,
+i=1
+
+Wi,j  W = q(bm,j |X) = N (m,j , m,j )
+
+and m,j =
+
+xm2 ,ii2,j
+
+i=1
+
+(2)
+
+Notice that the local reparameterization trick gives an unbiased gradient estimate when the activations are independent. However, when weight sharing is involved, such as in convolutional neural networks and recurrent neural networks, the LRT does not give an unbiased gradient estimate.
+
+2.3 OTHER RELATED WORK
+Control variates are another general class of strategies for variance reduction, both for black-box optimization (Williams, 1992; Ranganath et al., 2014; Mnih & Gregor, 2014) and for gradient-based optimization (Roeder et al., 2016; Miller et al., 2017; Louizos et al., 2017). Control variates are complementary to flipout, so one could potentially combine these techniques to achieve a larger variance reduction. We also note that the fastfood transform (Le et al., 2013) is based on similar mathematical techniques. However, whereas fastfood is used to approximately multiply by a large Gaussian matrix, flipout preserves the random matrix's distribution and instead decorrelates the gradients between different samples.
+
+3 METHODS
+As described above, weight perturbation algorithms suffer from a high variance of the gradient estimates because all training examples in a mini-batch share the same perturbation. More precisely,
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+sharing the perturbation induces correlations between the gradients, implying that the variance can't be eliminated by averaging. (This argument is detailed in Section 3.2.) In this section, we propose flipout, an efficient way to perturb the weights quasi-independently within a mini-batch. We show that this almost fully decorrelates the gradients within a mini-batch, allowing us to achieve the ideal variance reduction as if the gradients were independent.
+
+3.1 FLIPOUT
+
+We make two assumptions about the weight distribution q: (1) the perturbations of different weights are independent; and (2) the perturbation distribution is symmetric around zero. These are nontrivial constraints, but they encompass important applications: independent Gaussian perturbations (e.g. as used in variational BNNs and evolution strategies) and DropConnect with drop probability 0.5. We observe that, under these assumptions, the perturbation distribution is invariant to elementwise multiplication by a random sign matrix (i.e. matrix whose entries are ±1). In the following, we denote elementwise multiplication by .
+Proposition 1. Let q be a perturbation distribution that satisfies the above assumptions, and let W  q. Let E be a random sign matrix that is independent of W . Then W = W 
+E is identically distributed to W . Furthermore, the loss derivatives computed using W are
+identically distributed to those computed using W .
+
+Flipout exploits this fact by using a base perturbation W shared by all examples in the mini-batch, and multiplies it by a different rank-one sign matrix for each example:
+
+W (i) = W  e(1i)e2(i) ,
+
+(3)
+
+where the superscript denotes the index within the mini-batch, and e(1i) and e2(i) are random vectors whose entries are sampled uniformly from ±1. According to Theorem 1, the marginal distribution over gradients computed for individual training examples will be identical to the distributions com-
+
+puted using shared weight perturbations. In particular, flipout yields an unbiased gradient estimator
+
+for the original loss function. However, by decorrelating the gradients between different training
+
+examples, we can achieve much lower variance updates when averaging over a mini-batch.
+
+Vectorization. The advantage of flipout over explicit perturbations is that computations on a minibatch can be written in terms of matrix multiplications. This enables efficient implementations on GPUs and modern accelerators such as the Tensor Processing Unit (TPU) (Jouppi et al., 2017). Let x denote the activations in one layer of a neural net. The next layer's activations are given by:
+
+y(i) =  W x(i)
+
+=  W + W  e(1i)e2(i)
+
+x(i)
+
+=  W x(i) + W (x(i)  e(2i))  e1(i) ,
+where  denotes the activation function. To vectorize these computations, we define matrices E1 and E2 whose rows correspond to the random sign vectors e1(i) and e2(i) for all examples in the batch. The above equation is vectorized as:
+
+Y =  XW + (X  E2)W  E1 .
+
+(4)
+
+This defines the forward pass. Because E1 and E2 are sampled independently of W and W , we can also backpropagate through Eqn. 4 to obtain derivatives with respect to W , W , and X.
+Computational cost. In general, the most expensive operation in the forward pass is matrix multiplication. Flipout's forward pass requires two matrix multiplications instead of one, and therefore should be roughly twice as expensive as a forward pass with a single shared perturbation when done in sequence.1 However, note the two matrix multiplications are independent and can be parallelized.
+1Depending on the efficiency of the underlying libraries, the overhead of sampling E1 and E2 may be nonnegligible. If this is an issue, these matrices may be reused between all mini-batches. In our experiments, this does not cause any drop in performance.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+As for the backward pass, a general rule of thumb for neural nets is that it requires roughly twice as many FLOPs as the forward pass. This suggests that each update using flipout ought to be about twice as expensive as an update with a single shared perturbation (again, if not parallelized); this is consistent with our experience. (Note this is the same overhead for the local reparameterization trick (Kingma et al., 2015).)
+
+Evolution strategies. Evolution Strategies (ES) is a highly parallelizable algorithm. Most implementations run on a multi-core CPU machine. Flipout enables the ES to run more efficiently on a GPU because it allows each worker to evaluate a batch of quasi-independent perturbations rather than only one. For example, in the reinforcement learning task, we need to replicate the starting state M times. It follows that we can evaluate M perturbations with flipout at each worker. Instead of Eqn. 1, the update rule becomes:
+
+1 MN
+
+W t+1 = W t +  M N 2
+
+Fij
+
+i=1 j=1
+
+W j 
+
+e(1i,)j e2(i,)j T
+
+(5)
+
+where e(1i,)j and e(2i,)j are the ith random flipout sign vectors sampled at the worker j, and Fij is the reward evaluated with ith perturbation at the worker j. The same flipout algorithm can also be
+applied to supervised learning tasks. As a result, it can accelerate the training process of the current
+ES algorithm in terms of the wall-clock time with the same amount of resources.
+
+3.2 VARIANCE ANALYSIS
+
+In this section, we analyze the variance of stochastic gradients under the flipout perturbation. We show that flipout is guaranteed to reduce the variance of the gradient estimates compared to the na¨ive shared perturbation.
+
+Without loss of generality, let G(x, W ) denote the stochastic gradient under the perturbation W
+
+for a single training example x w.r.t. the weight W , i.e. G(x, W ) = W L(y, f (x, W , W )). We
+
+define the mini-batch gradient GB(W ) as the averaged gradient under perturbation over a mini-
+
+batch B of size N , GB(W )
+
+=
+
+1 N
+
+xB G(x, W ), where the subscript is used to denote the
+
+random mini-batch sampled from the whole training set.
+
+Assume that the training examples in the mini-batch are sampled independently from the data dis-
+tribution. Using the Law of Total Variance, we can expand the variance of the mini-batch gradient Var(GB(W )) into the gradient variance between mini-batches (data term) and the estimation variance (estimation term) under perturbation noise:
+
+Var (GB(W )) = Var
+B
+
+E GB(W )
+W | B
+
+data
+
++ E Var GB(W )
+B W | B estimation
+
+.
+
+(6)
+
+Notice that the data term in the above equation is not related to the perturbation noise W and decays with the mini-batch size N . The estimation term can be further divided and manipulated so that we can reach the following conclusion.
+Theorem 1 (Variance Decomposition Theorem). Let W be the weight perturbations sampled
+independently given the base perturbations W from Eqn. 3. Define ,  and  to be
+
+=E E
+
+Var (G(x, W )) ,
+
+x W | x W | W ,x
+
+ = Var
+x
+
+E G(x, W )
+W | x
+
+,
+
+ = E Var
+
+E [G(x, W )]
+
+x W | x W | W ,x
+
+(7)
+
+Under the assumption of Proposition 1, the variance of the gradients under the shared and the flipout perturbation can be written in terms of ,  and  as following:
+
+Shared perturbation:
+
+Var(GB(W ))
+
+=
+
++
+
++
+
+1 
+N
+
+Flipout:
+
+Var(GB(W ))
+
+=
+
+1 ++
+N
+
+1 
+N
+
+(8) (9)
+
+5
+
+Under review as a conference paper at ICLR 2018
+Proof. Details of the proof are provided in Appendix A.
+We can interpret ,  and  in the above theorem. The  term is the variance from sampling different mini-batch and perturbation,  +  is the expected covariance of the gradients among the training examples in the mini-batch. When a single perturbation is used for whole mini-batch, it introduces additional covariance among the gradients contributing to the total variance of the minibatch gradient. The quasi-independent perturbation from flipout is guaranteed to reduce the gradient covariance (the  term) linearly in the number of training examples. Therefore, flipout achieves a lower-variance gradient estimate than methods based on a shared perturbation.
+We further examine the contribution of the gradient covariance to the variance of the mini-batch gradient. In the shared weight perturbation case, if the mini-batch size N is large enough, Eqn. 9 is dominated by the first two covariance terms, i.e.  + , which cannot be reduced by increasing the size of the mini-batch N . This suggest the gradient variance should level off after a certain mini-batch size for the shared perturbation. In contrast, the gradient variance under flipout should be considerably lower given that the  term decays with the mini-batch size. Moreover, we argue that if the  term is insignificant in practice, then the total flipout variance should decrease linearly in terms of N . Empirically, we found that the  term is indeed close to 0 for a various neural network architectures as discussed in Section 4.1. Thus, in practice, flipout obtains the ideal variance reduction in the weight perturbation.
+4 EXPERIMENTS
+We first empirically verify the variance reduction effect using flipout predicted by Theorem 1 in Section 4.1. We study the variance of the gradients under different perturbations for a wide variety of neural network architectures and batch sizes. In Section 4.2, we show that flipout is effective at regularizing LSTM networks. Furthermore, we demonstrate that the flipout perturbation outperforms the shared perturbations method, which we call "non-flipout", when training with large mini-batches in Section 4.3. Lastly, we present the experimental results of Evolution Strategies with flipout in both supervised learning and reinforcement learning tasks in Section 4.4.
+4.1 VARIANCE REDUCTION
+Since the main effect of flipout is intended to be variance reduction of the gradients, we first estimated the gradient variances of several architectures with mini-batch sizes ranging from 1 to 8196. We experimented with three perturbation methods: a single shared perturbation per mini-batch, the local reparameterization trick (LRT) of Kingma et al. (2015), and flipout. We computed Monte Carlo estimates of the gradient variance, including both the data and estimation terms in Eqn. 6. (The estimation variance dominated data variance in all of our results except for LRT.) Confidence intervals are based on 50 independent runs of the estimator.
+We considered four architectures: a fully connected MNIST classifier, a LeNet-like MNIST conv net (LeCun et al., 1998), a VGG-like CIFAR conv net (Simonyan & Zisserman, 2014), and an LSTM language model trained on Penn Treebank (Marcus et al., 1993). These models are henceforth referred to as FC, Conv1, Conv2, and LSTM, respectively. For each of these networks, we froze a partially trained network to use for all variance estimations, and we used multiplicative Gaussian perturbations with 2 = 1. Details of architectures and training methods are given in Appendix B.
+Estimation variance plots for all of these models are given in Figure 1. We note that the analysis of Section 3.2 makes strong predictions about the shapes of these curves. In particular, by Theorem 1, the variance curves for flipout and shared each have the form a + b/N , where N is the mini-batch size. On a log-log plot, this functional form appears as a linear regime with slope -1, a constant regime, and a smooth phase transition in between. Also, because the distribution of individual gradients is identical with and without flipout, the curves must agree for N = 1. Our plots are consistent with both of these predictions. We observe that for shared perturbations, the phase transition consistently occurs for batch sizes somewhere between 100 and 1000. In contrast, flipout gives the ideal linear variance reduction throughout the range of mini-batch sizes we investigated, i.e., its behavior is indistinguishable from fully independent perturbations. In the following experiments, we measure the variance of the stochastic gradients in two settings: (1) non-flipout, with per-batch
+6
+
+Under review as a conference paper at ICLR 2018
+
+variance variance Variance
+
+10 1 10 2 10 3 10 4 10 5 10 6 10 7 10 8
+100
+
+Variance Estimation
+
+FC1 FC3
+101 Batch102size
+
+103
+
+(a) Fully-connected Net (FC)
+
+Variance Estimation
+10 2 10 3
+10 4 10 5
+10 6 Conv1 10 7 Conv8
+Batch size104 100 101 102 103 104 (b) Convolutional Net (Conv2)
+
+Variance Estimation
+
+10 8
+
+10 9
+
+10 10
+
+Wf Wi
+
+10 11
+
+Wo Wc
+
+101 Ba10t2ch Size 103
+
+(c) LSTM (LSTM)
+
+104
+
+Figure 1: Empirical variance of gradients with respect to mini-batch size for several architectures. FC1 stands for the first layer in the fully connected network. Similarly, Conv1 stands for the first convolutional layer. Dotted: shared perturbations. Dashed: LRT (Kingma et al., 2015). Solid: flipout. (a) FC on MNIST (b) Deep CNN (vgg-like) on CIFAR-10 (c) LSTM network on Penn Treebank
+
+Gaussian weight perturbations (shared for all examples in a mini-batch), and (2) with flipout applied to yield quasi-independent perturbations for each example.
+As analyzed by Kingma et al. (2015), the LRT gradients are fully independent within a mini-batch, therefore are guaranteed to achieve the ideal 1/N variance reduction. Furthermore, they reduce the variance below that of explicit weight perturbations, so we would expect them to achieve smaller variance than flipout. This is borne out by our plots. However, flipout is applicable to a wider variety of architectures, including convolutional nets and RNNs.
+
+4.2 REGULARIZATION FOR LANGUAGE MODELING
+We evaluate the regularization performance of flipout on both the character-level and word-level language modeling tasks with the Penn Treebank corpus (PTB) (Marcus et al., 1993). We compare flipout to several other methods for regularizing RNNs: na¨ive dropout (Zaremba et al., 2014), variational dropout (Gal & Ghahramani, 2016b), recurrent dropout (Semeniuta et al., 2016), and zoneout (Krueger et al., 2016). Zaremba et al. (2014) apply dropout only to the feed-forward connections (to the input, output, and connections between layers). Several methods have been proposed to regularize the recurrent connections as well: Semeniuta et al. (2016) apply dropout to the cell update vector, with masks sampled either per step or per sequence; Gal & Ghahramani (2016a) propose to apply dropout to the forward and recurrent connections, with all dropout masks sampled per sequence. Here, we apply flipout to all input-to-hidden and hidden-to-hidden weight matrices, as well as to the hidden-to-output layer, providing feed-forward and recurrent regularization.
+Character-Level. For our character-level experiments, we use a single-layer LSTM with 1000 hidden units, sequences of 100 characters in batches of size 32, and train for 55 epochs using Adam with a learning rate of 0.002. Model hyperparameters are given in Appendix D. The results, measured in bits-per-character (BPC) for the validation and test sequences of PTB are shown in Table 1. In the table, non-flipout and flipout are denoted by Mult. Gauss and Mult. Gauss + Flipout, respectively. We see that flipout achieves comparable results with the other methods.
+Word-Level. For word-level language-modeling, we follow the experimental setup of Gal & Ghahramani (2016a). We use a 2-layer LSTM with 650 hidden units per layer and a 650-dimensional embedding layer for words. We train on sequences of length 35 in batches of size 20. We use SGD with initial learning rate 20, and train for 40 epochs, decaying the learning rate by a factor of 1.2 each epoch, starting after epoch 6. For the na¨ive dropout LSTM (Zaremba et al., 2014) and variational LSTM (Gal & Ghahramani, 2016a), we use the hyperparameters described in the original papers. The hyperparameters used for recurrent dropout (Semeniuta et al., 2016) and zoneout (Krueger et al., 2016) are given in Appendix D. Gal's full model (denoted by Gal w/ EmbDrop) uses embedding dropout (setting rows of the embedding matrix to 0). Our flipout model does not use embedding dropout; thus, we also train Gal's model without embedding dropout, where we find optimal input, hidden, and output dropouts of 0.5, 0.3, and 0.5, respectively. The validation and test perplexities of these models are shown in Table 2. We see that flipout outperforms recurrent dropout and zoneout, and achieves competitive performance with na¨ive dropout and the variational dropout LSTM. In addition, flipout achieves better performance than non-flipout.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Char-PTB
+
+Model
+
+Valid Test
+
+Unregularized LSTM 1.47 1.43
+
+Semeniuta (2016)
+
+1.35 1.32
+
+Zoneout (2016)
+
+1.33 1.30
+
+Gal (2016a)
+
+1.33 1.30
+
+Mult. Gauss ( = 0.3) 1.34 1.30
+
+Mult. Gauss + Flipout 1.34 1.30
+
+Table 1: Bits-per-character (BPC) for the character-level PTB Task.
+4.3 LARGE BATCH TRAINING WITH FLIPOUT
+
+Word-PTB
+
+Model
+
+Valid Test
+
+Unregularized LSTM 125.19 123.5
+
+Zaremba (2014)
+
+86.32 82.68
+
+Gal w/ EmbDrop (2016a) 82.81 79.92
+
+Gal w/o EmbDrop, Opt. 83.83 80.18
+
+Semeniuta (2016)
+
+90.83 86.97
+
+Zoneout (2016)
+
+91.84 88.44
+
+Mult. Gauss ( = 1)
+
+89.16 85.40
+
+Mult. Gauss + Flipout 87.31 83.15
+
+Table 2: Perplexity on the PTB word-level validation and test sets.
+
+Theorem 1 and the Fig.1 suggest that the variance reduction is more effective when the model is trained with a large mini-batch size. In this section, we train a Bayesian neural network with minibatch size 8192 and show that flipout can speed up the training process in terms of the number of iterations, due to its variance reduction effect. We ran the large mini-batch size training experiment with the Bayes by Backprop algorithm (Blundell et al., 2015), under a 3-layer fully connected network and a LeNet-like convolutional neural network (FC and Conv1 respectively). The purpose of this section is to show the speed up of the training process due to the variance reduction. Thus, we focus on the training loss in this section and present other training details in Appendix E.
+
+Fig.2a shows the training loss of the large batch experiment. In the fully connected network (FC), we compare the local reparameterization trick, flipout, and non-flipout. Only flipout and non-flipout are compared in the convolutional network (Conv1) experiment since the local reparameterization trick does not provide an unbiased estimator. We found that flipout trained in about 3 times fewer iterations than non-flipout in both fully connected and convolutional networks, while achieving comparable performance with the local reparameterization trick.
+
+In current experiments, flipout is roughly two times slower than non-flipout in FLOPs, which leads to a 1.5 times faster convergence overall. This slowdown is due to an additional matrix multiplication (second half of Eqn. 4). However, this computation is independent from the first half and can be parallelized. In preliminary experiments, we have found this is possible using modern accelerators via the second-generation Tensor Processing Unit (TPU) (Jouppi et al., 2017). A key challenge in utilizing the TPU is to prevent a bottleneck in the input pipeline. In general, large batch sizes, as well as deeper and wider nets, improve utilization where an initial enqueing phase is most expensive. In this regime, weight variance is the biggest concern and flipout provides a promising solution.
+
+4.4 EVOLUTION STRATEGIES
+Evolution Strategies (ES) is a highly parallelizable algorithm that typically runs on multiple CPU cores. The limitation that only one perturbation can be evaluated locally restricts its ability to run efficiently on GPU. In Section 3.1, we showed that ES with flipout allows each local worker to evaluate a batch of perturbations, which enables the algorithm to run on a single GPU more efficiently. In this section, we show that flipout accelerates the ES algorithm and narrows the computational gap between ES and back-propagation.
+The gradient approximated by Eqn. 1 has high variance. Therefore, a large number of samples are generally needed before applying the update Eqn. 1. We empirically found that 5, 000 samples are needed to achieve a stable performance in the supervised learning tasks. The na¨ive way to run ES on GPU would be iterating the forward pass 5, 000 times to perform the update. FlipES is designed to reduce the number of iterations, since it can evaluate a batch of perturbations in one single forward pass. Throughout the experiments, we set the flip size to be 40 (i.e. M = 40 in Eqn. 5). Na¨ive ES uses fully independent noise during each forward pass while flipout uses pseudoindependent noise. We compared these two methods with a fully connected network (FC) on the MNIST dataset. We only sampled 1, 600 times per update during training, because the purpose of this experiment is to show no performance loss with pseudo-independent noise, as shown in Fig.2b. Next, we compared FlipES and cpuES (40 cores) in terms of the per update time with respect to the model size. The result (Appendix E.3) shows cpuES has an increasing computational cost as the model size increases, while FlipES scales better because it runs on GPU. Finally, we compare FlipES and the back propagation algorithm in both a fully connected network (FC) and a LeNet-like neural network (Conv1). Fig.2c and Fig.2d show that FlipES achieves a data efficiency comparable with the back propagation algorithm. The na¨ive ES has a much higher computational cost than
+
+8
+
+Under review as a conference paper at ICLR 2018
+
+2.0 Train Loss (FC)
+
+1.5
+
+1.0
+
+0.5
+
+0 20
+
+5000 10000 15000 20000
+Train Loss (Conv)
+
+15
+
+10 5 0 1000
+
+2000 It3e00r0ations 4000
+
+LRT NonFlip Flip 25000 30000 NonFlip Flip
+5000 6000
+
+0.08 0.07 0.06 0.05 0.04 0.03 0.02
+0
+0.08 0.07 0.06 0.05 0.04 0.03
+0
+
+Train Error
+
+NaiveES FlipES
+
+2000 4000 6000 8000 10000 12000
+Validation Error
+NaiveES FlipES
+
+2000 4000 Iter6a0t0i0ons 8000 10000 12000
+
+(a) Large Batch Training with Bayes by Backprop
+
+0.07 0.06 0.05 0.04 0.03 0.02 0.01 0.00 0
+
+Train Error
+
+FlipES(5000) FlipES(1600)
+
+2500 5000 7500 10000 12500 15000 17500 20000
+
+0.07 0.06 0.05 0.04 0.03 0.02 0.01 0
+
+Validation Error
+
+Backprop
+
+2500 5000 7500Iter1a00t0io0 ns12500 15000 17500 20000
+
+0.05 0.04 0.03 0.02 0.01 0.00
+0.05 0.04 0.03 0.02 0.01
+
+(b) Pseudo v.s. Fully Independent Noise
+Train Error
+Backprop FlipES(5000) 0 500 1000 1500 2000 2500 3000 3500
+Validation Error
+FlipES(1600)
+0 500 1000 1500Iter2a0t0i0ons2500 3000 3500
+
+4000 4000
+
+(c) Bp v.s. FlipES (FC)
+
+(d) Bp v.s. FlipES (Conv1)
+
+Figure 2: Experiment results on large batch training and evolution strategies. Upper left: plot of the training
+
+loss over number of iterations with batch size 8192 in the FC network and Conv1 network. Upper right: error
+
+rate over iterations; no performance lost to replace independent noise with pseudo-independent one (1,600
+
+samples per update). Lower left: error over iterations in the fully connected network; we compared FlipES
+
+(5,000 samples and 1,600 samples per update) with back propagation in terms of the data efficiency. Notice
+
+that FlipES is around 60 times more expensive than backprop in each update. Lower right: the same as the
+
+lower left plot except the experiment ran on a LeNet-like network.
+
+the back propagation algorithm, due to the large number of forward passes. FlipES can narrow the computational gap between them. Additionally, FlipES is still a highly parallelizable algorithm since there is no dependency in each iteration. Although evolution strategies is more expensive than back propagation, it applies to models which are not entirely differentiable, such as a model with discrete loss (accuracy or BLEU score) or with stochastic units. Moreover, evolution strategies naturally induces the variance of gradient, which makes it easier to perform second-order optimization. We leave these as future work.
+
+5 CONCLUSIONS
+We have introduced flipout, an efficient method for decorrelating the weight gradients between different examples in a mini-batch. We showed that flipout is guaranteed to reduce the variance compared with shared perturbations. Empirically, we demonstrated significant variance reduction in the large-batch setting for a variety of network architectures, as well as significant speedups in training time. Flipout also makes it practical to apply GPUs to evolution strategies, resulting in substantially increased throughput for a given computational cost. We believe flipout will make weight perturbations practical in the large batch setting favored by modern computational architectures such as Tensor Processing Units (Jouppi et al., 2017).
+
+9
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Charles Blundell, Julien Cornebise, Koray Kavukcuoglu, and Daan Wierstra. Weight uncertainty in neural networks. In Proceedings of the 32nd International Conference on Machine Learning (ICML), pp. 1613­1622, 2015.
+Manfred Eigen. Ingo rechenberg evolutionsstrategie optimierung technischer systeme nach prinzipien der biologishen evolution. mit einem Nachwort von Manfred Eigen, Friedrich Frommann Verlag, Struttgart-Bad Cannstatt, 45:46­47, 1973.
+Meire Fortunato, Mohammad Gheshlaghi Azar, Bilal Piot, Jacob Menick, Ian Osband, Alex Graves, Vlad Mnih, Remi Munos, Demis Hassabis, Olivier Pietquin, et al. Noisy networks for exploration. arXiv preprint arXiv:1706.10295, 2017.
+Yarin Gal and Zoubin Ghahramani. A theoretically grounded application of dropout in recurrent neural networks. In Advances in Neural Information Processing Systems (NIPS), pp. 1019­1027, 2016a.
+Yarin Gal and Zoubin Ghahramani. A theoretically grounded application of dropout in recurrent neural networks. In Advances in Neural Information Processing Systems (NIPS), pp. 1019­1027, 2016b.
+Alex Graves. Practical variational inference for neural networks. In Advances in Neural Information Processing Systems (NIPS), pp. 2348­2356, 2011.
+Geoffrey E Hinton and Drew Van Camp. Keeping the neural networks simple by minimizing the description length of the weights. In Proceedings of the 6th Annual Conference on Computational Learning Theory, pp. 5­13. ACM, 1993.
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In International Conference on Machine Learning (ICML), pp. 448­456, 2015.
+Norman P. Jouppi, Cliff Young, Nishant Patil, David Patterson, Gaurav Agrawal, Raminder Bajwa, Sarah Bates, Suresh Bhatia, Nan Boden, Al Borchers, Rick Boyle, Pierre luc Cantin, Clifford Chao, Chris Clark, Jeremy Coriell, Mike Daley, Matt Dau, Jeffrey Dean, Ben Gelb, Tara Vazir Ghaemmaghami, Rajendra Gottipati, William Gulland, Robert Hagmann, C. Richard Ho, Doug Hogberg, John Hu, Robert Hundt, Dan Hurt, Julian Ibarz, Aaron Jaffey, Alek Jaworski, Alexander Kaplan, Harshit Khaitan, Andy Koch, Naveen Kumar, Steve Lacy, James Laudon, James Law, Diemthu Le, Chris Leary, Zhuyuan Liu, Kyle Lucke, Alan Lundin, Gordon MacKean, Adriana Maggiore, Maire Mahony, Kieran Miller, Rahul Nagarajan, Ravi Narayanaswami, Ray Ni, Kathy Nix, Thomas Norrie, Mark Omernick, Narayana Penukonda, Andy Phelps, and Jonathan Ross. In-datacenter performance analysis of a tensor processing unit. 2017. URL https://arxiv. org/pdf/1704.04760.pdf.
+Diederik P Kingma and Max Welling. Auto-encoding variational Bayes. In Proceedings of the 2nd International Conference on Learning Representations (ICLR), 2014.
+Diederik P Kingma, Tim Salimans, and Max Welling. Variational dropout and the local reparameterization trick. In Advances in Neural Information Processing Systems (NIPS), 2015.
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. In Technical Report. University of Toronto, 2009.
+David Krueger, Tegan Maharaj, Ja´nos Krama´r, Mohammad Pezeshki, Nicolas Ballas, Nan Rosemary Ke, Anirudh Goyal, Yoshua Bengio, Hugo Larochelle, Aaron C. Courville, and Chris Pal. Zoneout: Regularizing RNNs by randomly preserving hidden activations. CoRR, abs/1606.01305, 2016.
+Quoc Le, Tama´s Sarlo´s, and Alex Smola. Fastfood-approximating kernel expansions in loglinear time. In Proceedings of the international conference on machine learning, volume 85, 2013.
+Yann LeCun, Le´on Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to document recognition. Proceedings of the IEEE, 86(11):2278­2324, 1998.
+10
+
+Under review as a conference paper at ICLR 2018
+Christos Louizos, Karen Ullrich, and Max Welling. Bayesian compression for deep learning. arXiv preprint arXiv:1705.08665, 2017.
+Mitchell P Marcus, Mary Ann Marcinkiewicz, and Beatrice Santorini. Building a large annotated corpus of English: The Penn Treebank. Computational Linguistics, 19(2):313­330, 1993.
+Andrew C Miller, Nicholas J Foti, Alexander D'Amour, and Ryan P Adams. Reducing reparameterization gradient variance. arXiv preprint arXiv:1705.07880, 2017.
+Andriy Mnih and Karol Gregor. Neural variational inference and learning in belief networks. arXiv preprint arXiv:1402.0030, 2014.
+Matthias Plappert, Rein Houthooft, Prafulla Dhariwal, Szymon Sidor, Richard Y Chen, Xi Chen, Tamim Asfour, Pieter Abbeel, and Marcin Andrychowicz. Parameter space noise for exploration. arXiv preprint arXiv:1706.01905, 2017.
+Rajesh Ranganath, Sean Gerrish, and David Blei. Black box variational inference. In Artificial Intelligence and Statistics, pp. 814­822, 2014.
+Geoffrey Roeder, Yuhuai Wu, and David Duvenaud. Sticking the landing: A simple, reducedvariance gradient estimator for variational inference. In Advances in Approximate Bayesian Inference Workshop (NIPS), 2016.
+Tim Salimans, Jonathan Ho, Xi Chen, and Ilya Sutskever. Evolution strategies as a scalable alternative to reinforcement learning. arXiv preprint arXiv:1703.03864, 2017.
+Ju¨rgen Schmidhuber, Daan Wierstra, Matteo Gagliolo, and Faustino Gomez. Training recurrent networks by evolino. Neural computation, 19(3):757­779, 2007.
+Stanislau Semeniuta, Aliaksei Severyn, and Erhardt Barth. Recurrent dropout without memory loss. In Proceedings of the 26th International Conference on Computational Linguistics (COLING), pp. 1757­1766, 2016.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. arXiv preprint arXiv:1409.1556, 2014.
+Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: A simple way to prevent neural networks from overfitting. Journal of Machine Learning Research, 15:1929­1958, 2014.
+Li Wan, Matthew Zeiler, Sixin Zhang, Yann L Cun, and Rob Fergus. Regularization of neural networks using DropConnect. In Proceedings of the 30th International Conference on Machine Learning (ICML), pp. 1058­1066, 2013.
+Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine Learning, 8(3-4):229­256, 1992.
+Wojciech Zaremba, Ilya Sutskever, and Oriol Vinyals. Recurrent neural network regularization. arXiv preprint arXiv:1409.2329, 2014.
+11
+
+Under review as a conference paper at ICLR 2018
+
+A PROOF OF THEOREM 1(VARIANCE DECOMPOSITION THEOREM)
+
+In this section, we provide the proof to Theorem 1 (Variance Decomposition Theorem).
+
+Proof. We use the notations in 3.2. Specifically, let G(x, W ) denote the stochastic gradient un-
+
+der the perturbation W for a single training example x w.r.t. the weight W , i.e. G(x, W ) =
+
+W L(y, f (x, W , W )). We define the mini-batch gradient GB(W ) as the averaged gradient
+
+under perturbation over a mini-batch B of size N , GB(W )
+
+=
+
+1 N
+
+xB G(x, W ), where the
+
+subscript is used to denote the random mini-batch sampled from the whole training set. Let x, x be
+
+two arbitrarily chosen training examples from the mini-batch, W, W be the two weight pertur-
+
+bations they received, and 1Flip be the indicator function for using flipout or not. Following Eqn. 6, the variance can be split into a data term and an estimation term. We simplify the estimation term
+
+by replacing the averaged mini-batch gradient with the single training example gradient :
+
+Var
+B
+
+E GB(W )
+W | B
+
+1 = Var
+Nx
+
+E GB(W )
+W | x
+
+(10)
+
+E Var GB(W )
+B W | B
+
+= E Var
+
+E GB(W ) + E
+
+Var (GB(W ))
+
+B W | B W | W ,B
+
+W | B W | W ,B
+
+= E Var
+B W | B
+
+E
+W | W ,B
+
+1 G(x, W ) N
+xB
+
++E
+
+Var (GB(W ))
+
+W | B W | W ,B
+
+= E Var
+
+E [G(x, W )]
+
+x W | x W | W ,x
+
+1
+
++
+
+N2
+
+E
+x
+
+E
+W | x
+
+Var G(x, W )
+W | W ,x xB
+(11)
+
+We can further simplify the last term in Eqn. 11 for flipout and shared perturbation cases. In the shared perturbation case, it leads to quadratic N 2 number of the variance terms:
+
+Shared:
+
+1
+
+N2
+
+E
+x
+
+E
+W | x
+
+Var
+W | W ,x
+
+G(x, W )
+xB
+
+=E E
+
+Var (G(x, W ))
+
+x W | x W | W ,x
+
+(12)
+
+With flipout, W are conditionally independent given W , which leads to linear number of variance terms.
+
+Flipout:
+
+1
+
+N2
+
+E
+x
+
+E
+W | x
+
+Var
+W | W ,x
+
+G(x, W )
+xB
+
+1
+
+=
+
+N
+
+E
+x
+
+E
+W | x
+
+Var (G(x, W ))
+W | W ,x
+
+(13)
+
+Substituting the above expansions back into Eqn. 6, the total variance of the gradient estimates can be expressed as:
+
+Var (GB(W ))
+
+=
+
+1 N
+
+E
+x
+
+E
+W | x
+
+Var (G(x, W ))
+W | W ,x
+
++ E Var
+
+E [G(x, W )]
+
+x W | x W | W ,x
+
+1
+
++ Var Nx
+
+E GB(W )
+W | x
+
+estimation
+
+data
+(14)
+Therefore, the conditionally independence perturbation help reduce the first term in the gradient variance in Eqn. 14.
+
+.
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+B NETWORK CONFIGURATION IN THE EXPERIMENTS
+
+In this section, we provide the detailed network configurations to reproduce the results in the exper-
+
+iments Section 4.
+
+Table 3: Network Configurations
+
+Conv1 Conv2
+FC LSTM
+
+Network Type (Shallow) Convolutional
+(Deep) Convolutional Fully Connected LSTM Network
+
+Data Set MNIST (LeCun et al., 1998) CIFAR-10 (Krizhevsky & Hinton, 2009)
+MNIST Penn Treebank (Marcus et al., 1993)
+
+The (Shallow) convolutional neural networks (Conv1) is a LeNet-like network (LeCun et al., 1998). In specific, the first two layers are convolutional layers with 32 and 64 filters and relu non-linearity. Both filters are of size [5, 5]. A 2 × 2 max pooling layer is followed after each convolutional layer. Dimension reduction only takes place in the pooling layer, which means the stride of the pooling is two and padding is used in the convolutional layers to keep the dimension. Two fully connected layer with 1024 and 10 are attached to produce the classification result.
+The (Deep) convolutional neural networks (Conv2) is a VGG16-like network (Simonyan & Zisserman, 2014). We only modified the last fully connected layer in order to run experiments on CIFAR10 dataset. We didn't use the batch normalization in the variance reduction experiment since it introduces extra stochasticity. Also, multiple GPUs are needed when running the experiment with large mini-batch size (such as 4096 and 8192). In such case, the algorithm naturally induces multiple (depends on the number of GPUs) independent noises due to the distributed computation. In Section 4.1, we fixed the noise among all GPUs to produce the plot. We show in the Appendix E that flipout still results in smaller variance even in the case of distributed computation.
+Type FC network is a 3-layer fully connected network. The number of hidden units are 512, 512 and 10 without extra mentioning.
+
+C VARIANCE REDUCTION EXPERIMENT DETAILS
+
+Given a network architecture and a specific algorithm, we compute the empirical stochastic gradient update variance as follows. Starting from a moderately pre-trained model, such as a network with 85% training accuracy on MNIST. Without updating the parameters, we obtain the gradient of each weight in each layer by performing the feed-forward pass with sampling , E1 and E2 and back propagation. The gradient variance of each weight is computed by repeating the above procedure
+200 times in the experiments. Denote the variance estimation of layer l, the weight j as Varlj, the above can be written in the following form,
+
+Varlj
+
+=
+
+1 200
+
+200
+(glij
+
+- glj )2
+
+where
+
+glj
+
+=
+
+1 200
+
+200
+
+glij
+
+i=1 i=1
+
+where glij is the gradient received by the weight j in the layer l. Then we can use the average variance
+
+over
+
+weights
+
+1 |J |
+
+j Varlj as the variance estimation of the gradients in the layer l. In order to
+
+compute the confidence interval of the gradient variance estimation, we repeat the above procedure
+
+50 times. Suppose we obtain the average variance estimation sequence V1, . . . , V50. Assuming the sequence follows an i.i.d. normal distribution with unknown mean and unknown variance, it follows
+
+that
+
+V -µ S/ 50
+
+
+
+t49, where V
+
+is the mean of the sequence and S
+
+is the sample standard deviation.
+
+From this, we can compute the 90% confidence interval of the mean of the variance estimation and
+
+it leads to the error plot in Fig.1.
+
+To measure the variance reduction effect of flipout in LSTMs, we train a flipout LSTM with the two-layer architecture described in Section 4.2, on the word-level Penn Treebank dataset (Marcus et al., 1993). We train on sequences of length 35 for 3 epochs using plain SGD with learning rate 20.
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+We then measure the variance for each of the hidden-to-hidden weight matrices in the first layer (Wf , Wi, Wc, and Wo). We split large mini-batches (size 128 and higher) into multiple sub-batches of size 64; we sample the noise once for the set of sub-batches ( is shared among sub-batches), and we sample new E1 and E2 matrices for each sub-batch. We see that as the mini-batch size increases, the variance computed with the flipout model continues to decrease, while the non-flipout model converges to a constant variance.
+
+D LSTM EXPERIMENT DETAILS
+
+Long Short-Term Memory networks (LSTMs) are defined by the following equations:
+it, ft, ot = (Whht-1 + Wxxt + b) gt = tanh(Wght-1 + Ugxt + bg) ct = ft  ct-1 + it  gt ht = ot  tanh(ct)
+
+(15) (16) (17) (18)
+
+where it, ft, and ot are the input, forget, and output gates, respectively, gt is the candidate update gate, and  denotes elementwise multiplication. Na¨ive application of dropout on the hidden state of
+an LSTM is not effective, because it leads to significant memory loss over long sequences. Several
+approaches have been proposed to regularize the recurrent connections, based on applying dropout
+to specific terms in the LSTM equations. Semeniuta et al. (2016) propose to drop the cell update vector, with a dropout mask dt sampled either per-step or per-sequence: ct = ftct-1+it(dtgt). Gal & Ghahramani (2016a) apply dropout to the input and hidden state at each time step, xt dx and ht-1  dh, with dropout masks dx and dh sampled once per sequence (and repeated in each time step). Krueger et al. (2016) proposes to zone out units rather than dropping them; in the LSTM, the
+hidden state and cell values are either stochastically updated or maintain their previous value: ct = dtcct-1+(1-dtc)(ftct-1+itgt) and ht = dthht-1+(1-dht )(ottanh(ftct-1+itgt)), with zoneout masks dth and dtc sampled per step.
+
+D.1 HYPERPARAMETER DETAILS
+For the word-level models, we use the following hyperparameters. We do not use input or output dropout for any of these models.
+· For the full model of (Gal & Ghahramani, 2016a), which includes embedding dropout, we reproduce the parameters given in the paper: we use 0.35 dropout probability on inputs and outputs, 0.2 hidden state dropout, and 0.2 embedding dropout.
+· For the variant of (Gal & Ghahramani, 2016a) without embedding dropout, we tune the hyperparameters to achieve the best validation performance, and find that the optimal dropout probabilities for inputs, outputs, and hidden states are 0.5, 0.5, and 0.3.
+· For (Semeniuta et al., 2016), we use 0.5 dropout probability on inputs and outputs, and 0.3 dropout probability on cell updates, with per-step mask sampling.
+· For (Krueger et al., 2016) we use 0.5 dropout on inputs and outputs, and cell and hidden state zoneout probabilities of 0.25 and 0.025, respectively.
+· For the flipout and non-flipout LSTMs, we use Gaussian noise with  = 1.
+For the character-level models, we use the following hyperparameters:
+· For (Semeniuta et al., 2016), we use 0.25 dropout probability on the cell state, and per-step mask sampling
+· For Zoneout (Krueger et al., 2016), we use 0.5 and 0.05 for the cell and hidden state zoneout probabilities, respectively.
+· For the variaional LSTM (Gal & Ghahramani, 2016a) we use 0.25 recurrent dropout. · For the flipout and non-flipout LSTMs, we use Gaussian noise with  = 0.3.
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+E SUPPLEMENTARY PLOTS
+
+E.1 VARIANCE REDUCTION
+As discussed in Appendix B, training on multiple GPUs naturally induces independent noise for every sub-batch. Fig.3 below shows that flipout still has lower variance in such cases.
+
+variance
+
+10 2 10 3 10 4 10 5 10 6 10 7
+100
+
+Variance Estimation
+
+Conv1 Conv8
+101 batch102size
+
+103
+
+104
+
+Figure 3: When estimating the variance with mini-batch size 8192, running on 4 GPUs naturally induce 4 different independent noises for 4 sub-batches with size 2048, which also leads to a smaller variance. The same happens to mini-batch size 4096 where 2 GPUs are needed (2 independent noises are generated in this case). The plot shows that flipout still has a lower variance.
+
+0.04 0.03 0.02 0.01 0.00 0
+0.04
+0.03
+0.02
+0.01 0
+
+Train Error (FC)
+
+0.04 NFloipnFlip0.03
+0.02
+
+0.01
+
+2000 4000 6000 8000 100000.00 0
+
+Test Error (FC)
+
+0.04 NFloipnFlip0.03
+0.02
+
+0.01
+
+2000 400I0teration6s000 8000 100000.00 0
+
+Train Error (Conv)
+
+NonFlip Flip
+
+1000 2000 3000 4000 5000 6000
+Test Error (Conv)
+NonFlip Flip
+
+1000 2000 Iter3a0t0i0ons 4000 5000 6000
+
+Figure 4: Left: The training and test error plot of large batch (8192) training on a fully connected network (FC) with Bayes by Backprop algorithm. Fig.2a shows flipout has a faster training loss convergence. This plot shows that flipout has the same generalization property as non-flipout (the faster convergence doesn't result in overfitting). Right: The same plot as on the left, except the experiment ran on a LeNet-like network (Conv1).
+
+E.2 LARGE BATCH TRAINING WITH FLIPOUT
+Fig.4 is the plot of the training and test accuracy in the large batch training experiments in Section 4.3. The fully connected network and convolutional network we used below have exactly the same architecture as explained in Appendix B. We used an Adam optimizer with a 0.003 learning rate in both networks. We downscaled the KL term by a factor of 10 to achieve a higher accuracy.
+
+E.3 FLIPES V.S. CPUES
+Fig.5 shows that cpuES has an increasing computational cost as the model size increases, while FlipES scales better because it runs on GPU.
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+secs secs
+
+40 FlipES
+20 cpuES
+
+Update time (FC)
+
+0 0
+200 100
+
+250 500 750hidd1e00n0 un1i2t5s0 1500 1750 2000 Update time (Conv)
+FlipES cpuES
+
+0
+0.25 0.50 0.75 m1o.0d0 el sc1.a25le 1.50 1.75 2.00
+
+# Hidden Units 32 128 512 2048
+
+FlipES 0.12s 0.13s 0.18s 1.86s
+
+cpuES 0.51s 1.22s 5.10s 38.0s
+
+# Filters 0.25 0.75 1.0 1.5
+
+FlipES 2.3s 5.48s 7.12s 11.77s
+
+cpuES 16s 46s 67s 132s
+
+Figure 5: Per update time comparison between FlipES and 40-core cpuES (5,000 samples) w.r.t. the model size. In the fully connected network the model is scaled by the number of hidden units, and we scale the number of filters in the convolutional network (1.0 stands for 32 filters in the first convolutional layer and 64 filters for the second one).
+
+16
+
+

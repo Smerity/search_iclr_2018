@@ -1,0 +1,448 @@
+Under review as a conference paper at ICLR 2018
+
+NEURAL-GUIDED DEDUCTIVE SEARCH FOR REALTIME PROGRAM SYNTHESIS FROM EXAMPLES
+Anonymous authors Paper under double-blind review
+
+ABSTRACT
+Synthesizing user-intended programs from a small number of input-output examples is a challenging problem with several important applications like spreadsheet manipulation, data wrangling and code refactoring. Existing synthesis systems either completely rely on deductive logic techniques that are extensively handengineered or on purely statistical models that need massive amounts of data, and in general fail to provide real-time synthesis on challenging benchmarks. In this work, we propose Neural Guided Deductive Search (NGDS), a hybrid synthesis technique that combines the best of both symbolic logic techniques and statistical models. Thus, it produces programs that satisfy the provided specifications by construction and generalize well on unseen examples, similar to data-driven systems. Our technique effectively utilizes the deductive search framework to reduce the learning problem of the neural component to a simple supervised learning setup. Further, this allows us to both train on sparingly available real-world data and still leverage powerful recurrent neural network encoders. We demonstrate the effectiveness of our method by evaluating on real-world customer scenarios by synthesizing accurate programs with up to 10× speed-up compared to state-of-the-art systems.
+
+1 INTRODUCTION
+
+Automatic synthesis of programs that satisfy a given specification is a classical problem in AI (Waldinger & Lee, 1969), with extensive literature in both machine learning and programming languages communities. Recently, this area has gathered widespread interest, mainly spurred by the emergence of a sub-area, Programming by Examples (PBE) (Gulwani, 2011). A PBE system synthesizes programs that map a given set of example inputs to their specified example outputs. Such example-based specifications can be easily provided even by end users without programming skills. See Figure 1 for an example. A PBE system is usually evaluated on three key criteria: (a) correctness: whether the synthesized program satisfies the spec, (b) generalization from few examples: whether the program produces the desired outputs on unseen inputs, and (c) performance: synthesis time.
+
+Input
+Yann LeCunn Hugo Larochelle Tara Sainath
+Yoshua Bengio
+
+Output
+Y LeCunn H Larochelle T Sainath
+?
+
+Figure 1: An example input-output spec; the goal is to learn a
+program that maps the given inputs to the corresponding outputs
+and generalizes well to new inputs. Both programs below satisfy the spec: (i) Concat(1st letter of 1st word, 2nd word), (ii) Concat(4th-last letter of 1st word, 2nd word). However, program
+(i) clearly generalizes better: for instance, its output on "Yoshua
+Bengio" is "Y Bengio" while program (ii) produces "s Bengio".
+
+State-of-the-art PBE systems are either symbolic, based on enumerative or deductive search (Gulwani, 2011; Polozov & Gulwani, 2015) or statistical, based on data-driven learning to induce the most likely program for the spec (Gaunt et al., 2016; Balog et al., 2017; Devlin et al., 2017). Symbolic systems are designed to produce a correct program by construction using logical reasoning and domain-specific knowledge. They also produce the intended program with few input-output examples (often just 1). However, they require significant engineering effort and their underlying search processes struggle with real-time performance, which is critical for user-facing PBE scenarios.
+In contrast, statistical systems do not rely on specialized deductive algorithms, which makes their implementation and training easier. However, they lack in two critical aspects. First, they require
+
+1
+
+Under review as a conference paper at ICLR 2018
+a lot of training data and so are often trained using randomly generated tasks. As a result, induced programs can be fairly unnatural and fail to generalize to real-world tasks with a small number of examples. Second, purely statistical systems like RobustFill (Devlin et al., 2017) do not guarantee that the generated program satisfies the spec. Thus, solving the synthesis task requires generating multiple programs with a beam search and post-hoc filtering, which defeats real-time performance.
+Neural-Guided Deductive Search Motivated by shortcomings of both the above approaches, we propose Neural-Guided Deductive Search (NGDS), a hybrid synthesis technique that imbibes desirable aspects of both methods. While our method always produces programs that satisfy the provided input-output examples like deductive synthesis systems, it incorporates insights of a statistical system trained on real-world scenarios by producing programs that generalize well on unseen examples. The effectiveness of NGDS stems from three key observations below:
+The symbolic foundation of NGDS is deductive search. It is parameterized by an underlying domainspecific language (DSL) of target programs, specified as a context-free grammar. Learning proceeds by recursively applying production rules of the DSL to decompose the initial synthesis problem into smaller sub-problems and further applying the same search technique on them. Our key observation I is that most of the deduced sub-problems do not contribute to the final best program and can be eliminated a priori using a statistical model to obtain considerable time savings in the search process.
+Since program synthesis is a sequential process wherein a sequence of decisions (selections of DSL rules) collectively construct the final program, a reinforcement learning setup seems more natural. However, our key observation II is that deductive search is Markovian ­ it generates independent sub-problems at every level. This brings three benefits enabling a supervised learning formulation: (a) a dataset of search decisions at every level over a relatively small set of PBE tasks contains an exponential amount of information about the DSL promoting generalization, (b) such search traces can be generated and used for offline training, (c) we can learn separate models for different classes of sub-problems (e.g. DSL levels or rules), with relatively simpler supervised learning tasks.
+Finally, key observation III is that speeding up deductive search while retaining its correctness or generalization requires a close integration of symbolic and statistical approaches via an intelligent controller. It is based on the "branch & bound" technique from combinatorial optimization (Clausen, 1999). Thus, the resulting DSL-parameterized algorithm integrates (i) deductive search, (ii) a statistical model that predicts a priori, the generalization score of the best program from a branch, and (iii) a controller that selects sub-problems for further exploration based on the model's predictions.
+Evaluation We evaluate NGDS on the string transformation domain, building on top PROSE, a commercially successful deductive synthesis framework for PBE. It represents one of the most widespread and challenging applications of PBE and has shipped in multiple mass-market tools including Microsoft Excel and Azure ML Workbench.1 We train and validate our method on 375 scenarios obtained from real-world customer tasks (Gulwani, 2011; Devlin et al., 2017). NGDS produces intended programs on 68% of the scenarios despite using only one input-output example. In contrast, state-of-the-art neural synthesis techniques (Balog et al., 2017; Devlin et al., 2017) learn intended programs in only 16-33% of scenarios taking  10× more time. Moreover, NGDS matches the accuracy of baseline PROSE while providing a speed-up of up to 10× over challenging tasks.
+Contributions First, we present a branch-and-bound optimization based controller that exploits deep neural network based score predictions to select grammar rules efficiently (Section 3.2). Second, we propose a program synthesis algorithm that combines key traits of a symbolic and a statistical approach to retain desirable properties like correctness, robust generalization, and real-time performance (Section 3.3). Third, we evaluate NGDS against state-of-the-art baselines on real customer tasks and show significant gains (speed-up of up to 10×) on several critical cases (Section 4).
+2 BACKGROUND
+We provide a brief background on PBE and the PROSE framework, using established formalism from the programming languages community.
+1https://microsoft.github.io/prose/impact/
+2
+
+Under review as a conference paper at ICLR 2018
+Domain-Specific Language A program synthesis problem is defined over a domain-specific language (DSL). A DSL is a restricted programming language that is suitable for expressing tasks in a given domain, but small enough to restrict a search space for program synthesis. For instance, typical real-life DSLs with applications in textual data transformations (Gulwani, 2011) often include conditionals, limited forms of loops, and domain-specific operators such as string concatenation, regular expressions, and date/time formatting. DSLs for tree transformations such as code refactoring (Rolim et al., 2017) and data extraction (Le & Gulwani, 2014) include list/data-type processing operators such as Map and Filter, as well as domain-specific matching operators. Formally, a DSL L is specified as a context-free grammar, with each non-terminal symbol N defined by a set of productions. The right-hand side of each production is an application of some operator F (N1, . . . , Nk) to symbols of L. All symbols and operators are strongly typed. Figure 2 shows a subset of the Flash Fill DSL that we use as a running example in this paper.
+Inductive Program Synthesis The task of inductive program synthesis is characterized by a spec. A spec  is a set of m input-output constraints {i i}im=1, where:
+· , an input state is a mapping of free variables of the desired program P to some correspondingly typed values. At the top level of L, a program (and its expected input state) has only one free variable ­ the input variable of the DSL (e.g., inputs in Figure 2). Additional local variables are introduced inside L with a let construct.
+·  is an output constraint on the execution result of the desired program P (i). At the top level of L, when provided by the user,  is usually the output example ­ precisely the expected result of P (i). However, other intermediate constraints arise during the synthesis process. For instance,  may be a disjunction of multiple allowed outputs.
+The overall goal of program synthesis is thus: given a spec , find a program P in the underlying DSL L that satisfies , i.e., its outputs P (i) satisfy all the corresponding constraints i.
+Example 1. Consider the task of formatting a phone number, characterized by the spec  = {inputs : ["(612) 8729128"]} "612-872-9128". It has a single input-output example, with an input state  containing a single variable inputs and its value which is a list with a single input string. The output constraint is simply the desired program result.
+The program the user is most likely looking for is the one that extracts (a) the part of the input enclosed in the first pair of parentheses, (b) the 7th to 4th characters from the end, and (c) the last 4 characters, and then concatenates all three parts using hyphens. In our DSL, this corresponds to:
+Concat SubStr0(RegexPosition(x, "(",  , 0), RegexPosition(x, , ")" , 0)), ConstStr("-"), SubStr0(AbsolutePosition(x, -8), AbsolutePosition(x, -5)), ConstStr("-"),
+SubStr0(AbsolutePosition(x, -5), AbsolutePosition(x, -1))
+where  is an empty regex, SubStr0(pos1, pos2) is an abbreviation for "let x = std.Kth(inputs, 0) in Substring(x, pos1, pos2 )", and · is an abbreviation for std.Pair.
+However, many other programs in the DSL also satisfy . For instance, all occurrences of "8" in the output can be produced via a subprogram that simply extracts the last character. Such a program overfits to  and is bound to fail for other inputs where the last character and the 4th one differ.
+As Example 1 shows, typical real-life problems are severely underspecified. A DSL like FlashFill may contain up to 1020 programs that satisfy a given spec of 1-3 input-output examples (Polozov & Gulwani, 2015). Therefore, the main challenge lies in finding a program that not only satisfies the provided input-output examples but also generalizes to unseen inputs. Thus, the synthesis process usually interleaves search and ranking: the search phase finds a set of spec-satisfying programs in the DSL, from which the ranking phase selects top programs ordered using a domain-specific ranking function h : L ×   R where  is the set of all input states. The ranking function takes as input a candidate program P  L and a set of input states    (usually  = inputs in the given spec + any available unlabeled inputs), and produces a score for P 's generalization.
+The implementation of h expresses a subtle balance between program generality, complexity, and behavior on available inputs. For instance, in FlashFill h penalizes overly specific regexes, prefers programs that produce fewer empty outputs, and prioritizes lower Kolmogorov complexity, among other features. In modern PBE systems like PROSE, h is usually learned in a data-driven manner
+3
+
+Under review as a conference paper at ICLR 2018
+
+// Nonterminals
+
+@start string transf orm := atom | Concat(atom, transf orm);
+
+string atom := ConstStr(s)
+
+| let string x = std.Kth(inputs, k) in Substring(x, pp);
+
+Tuple<int, int> pp := std.Pair(pos, pos) | RegexOccurrence(x, r, k);
+
+int pos := AbsolutePosition(x, k) | RegexPosition(x, std.Pair(r, r), k);
+
+// Terminals
+
+@input string[] inputs;
+
+string s;
+
+int k;
+
+Regex r;
+
+Figure 2: A subset of the FlashFill DSL (Gulwani, 2011), used as a running example in this paper.
+Every program takes as input a list of strings inputs, and returns an output string, a concatenation
+of atoms. Each atom is either a constant or a substring of one of the inputs (x), extracted using some position logic. The RegexOccurrence position logic finds kth occurrence of a regex r in x and
+returns its boundaries. Alternatively, start and end positions can be selected independently either as absolute indices in x from left or right (AbsolutePosition) or as the kth occurrence of a pair of regexes
+surrounding the position (RegexPosition). See Gulwani (2011) for an in-depth DSL description.
+
+from customer tasks (Singh & Gulwani, 2015; Ellis & Gulwani, 2017). While designing and learning such a ranking is an interesting problem in itself, in this work we assume a black-box access to h. Finally, the problem of inductive program synthesis can be summarized as follows:
+Problem 1. Given a DSL L, a ranking function h, a spec  = {i i}mi=1, optionally a set of unlabeled inputs u, and a target number of programs K, let  = u  {i}im=1. The goal of inductive program synthesis is to find a program set S = {P1, . . . , PK}  L such that (a) every program in S satisfies , and (b) the programs in S generalize best: h(Pi, )  h(P, ) for any other P  L that satisfies .
+Search Strategy Deductive search strategy for program synthesis, employed by PROSE explores the grammar of L top-down ­ iteratively unrolling the productions into partial programs starting from the root symbol. Following the divide-and-conquer paradigm, at each step it reduces its synthesis problem to smaller subproblems defined over the parameters of the current production. Formally, given a spec  and a symbol N , PROSE computes the set Learn(N, ) of top programs w.r.t. h using two guiding principles:
+1. If N is defined through n productions N := F1(. . .) | . . . | Fn(. . .), PROSE finds a -satisfying program set for every Fi, and unites the results, i.e., Learn(N, ) = i Learn(Fi(. . .), ).
+2. For a given production N := F (N1, . . . , Nk), PROSE spawns off k smaller synthesis problems Learn(Nj, j), 1  j  k wherein PROSE deduces necessary and sufficient specs j for each Nj such that every program of type F (P1, . . . , Pk), where Pj  Learn(Nj, j), satisfies . The deduction logic (called a witness function) is domain-specific for each operator F . PROSE then again recursively solves each subproblem and unites a cross-product of the results.
+Example 2. Consider a spec  = {"Yann" "Y.L"} on a transf orm program. Via the first production transf orm := atom, the only -satisfying program is ConstStr("Y.L"). The second production on the same level is Concat(atom, transf orm). A necessary & sufficient spec on the atom sub-program is that it should produce some prefix of the output string. Thus, the witness function for the Concat operator produces a disjunctive spec a = {"Yann" "Y"  "Y."}. Each of these disjuncts, in turn, induces a corresponding necessary and sufficient suffix spec on the second parameter: t1 = {"Yann" ".L"}, and t2 = {"Yann" "L"}, respectively. The disjuncts in a will be recursively satisfied by different program sets: "Y." can only be produced via an atom path with a ConstStr program, whereas "Y" can also be extracted from the input using many Substring logics (their generalization capabilities vary). Appendix A shows the resulting search DAG.
+Notice that the above mentioned principles create logical non-determinism due to which we might need to explore multiple alternatives in a search tree. As such non-determinism arises at every level of the DSL with potentially any operator, the search tree (and the resulting search process) is exponential in size. While all the branches of the tree by construction produce programs that satisfy the given spec, most of the branches do not contribute to the overall top-ranked generalizable program. During deductive search, PROSE has limited information about the programs potentially produced from each branch, and cannot estimate their quality, thus exploring the entire tree unnecessarily. Our main contribution is a neural-guided search algorithm that predicts the best program scores from each branch, and allows PROSE to omit branches that are unlikely to produce the desired program a priori.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+3 SYNTHESIS ALGORITHM
+
+Consider an arbitrary branching moment in the top-down search strategy of PROSE. For example, let N be a nonterminal symbol in L, defined through a set of productions N := F1(. . .) | . . . | Fn(. . .), and let  be a spec on N , constructed earlier during the recursive descent over L. A conservative
+way to select the top k programs rooted at N (as defined by the ranking function h), i.e., to compute Learn(N, ), is to learn the top k programs of kind Fi(. . .) for all i  [k] and then select the top k programs overall from the union of program sets learned for each production. Naturally, exploring all
+the branches for each nonterminal in the search tree is computationally expensive.
+
+In this work, we propose a data-driven method to select an appropriate production rule N := Fi(N1, . . . , Nk) that would most likely lead to a top-ranked program. To this end, we use the current spec  to determine the "optimal" rule. Now, it might seem unintuitive that even without exploring a production rule and finding the best program in the corresponding program set, we can a priori determine optimality of that rule. However, we argue that by understanding  and its relationship with the ranking function h, we can predict the intended branch in many real-life scenarios.
+
+Example 3. Consider a spec  = {"alice"
+
+"alice@iclr.org", "bob"
+
+"bob@iclr.org"}. While learning a program in L given by Figure 2 that satisfies , it is clear
+
+right at the beginning of the search procedure that the rule transf orm := atom does not apply. This
+
+is because any programs derived from transf orm := atom can either extract a substring from the
+
+input or return a constant string, both of which fail to produce the desired output. Hence, we should
+
+only consider transf orm := Concat(. . .), thus significantly reducing the search space.
+
+Similarly, consider another spec  = {"alice smith" "alice", "bob jones" "bob"}. In this case, the output appears to be a substring of input, thus selecting transf orm := atom at the beginning of the search procedure is a better option than transf orm := Concat(. . .).
+
+However, many such decisions are more subtle and depend on the ranking function h itself. For example, consider a spec  = {"alice liddell" "al", "bob ong" "bo"}. Now, both transf orm := atom and transf orm := Concat(. . .) may lead to viable programs because the output can be constructed using the first two letters of the input (i.e. a substring atom) or by concatenating the first letters of each word. Hence, the branch that produces the best program is ultimately determined by the ranking function h since both branches generate valid programs.
+
+Example 3 shows that to design a data-driven search strategy for branch selection, we need to learn the subtle relationship between , h, and the candidate branch. Below, we provide one such model.
+
+3.1 PREDICTING THE GENERALIZATION SCORE
+As mentioned above, our goal is to predict one or more production rules that for a given spec  will lead to a top-ranked program (as ranked a posteriori by h). Formally, given black-box access to h, we want to learn a function f such that,
+f (, )  max h(P, ),
+P  S(, )
+where  is a production rule in L, and S(, ) is a program set of all DSL programs derived from the rule  that satisfy . In other words, we want to predict the score of the top-ranked -satisfying program that is synthesized by unrolling the rule  . We assume that the symbolic search of PROSE handles the construction of S(, ) and ensures that programs in it satisfy  by construction. The goal of f is to optimize the score of a program derived from  assuming this program is valid. If no program derived from  can satisfy , f should return -. Note that, drawing upon observations mentioned in Section 1, we have cast the production selection problem as a supervised learning problem, thus simplifying the learning task as opposed to end-to-end reinforcement learning solution.
+We have evaluated two models for learning f . The loss function for the prediction is given by:
+L(f ; , ) = f (, ) - max h(P, ) 2.
+P  S(, )
+Figure 3 shows a common structure of both models we have evaluated. Both are based on a standard multi-layer LSTM architecture (Hochreiter & Schmidhuber, 1997) and involve (a) embedding the given spec , (b) encoding the given production rule  , and (c) a feed-forward network to output a score f (, ). One model attends over input when it encodes the output, whereas another does not.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+Predicted score
+
+Production rule  Embedding
+
+Input state  Char Embedding LSTM for input encoding
+
+Output example(s)  Char Embedding
+LSTM for output encoding
+
+Two FC layers
+
+Figure 3: LSTM-based model for predicting the score of a candidate production for a given spec .
+
+function THRESHOLDBASED(, h, k, s1, . . . , sn) 1: Result set S  [] 2: i  argmaxi si 3: for all 1  i  n do 4: if |si - si |   then
+// Recursive search 5: S += LEARN(Fi, , k)
+6: return the top k programs of S w.r.t. h
+
+function BNBBASED(, h, k, s1, . . . , sn) 1: Result set S  []; Program target k  k
+2: Reorder Fi in the descending order of si 3: for all 1  i  n do 4: Si  LEARN(Fi, , k ) // Recursive search 5: j  BINARYSEARCH(si+1, Map(h, Si)) 6: S = Si  Si[0..j]; k  k - j 7: if k  0 then break 8: return S
+
+Figure 4: The controllers for guiding the search process to construct a most generalizable -satisfying program set S of size k given the f -predicted best scores s1, . . . , sn of the productions F1, . . . , Fn.
+
+3.2 CONTROLLER FOR BRANCH SELECTION
+A score model f alone is insufficient to perfectly predict the branches that should be explored at every level. Consider again a branching decision moment N := F1(. . .) | . . . | Fn(. . .) in a search process for top k programs satisfying a spec . One naïve approach to using the predictions of f is to always follow the highest-scored production rule argmaxi f (Fi, ). However, this means that any single incorrect decision on the path from the DSL root to the desired program will eliminate that program from the learned program set. If our search algorithm fails to produce the desired program by committing to a suboptimal branch anytime during the search process, then the user may never discover that such a program exists unless they supply additional input-output example.
+Thus, a branch selection strategy based on the predictions of f must balance a trade-off of performance and generalization. Selecting too few branches (a single best branch in the extreme case) risks committing to an incorrect path early in the search process and producing a suboptimal program or no program at all. Selecting too many branches (all n branches in the extreme case) is no different from baseline PROSE and fails to exploit the predictions of f to improve its performance.
+Formally, a controller for branch selection at a symbol N := F1(. . .) | . . . | Fn(. . .) targeting k best programs must (a) predict the expected score of the best program from each program set: si = f (Fi, )  1  i  n, and (b) use the predicted scores si to narrow down the set of productions F1, . . . , Fn to explore and to obtain the overall result by selecting a subset of generated programs. In this work, we propose and evaluate two controllers. Their pseudocode is shown in Figure 4.
+Threshold-based: Fix a score threshold , and explore those branches whose predicted score differs by at most  from the maximum predicted score. This is a simple extension of the naïve "argmax" controller discussed earlier that also explores any branches that are predicted "approximately as good as the best one". When  = 0, it reduces to the "argmax" one.
+Branch & Bound: This controller is based on the "branch & bound" technique in combinatorial optimization (Clausen, 1999). Assume the branches Fi are ordered in the descending order of their respective predicted scores si. After recursive learning produces its program set Si, the controller proceeds to the next branch only if si+1 exceeds the score of the worst program in Si. Moreover, it reduces the target number of programs to be learned, using si+1 as a lower bound on the scores of the programs in Si. That is, rather than relying blindly on the predicted scores, the controller guides the remaining search process by accounting for the actual synthesized programs as well.
+
+3.3 NEURAL-GUIDED DEDUCTIVE SEARCH
+We now combine the above components to present our unified algorithm for program synthesis. It builds upon the deductive search of the PROSE system, which uses symbolic PL insights in the form of witness functions to construct and narrow down the search space, and a ranking function h to pick
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Given: DSL L, ranking function h, controller C from Figure 4 (THRESHOLDBASED or BNBBASED), symbolic search algorithm LEARN(Production rule  , spec , target k) as in PROSE (Polozov & Gulwani, 2015, Figure 7) with all recursive calls to LEARN replaced with LEARNNGDS
+function LEARNNGDS(Symbol N := F1(. . .) | . . . | Fn(. . .), spec , target number of programs k) 1: if n = 1 then return LEARN(F1, , k)
+2: Pick a score model f based on depth(N, L) 3: s1, . . . , sn  f (F1, ), . . . , f (Fn, ) 4: return C(, h, k, s1, . . . , sn)
+
+Figure 5: Neural-guided deductive search over L, parameterized with a branch selection controller C.
+
+Metric
+Accuracy (% of 73) Speed-up (× PROSE)
+
+PROSE
+67.12 1.00
+
+DC1
+32.88 1.51
+
+DC2
+39.73 1.07
+
+DC3
+42.47 1.19
+
+RF1
+16.44 0.26
+
+RF2
+26.03 0.27
+
+RF3
+35.62 0.31
+
+NGDS
+68.49 1.67
+
+Table 1: Accuracy and average speed-up of NGDS vs. baseline methods. Accuracies are computed on a test set of 73 tasks. Speed-up of a method is the geometric mean of it's per-task speed-up (ratio of synthesis time of PROSE and of the method) when restricted to a subset of tasks with PROSE's synthesis time is  0.5 sec.
+
+the most generalizable program from the found set of spec-satisfying ones. However, it significantly speeds up the search process by guiding it a priori at each branching decision using the learned score model f and a branch selection controller, outlined in Sections 3.1 and 3.2. The resulting neural-guided deductive search (NGDS) keeps the symbolic insights that construct the search tree ensuring correctness of the found programs, but explores only those branches of this tree that are likely to produce the user-intended generalizable program, thus eliminating unproductive search time.
+A key idea in NGDS is that the score prediction model f does not have to be the same for all decisions in the search process. It is possible to train separate models for different DSL levels, symbols, or even productions. This allows the model to use different features of the input-output spec for evaluating the fitness of different productions, and also leads to much simpler supervised learning problems.
+Figure 5 shows the pseudocode of NGDS. It builds upon the deductive search of PROSE, but augments every branching decision on a symbol with some branch selection controller from Section 3.2. We present a comprehensive evaluation of different strategies in Section 4.
+
+4 EVALUATION
+In this section, we evaluate our NGDS algorithm over the string manipulation domain with a DSL given by Figure 2; see Figure 1 for an example task. We evaluate NGDS, its ablations, and baseline techniques on two key metrics: (a) generalization accuracy on unseen inputs, (b) synthesis time.
+Dataset. We use a dataset of 375 tasks collected from real-world customer string manipulation problems, split into 65% training , 15% validation, and 20% test data. Some of the common applications found in our dataset include date/time formatting, manipulating addresses, modifying names, automatically generating email IDs, etc. Each task contains about 10 inputs, of which only one is provided as the spec to the synthesis system, mimicking industrial applications. The remaining unseen examples are used to evaluate generalization performance of the synthesized programs.
+Baselines. We compare our method against two state-of-the-art neural synthesis algorithms: RobustFill (Devlin et al., 2017) and DeepCoder (Balog et al., 2017). For RobustFill, we use the best-performing Attention-C model and use their recommended DP-Beam Search with a beam size of 100 as it seems to perform the best; Table 3 in Appendix B presents results with different beam sizes. As in the original work, we select the top-1 program ranked according to the generated log-likelihood. DeepCoder is a generic framework that allows their neural predictions to be combined with any program synthesis method. So, for fair comparison, we combine DeepCoder's predictions with PROSE. We train DeepCoder model to predict a distribution over L's operators and as proposed, use it to guide PROSE synthesis. In addition, since RobustFill and DeepCoder are not optimized for generalization, we include their variants trained with 2 or 3 examples (denoted RFm and DCm) for fairness, even though m = 1 example is the most important scenario in real-life industrial usage.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Method
+PROSE NGDS(T1, Thr) NGDS(T1, BB) NGDS(T1, BB0.2) NGDS(T1 + P P , Thr) NGDS(T1 + P P , BB) NGDS(T1 + P P , BB0.2) NGDS(T1 + P OS, Thr) NGDS(T1 + P OS, BB) NGDS(T1 + P OS, BB0.2)
+
+Validation
+
+Accuracy Speed-up
+
+70.21 59.57 63.83 61.70 59.57 61.70 61.70 61.70 63.83 63.83
+
+1 1.15 1.58 1.03 0.76 1.05 0.72 1.19 1.13 1.19
+
+Test
+
+Accuracy Speed-up
+
+67.12 67.12 68.49 67.12 67.12 72.60 67.12 67.12 68.49 67.12
+
+1 1.27 1.22 1.22 0.97 0.89 0.86 1.93 1.67 1.73
+
+% of branches
+100.00 62.72 51.78 63.16 56.41 50.22 56.43 55.63 50.44 55.73
+
+Table 2: Accuracies, mean speed-ups, and % of branches taken for different ablations of NGDS.
+
+Ablations. As mentioned in Section 3, our novel usage of score predictors to guide the search enables us to have multiple prediction models and controllers at various stages of the synthesis process. Here we investigate ablations of our approach with models that specialize in predictions for individual levels in the search process. The model T1 is trained for symbol transf orm (Figure 2) when expanded in the first level. Similarly, P P , P OS refer to models trained for the pp and pos symbol, respectively. We also evaluate three controllers: threshold-based (Thr) and branch-and-bound (BB) controllers given in Figure 4, and a combination of them ­ branch-and-bound with a 0.2 threshold predecessor (BB0.2). In Tables 1 and 2 we denote different model combinations as NGDS(f , C) where f is a symbol-based model and C is a controller. The final algorithm selection depends on its accuracy-performance trade-off. In Table 2, we use NGDS(T1 + P OS, BB), the best performing algorithm on the test set, although NGDS(T1, BB) performs slightly better on the validation set.
+Evaluation Metrics. Generalization accuracy is the percentage of test tasks for which the generated program satisfies all unseen inputs in the task. Synthesis time is measured as the wall-clock time taken by a synthesis method to find the correct program, median over 5 runs. We run all the methods on the same machine with 2.3 GHz Intel Xeon processor, 64GB of RAM, and Windows Server 2016. The models are trained with CNTK (Seide & Agarwal, 2016) over 100 (P OS, P P ) or 600 epochs.
+Table 1 presents generalization accuracy as well as synthesis time speed-up of various methods w.r.t. PROSE. As we strive to provide real-time synthesis, we only compare the times for tasks which require PROSE more than 0.5 sec. Note that, with one example, NGDS and PROSE are significantly more accurate than RobustFill and DeepCoder. This is natural as those methods are not trained to optimize generalization, but it also highlights advantage of a close integration with a symbolic system (PROSE) that incorporates deep domain knowledge. Moreover, on an average, our method saves nearly 50% of synthesis time over PROSE.
+Table 2 presents speed-up obtained by variations of our models and controllers. In addition to generalization accuracy and synthesis speed-up, we also show a fraction of branches that were selected for exploration by the controller. Our method obtains impressive speed-up of > 1.5× in 16 cases, with more than 10× speed-up in 5 test cases. One such test case where we obtain 12× speedup is a simple extraction case which is fairly common in Web mining: {"alpha,beta,charlie,delta" "alpha"}. For such cases, our model determine transf orm := atom to be the correct branch (that leads to the final Substring based program) and hence saves time required to explore the entire Concat operator which is expensive. Another interesting test case where we observe 9.8× speed-up is: {"457 124th St S, Seattle, WA 98111" "Seattle-WA"}. This test case involves learning a Concat operator initially followed by Substring and RegexPosition operator. Appendix C includes a comprehensive table of NGDS performance on all the validation and test tasks.
+All the models in Table 2 run without attention. As measured by score flip accuracies (i.e. % of correct orderings of branch scores on the same level), attention-based models perform best, achieving 99.57/90.4/96.4% accuracy on train/validation/test, respectively (as compared to 96.09/91.24/91.12% for non-attention models). However, an attention-based model is significantly more computationally expensive at prediction time. Evaluating it dominates the synthesis time and eliminates any potential speed-ups. Thus, we decided to forgo attention in initial NGDS and investigate model compression/binarization in future work.
+8
+
+Under review as a conference paper at ICLR 2018
+5 RELATED WORK
+Neural Program Induction systems synthesize a program by training a new neural network model to map the example inputs to example outputs (Graves et al., 2014; Reed & De Freitas, 2015; Zaremba et al., 2016). Examples include Neural Turing Machines (Graves et al., 2014) that can learn simple programs like copying/sorting, work of Kaiser & Sutskever (2015) that can perform more complex computations like binary multiplications, and more recent work of Cai et al. (2017) that can incorporate recursions. While we are interested in ultimately producing the right output, all these models need to be re-trained for a given problem type, thus making them unsuitable for real-life synthesis of different programs with few examples.
+Neural Program Synthesis systems synthesize a program in a given L with a pre-learned neural network. Seminal works of Bosnjak et al. (2017) and Gaunt et al. (2016) proposed first producing a high-level sketch of the program using procedural knowledge, and then synthesizing the program by combining the sketch with a neural or enumerative synthesis engine. In contrast, R3NN (Parisotto et al., 2016) and RobustFill (Devlin et al., 2017) systems synthesize the program end-to-end using a neural network; Devlin et al. (2017) show that RobustFill in fact outperforms R3NN. However, RobustFill does not guarantee generation of spec-satisfying programs and often requires more than one example to find the intended program. In fact, our empirical evaluation (Section 4) shows that our hybrid synthesis approach significantly outperforms the purely statistical approach of RobustFill.
+DeepCoder (Balog et al., 2017) is also a hybrid synthesis system that guides enumerative program synthesis by prioritizing DSL operators according to a spec-driven likelihood distribution on the same. However, NGDS differs from DeepCoder in two important ways: (a) it guides the search process at each recursive level in a top-down goal-oriented enumeration and thus reshapes the search tree, (b) it is trained on real-world data instead of random programs, thus achieving better generalization.
+Symbolic Program Synthesis has been studied extensively in the PL community (Gulwani et al., 2017; Alur et al., 2013), dating back as far as 1960s (Waldinger & Lee, 1969). Most approaches employ either bottom-up enumerative search (Udupa et al., 2013) or constraint solving (Torlak & Bodik, 2013), and thus scale poorly to real-world industrial applications (e.g. data wrangling applications). In this work, we build upon deductive search, first studied for synthesis by Manna & Waldinger (1971). Gulwani (2011) and later Polozov & Gulwani (2015) used it to build PROSE, a commercially successful domain-agnostic system for PBE. While its deductive search guarantees program correctness and also good generalization via an accurate ranking function, it still takes several seconds on complex tasks. NGDS integrates neural-driven predictions at each level of deductive search to alleviate this drawback. Work of Loos et al. (2017) represents the closest work with a similar technique but their work is applied to an automated theorem prover, and hence need not care about generalization. In contrast, NGDS guides the search toward generalizable programs while relying on the underlying symbolic engine to generate correct programs.
+6 CONCLUSION
+We studied the problem of real-time program synthesis with a small number of input-output examples. For this problem, we proposed a neural-guided system that builds upon PROSE, a state-of-the-art symbolic logic based system. Our system avoids top-down enumerative grammar exploration required by PROSE thus providing impressive synthesis performance while still retaining key advantages of a deductive system. That is, compared to existing neural synthesis techniques, our system enjoys following advantages: a) correctness: programs generated by our system are guaranteed to satisfy the given input-output specification, b) generalization: our system learns the user-intended program with just one input-output example in around 60% test cases while existing neural systems learn such a program in only 16% test cases, c) synthesis time: our system can solve most of the test cases in less than 0.1 sec and provide impressive performance gains over both neural as well symbolic systems.
+The key take-home message of this work is that a deep integration of a symbolic deductive inference based system with statistical techniques leads to best of both the worlds where we can avoid extensive engineering effort required by symbolic systems without compromising the quality of generated programs, and at the same time provide significant performance (when measured as synthesis time) gains. For future work, exploring better learning models for production rule selection and applying our technique to diverse and more powerful grammars should be important research directions.
+9
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Rajeev Alur, Rastislav Bodík, Garvit Juniwal, Milo M. K. Martin, Mukund Raghothaman, Sanjit A. Seshia, Rishabh Singh, Armando Solar-Lezama, Emina Torlak, and Abhishek Udupa. Syntaxguided synthesis. In Formal Methods in Computer-Aided Design (FMCAD), pp. 1­8, 2013.
+Matej Balog, Alexander L Gaunt, Marc Brockschmidt, Sebastian Nowozin, and Daniel Tarlow. DeepCoder: Learning to write programs. In International Conference on Learning Representations (ICLR), 2017.
+Matko Bosnjak, Tim Rocktäschel, Jason Naradowsky, and Sebastian Riedel. Programming with a differentiable Forth interpreter. In Proceedings of the 34th International Conference on Machine Learning, ICML 2017, Sydney, NSW, Australia, 6-11 August 2017, pp. 547­556, 2017.
+Jonathon Cai, Richard Shin, and Dawn Song. Making neural programming architectures generalize via recursion. In International Conference on Learning Representations (ICLR), 2017.
+Jens Clausen. Branch and bound algorithms ­ principles and examples. Department of Computer Science, University of Copenhagen, 1999.
+Jacob Devlin, Jonathan Uesato, Surya Bhupatiraju, Rishabh Singh, Abdel-rahman Mohamed, and Pushmeet Kohli. RobustFill: Neural program learning under noisy I/O. In International Conference on Machine Learning (ICML), 2017.
+Kevin Ellis and Sumit Gulwani. Learning to learn programs from examples: Going beyond program structure. In International Joint Conference on Artifical Intelligence (IJCAI), 2017.
+Alexander L Gaunt, Marc Brockschmidt, Rishabh Singh, Nate Kushman, Pushmeet Kohli, Jonathan Taylor, and Daniel Tarlow. TerpreT: A probabilistic programming language for program induction. CoRR, abs/1608.04428, 2016. URL http://arxiv.org/abs/1608.04428.
+Alex Graves, Greg Wayne, and Ivo Danihelka. Neural Turing machines. CoRR, abs/1410.5401, 2014. URL http://arxiv.org/abs/1410.5401.
+Sumit Gulwani. Automating string processing in spreadsheets using input-output examples. In Principles of Programming Languages (POPL), volume 46, pp. 317­330, 2011.
+Sumit Gulwani, Oleksandr Polozov, and Rishabh Singh. Program synthesis. Foundations and Trends in Programming Languages, 4(1-2):1­119, 2017. doi: 10.1561/2500000010. URL https: //doi.org/10.1561/2500000010.
+Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural Comput., 9(8):1735­ 1780, November 1997. ISSN 0899-7667. doi: 10.1162/neco.1997.9.8.1735. URL http://dx. doi.org/10.1162/neco.1997.9.8.1735.
+Lukasz Kaiser and Ilya Sutskever. Neural GPUs learn algorithms. CoRR, abs/1511.08228, 2015. URL http://arxiv.org/abs/1511.08228.
+Vu Le and Sumit Gulwani. FlashExtract: A framework for data extraction by examples. In ACM SIGPLAN Notices, volume 49, pp. 542­553. ACM, 2014.
+Sarah M. Loos, Geoffrey Irving, Christian Szegedy, and Cezary Kaliszyk. Deep network guided proof search. In LPAR-21, 21st International Conference on Logic for Programming, Artificial Intelligence and Reasoning, Maun, Botswana, 7-12th May 2017, pp. 85­105, 2017.
+Zohar Manna and Richard J. Waldinger. Toward automatic program synthesis. Communications of the ACM, 14(3):151­165, 1971.
+Emilio Parisotto, Abdel-rahman Mohamed, Rishabh Singh, Lihong Li, Dengyong Zhou, and Pushmeet Kohli. Neuro-symbolic program synthesis. In International Conference on Learning Representations (ICLR), 2016.
+Oleksandr Polozov and Sumit Gulwani. FlashMeta: A framework for inductive program synthesis. In International Conference on Object-Oriented Programming, Systems, Languages, and Applications (OOPSLA), pp. 107­126, 2015.
+10
+
+Under review as a conference paper at ICLR 2018
+Scott Reed and Nando De Freitas. Neural programmer-interpreters. CoRR, abs/1511.06279, 2015. URL http://arxiv.org/abs/1511.06279.
+Reudismam Rolim, Gustavo Soares, Loris D'Antoni, Oleksandr Polozov, Sumit Gulwani, Rohit Gheyi, Ryo Suzuki, and Björn Hartmann. Learning syntactic program transformations from examples. In International Conference on Software Engineering (ICSE), pp. 404­415, 2017.
+Frank Seide and Amit Agarwal. CNTK: Microsoft's open-source deep-learning toolkit. In International Conference on Knowledge Discovery and Data Mining (KDD), pp. 2135­2135, 2016.
+Rishabh Singh and Sumit Gulwani. Predicting a correct program in programming by example. In Computer-Aided Verification (CAV), 2015.
+Emina Torlak and Rastislav Bodik. Growing solver-aided languages with Rosette. In Proceedings of the 2013 ACM international symposium on New ideas, new paradigms, and reflections on programming & software, pp. 135­152. ACM, 2013.
+Abhishek Udupa, Arun Raghavan, Jyotirmoy V. Deshmukh, Sela Mador-Haim, Milo M.K. Martin, and Rajeev Alur. TRANSIT: Specifying protocols with concolic snippets. In Programming Languages Design and Implementation (PLDI), pp. 287­296, 2013.
+Richard J Waldinger and Richard CT Lee. PROW: A step toward automatic program writing. In International Joint Conference on Artificial Intelligence (IJCAI), pp. 241­252, 1969.
+Wojciech Zaremba, Tomas Mikolov, Armand Joulin, and Rob Fergus. Learning simple algorithms from examples. In International Conference on Machine Learning (ICML), 2016.
+11
+
+Under review as a conference paper at ICLR 2018
+
+A ILLUSTRATION OF A DEDUCTIVE SYNTHESIS SEARCH TREE
+
+transf orm Concat(. . .)
+
+"Y.L"
+
+"Y.L"
+
+atom "Y"  "Y."
+
+ConstStr(s) "Y"  "Y."
+
+atom "Y.L"
+
+transf orm Concat(. . .) transf orm
+
+".L"
+
+".L"
+
+"L"
+
+let x = . . . "Y"  "Y."
+
+...
+
+Substring(. . .) "Y"
+
+ConstStr(s) . . . atom
+
+"Y.L"
+
+".L"
+
+. . . atom "."
+
+...
+
+atom "L"
+
+...
+
+pp (0, 1)
+
+...
+
+Figure 6: A portion of the search DAG from Example 2. Only the output parts of the respective specs are shown in each node, the common input state has a single string "Yann". Dashed arrows show recursive Learn calls on a corresponding DSL symbol.
+
+B ROBUSTFILL PERFORMANCE WITH DIFFERENT BEAM SIZES
+For our experiments, we implemented RobustFill with the beam size of 100, as it presented a good trade-off between generalization accuracy and performance hit. The following table shows a detailed comparison of RobustFill's generalization accuracy and performance for different beam sizes and numbers of training examples.
+Trained with m = 1 examples Beam size Accuracy (%) Speed-up
+10 12.4 0.45 100 16.4 0.26 1000 17.8 0.04
+Trained with m = 2 examples Beam size Accuracy (%) Speed-up
+10 19.2 0.47 100 26.0 0.27 1000 28.7 0.04
+Trained with m = 3 examples Beam size Accuracy (%) Speed-up
+10 30.1 0.53 100 35.6 0.31 1000 39.7 0.05
+Table 3: Generalization accuracy and performance of RobustFill for different beam sizes and numbers of training examples.
+
+C PERFORMANCE OF BEST NGDS MODEL ON ALL NON-TRAINING TASKS
+
+Task #
+1 2 3 4 5
+
+PROSE Time (sec)
+6.665234 7.6010733 3.0391034 2.1165486 3.0316721
+
+NGDS Time (sec)
+0.2468262 0.3107196 0.1709979 0.1611646 0.2408833
+
+Speed-up
+27.00375406 24.46280602 17.77275276
+13.1328381 12.58564666
+
+PROSE Correct?
+    
+
+NGDS Correct?
+    
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+Task #
+6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68
+
+PROSE Time (sec)
+2.28298 1.5624891 1.1687841 0.8475303 3.0032564 1.8684116 1.1505939 1.068263 2.9467418 0.8672071 6.0043011 2.3343791 0.9959218 2.4120103 1.1538661 0.9622929 0.4285604 0.4183223 0.4243661 0.3626161 0.5431827 0.3855433 0.3401477 0.3414629 0.3462029 0.7252624 0.2497723 0.2709963 0.2945639 0.4490832 0.2774191 0.2381335 0.2233911 0.3454594 0.2181703 0.5006552 0.4859534 0.2171637 0.1950921 0.3185586 0.2079995 0.205652 0.6579789 0.2601689 0.4012993 0.3981185 1.2224533 0.2310051 0.2174055 0.1486939 0.2385918 0.4064375 0.5368683 0.1640937 0.1742123 0.2101397 0.2446501 0.2997031 0.6307356 0.146774 0.1357812 0.1072814 0.2064185
+
+NGDS Time (sec)
+0.1987497 0.1680939 0.1307619 0.1008719 0.4552615 0.2864386 0.2022204 0.1896355 0.5294719 0.1714881 1.2847182 0.5464594 0.2590434 0.6640537 0.3806013 0.3258476 0.1665129 0.1877976 0.1958337 0.1851361 0.2904968 0.2148934
+0.202928 0.2178535 0.2228252 0.4744693 0.1694526 0.1949397
+0.212407 0.3332063 0.2095186 0.1802633 0.1732212 0.2700771 0.1729602 0.4033854 0.3931924 0.1787334 0.1629443 0.2701302
+0.181912 0.1818834
+0.584358 0.2352589 0.3643887 0.3681659 1.1410092 0.2339141 0.2209318 0.1662778 0.2715574 0.4649153 0.6258785 0.1917972 0.2045062 0.2514578 0.2981507 0.3675376 0.7807711 0.1820553 0.1762617 0.1428591 0.2767844
+
+Speed-up
+11.48670916 9.295334929 8.938261833 8.402045565 6.596772185 6.522904385 5.689801326 5.633243776 5.565435673 5.056952057 4.673632786 4.271825318 3.844613682
+3.63225188 3.031692482 2.953199287
+2.57373693 2.227516752 2.166971772 1.958646099 1.869840563 1.794114198 1.676198947 1.567396897 1.553697248 1.528576032 1.473995088 1.390154494 1.386789983 1.347763233 1.324078626 1.321031513 1.289629099 1.279114001 1.261390193 1.241133665 1.235917581 1.215014653 1.197293185 1.179277993 1.143407252 1.130680425 1.125985954 1.105883348 1.101294579 1.081356258 1.071379004 0.987563811 0.984038966 0.894249864 0.878605407 0.874218379 0.857783579 0.855558371 0.851868061 0.835685749
+0.82055853 0.81543521 0.807836765 0.806205587 0.77033865 0.750959512 0.745773606
+
+PROSE Correct?
+                                                              
+
+NGDS Correct?
+                                                              
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+Task #
+69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120
+
+PROSE Time (sec)
+0.1490806 0.2443636 0.1816704 0.2668753 0.1798306 0.189019 0.1288099 0.3323319 0.3260828 0.1332348 0.1980844 0.1318375
+0.15018 0.1212689 0.2549691 0.1310034 0.1123303 0.1623439 0.2241414 0.1104184 0.155915 0.1057559 0.1241092 0.2788713 0.2137989 0.2097732 0.1102942 0.2679471 0.1233551 0.1757585 0.1576141 0.189833 0.1516109 0.1650636 0.137414 0.1217696 0.129731 0.4033455 0.1534717 0.1899474 0.1706376 0.0892761 0.1811467 0.1821743 0.1992316 0.5487662 0.1954476 0.1651815 0.0936175 0.1441545 0.1575744 0.1051238
+
+NGDS Time (sec)
+0.2041974 0.3357826
+0.251046 0.3732339 0.2527543 0.2701096 0.1843243
+0.486425 0.4897711 0.2004937 0.3018685 0.2135129
+0.245166 0.2013819 0.4253412 0.2189491 0.1929299 0.2819654 0.3900767
+0.19453 0.297831 0.2308042 0.277788 0.6264292 0.5104118 0.5043875 0.266965 0.6529621 0.308793 0.4625152 0.4319514 0.5396081 0.4325302 0.5139315 0.4563126 0.4253504 0.5024849 1.6429378 0.6553226 0.8216068 0.7940179 0.4260415 0.8816776 0.8886647 0.9960901 2.7743561 1.2610431 1.1648506 0.695916 1.9494638 3.1862577 2.3162864
+
+Speed-up
+0.730080794 0.727743486 0.723653832 0.715034995
+0.71148384 0.699786309
+0.69882213 0.683213034 0.665786119 0.664533599 0.656194336 0.617468546 0.612564548 0.602183712 0.599446045 0.598328105 0.582233754 0.575758231 0.574608532 0.567616306 0.523501583 0.458206133 0.446776679 0.445176087 0.418875308 0.415896905 0.413141048 0.410356283 0.399475053
+0.38000589 0.364888504 0.351797907 0.350520958 0.321178211 0.301140052 0.286280676 0.258178902 0.245502599 0.234192595 0.231190151 0.214903971 0.209547896 0.205456847 0.204997791 0.200013633 0.197799482 0.154988834
+0.14180488 0.134524138 0.073945718
+0.04945438 0.045384629
+
+PROSE Correct?
+                                                   
+
+NGDS Correct?
+                                                   
+
+14
+
+

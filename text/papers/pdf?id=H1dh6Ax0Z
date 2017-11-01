@@ -1,0 +1,809 @@
+Under review as a conference paper at ICLR 2018
+TREEQN AND ATREEC: DIFFERENTIABLE TREE PLANNING FOR DEEP REINFORCEMENT LEARNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Combining deep model-free reinforcement learning with on-line planning is a promising approach to building on the successes of deep RL. On-line planning with look-ahead trees has proven successful in environments where transition models are known a priori. However, in complex environments where transition models need to be learned from data, the deficiencies of learned models have limited their utility for planning. To address these challenges, we propose TreeQN, a differentiable, recursive, tree-structured model that serves as a drop-in replacement for any value function network in deep RL with discrete actions. TreeQN dynamically constructs a tree by recursively applying a transition model in a learned abstract state space and then aggregating predicted rewards and state-values using a tree backup to estimate Q-values. We also propose ATreeC, an actor-critic variant that augments TreeQN with a softmax layer to form a stochastic policy network. Both approaches are trained end-to-end, such that the learned model is optimised for its actual use in the planner. We show that TreeQN and ATreeC outperform n-step DQN and A2C on a box-pushing task, as well as n-step DQN and value prediction networks (Oh et al., 2017) on multiple Atari games, with deeper trees often outperforming shallower ones. We also present a qualitative analysis that sheds light on the trees learned by TreeQN.
+1 INTRODUCTION
+A promising approach to improving model-free deep reinforcement learning (RL) is to combine it with on-line planning. The model-free value function can be viewed as a rough global estimate which is then locally refined on the fly for the current state by the on-line planner. Crucially, this does not require new samples but only additional computation, which is often available. One strategy for on-line planning is to use look-ahead tree search (Knuth & Moore, 1975; Browne et al., 2012). Traditionally, such methods have been limited to domains where perfect environment simulators are available, such as board or card games (Coulom, 2006; Sturtevant, 2008). However, in general, models for complex environments with high-dimensional observation spaces and complex dynamics must be learned from agent experience. Unfortunately, to date, it has proven difficult to learn models for such domains with sufficient fidelity to realise the benefits of look-ahead planning (Oh et al., 2015; Talvitie, 2017). A simple approach to learning environment models is to maximise a similarity metric between model predictions and ground truth in the observation space. This approach has been applied with some success in cases where model fidelity is less important, e.g., for improving exploration (Chiappa et al., 2017; Oh et al., 2015). However, this objective causes significant model capacity to be devoted to predicting irrelevant aspects of the environment dynamics, such as noisy backgrounds, at the expense of value-critical features that may occupy only a small part of the observation space (Pathak et al., 2017). Consequently, current state-of-the-art models still accumulate errors too rapidly to be used for look-ahead planning in complex environments. Another strategy is to train a model such that, when it is used to predict a value function, the error in those predictions is minimised. Doing so can encourage the model to focus on relevant features of the observations. An example is the predictron (Silver et al., 2017b), where the model is used to aid policy evaluation without addressing control. Value prediction networks (VPNs) (Oh et al., 2017) take a similar approach but use the model to construct a look-ahead tree only when constructing
+1
+
+Under review as a conference paper at ICLR 2018
+
+bootstrap targets and selecting actions, similarly to TD-search (Silver et al., 2012). Crucially, the model is not embedded in a planning algorithm during optimisation. We propose a new approach to address the aforementioned problems: by formulating the tree search in a differentiable way and integrating it directly into the Q-function or policy, we train the entire agent, including its learned model, end-to-end, thus ensuring that the model is optimised for the correct goal and is suitable for on-line planning during execution of the policy. Our approach can alternatively be viewed as a model-free method in which the fully connected layers of DQN are replaced by a recursive network that applies transition functions with shared parameters at each tree node expansion. The resulting architecture, which we call TreeQN, encodes an inductive bias based on the prior knowledge that the environment is a stationary Markov process, which facilitates faster learning of better policies. We also present an actor-critic variant, ATreeC, in which the tree planner is augmented with a softmax layer and used as a policy network. The main contributions of this paper are: (i) we introduce TreeQN and ATreeC, end-to-end differentiable tree planners that serve as drop-in replacements of value and policy networks in deep RL with discrete actions; (ii) we show that TreeQN and ATreeC outperform their DQN-based counterparts in a box-pushing domain and a suite of Atari games, with deeper trees often outperforming shallower trees, and that TreeQN outperforms VPN (Oh et al., 2017) on most Atari games; (iii) we present a qualitative analysis of the learned trees in the box-pushing domain.
+
+2 BACKGROUND
+
+We consider an agent learning to act in a Markov Decision Process (MDP), with the goal of max-
+
+imising its expected discounted maps states s  S to actions a
+
+sum of rewards Rt =  A. The state-action
+
+
+vatl=ue0
+
+trt, by learning a policy (s) that function (Q-function) is defined as
+
+Q(s, a) = E [Rt|st = s, at = a]; the optimal Q-function is Q(s, a) = max Q(s, a).
+
+The Bellman optimality equation writes Q recursively as
+
+Q(s, a) = T Q(s, a)  r(s, a) +  P (s |s, a) max Q(s , a ),
+a s
+where P is the MDP state transition function and r is a reward function, which for simplicity we assume to be deterministic. Q-learning (Watkins & Dayan, 1992) uses a single-sample approximation of the contraction operator T to iteratively improve an estimate of Q. In deep Q-learning (Mnih et al., 2015), Q is represented by a deep neural network with parameters , and is improved by regressing Q(s, a) to a target r +  maxa Q(s , a ; -), where - are the parameters of a target network periodically copied from . We use a version of n-step Q-learning (Mnih et al., 2016) with synchronous environment threads. In particular, starting at a timestep t, we roll forward nenv = 16 threads for n = 5 timesteps each. We then bootstrap off the final states only and gather all nenv × n = 80 transitions in a single batch for the backward pass, minimising the loss:
+
+nj
+
+2
+
+Lnstep-Q =
+envs j=1
+
+ j -k rt+n-k
+
++ j max Q
+a
+
+st+n, a , -
+
+- Q (st+n-j , at+n-j , )
+
+k=1
+
+. (1)
+
+If the episode terminates, we use the remaining episode return as the target, without bootstrapping.
+
+This algorithm's actor-critic counterpart is A2C, a synchronous variant of A3C (Mnih et al., 2016) in which a policy  and state-value function V (s) are trained using the gradient:
+
+n
+
+ =
+
+ (log (at+j |st+j )Aj (st+j , at+j ) + H((st+j ))) + V Aj (st+j , at+j )2 ,
+
+envs j=1
+
+(2)
+
+where Aj the policy
+
+is an advantage entropy,  is a
+
+hesytpimeraptaeragmiveetnerbytuninkjg=1thej-dekgrrte+en-ofk
+
++ j V (st+n) - V (st+n-j ), H entropy regularisation, and  is
+
+is a
+
+hyperparameter controlling the relative learning rates of actor and critic.
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+These algorithms were chosen for their simplicity and reasonable wallclock speeds, but TreeQN can also be used in other algorithms, as described in Section 3.2. Our implementations are based on OpenAI Baselines (Hesse et al., 2017).
+
+The canonical neural network architecture in deep RL with vi-
+
+sual observations has a series of convolutional layers followed
+
+encode evaluate
+
+by two fully connected layers, where the final layer produces
+
+one output for each action-value. We can think of this network st
+
+Q
+
+as first calculating an encoding zt of the state st which is then evaluated by the final layer to estimate Q(st, a) (see Fig. 1).
+
+zt
+
+In tree-search on-line planning, a look-ahead tree of possible
+
+future states is constructed by recursively applying an environ- Figure 1: High-level structure of DQN.
+
+ment model. These states are typically evaluated by a heuristic,
+
+a learned value function, or Monte-Carlo rollouts. Backups through the tree aggregate these values
+
+along with the immediate rewards accumulated along each path to estimate the value of taking an
+
+action in the current state. This paper focuses on a simple tree-search with a deterministic transition
+
+function and no value uncertainty estimates, but our approach can be extended to tree-search variants
+
+like UCT (Kocsis & Szepesva´ri, 2006; Silver et al., 2016) if the components remain differentiable.
+
+3 TREEQN
+
+In this section, we propose TreeQN, a novel end-to-end differentiable architecture for tree planning. We first give an overview of the architecture, followed by details of each model component and the training procedure.
+
+TreeQN uses a recursive tree-structured model between the encoded state zt and the predicted stateaction values Q(st, a). Instead of directly estimating the state-action value from the current encoded state zt using fully connected layers as in DQN (Mnih et al., 2015) (Fig. 1), TreeQN uses a recursive model to refine its estimate of Q(st, a) via learned transition, reward, and value functions (see Fig. 2). Because these learned components are shared throughout the tree, TreeQN implements an inductive bias, missing from DQN, that reflects the prior knowledge that the Q-values are properties of a stationary Markov process.
+
+Specifically, TreeQN learns an action-dependent transition function that, given a state representation rzr^etatp,i .rpersTeerdneitecaQttsiNotnhsaepanpneldxietrseswtthaatiesrdtrsreaprnersceiesteiivonentdaftifuoonnrcatziloatl+inp1orefsoscirubralsecivtsieoelqnyuateoincceosnAost,fruaacncttdioatnhtsereucepocrtoroensstpaooimnniednigpnrgtehdreeefiwsntaaertdde depth d ("Tree Transitioning" in Fig. 2).
+
+The value of each predicted state V (z) is estimated with a value function module. Using these values and the predicted rewards, TreeQN then performs a tree backup, mixing the k-step returns along each path in the tree using TD() (Sutton, 1988; Sutton & Barto, 1998). This corresponds to "Value Prediction" in Fig. 2.
+
+Ql(zt+l, ai) = r(zt+l, ai) + V ()(zt+l+1)
+
+V ()(zt+l) =
+
+V (zta+i l) (1 - )V (zat+i l) +  maxaj Ql+1(zta+i l+1, aj )
+
+l=d l<d
+
+(3) (4)
+
+For 0 <  < 1, value estimates of the intermediate states are mixed into the final Q-estimate, which encourages the intermediate nodes of the tree to correspond to meaningful states, and reduces the impact of outlier values.
+
+When  = 1, Eq. 3 simplifies to a backup through the tree using the Bellman equation:
+
+Q(zt+l, ai) = r(zt+l, ai) +
+
+V (zat+i d)  maxaj Q(zta+i l+1, aj )
+
+l=d l<d
+
+(5)
+
+We note that even for a tree depth of only one, TreeQN imposes a significant structure on the value function by decomposing it as a sum of action-conditional reward and next-state value, and using a shared value function to evaluate each next-state representation.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Tree Transitioning
+
+Value Prediction
+
+encode transition transition transition transition evaluate evaluate evaluate max max max
+
+a1 st a2
+zt a3
+
+Q(st, a1)
+
+Q(st, a2)
+
+Q
+
+Q(st, a3)
+
+Figure 2: High-level structure of TreeQN with a tree depth of two and shared transition and evaluation functions (reward prediction and value-mixing omitted for simplicity).
+
+Crucially, during training we backpropagate all the way from the final Q-estimate, through the value prediction, tree transitioning, and encoding layers of the tree, i.e., the entire network shown in Fig. 2. Learning these components jointly ensures that they are useful for planning on-line.
+
+3.1 MODEL COMPONENTS
+
+In this section, we describe each of TreeQN's components in more detail.
+
+Encoder function. As in DQN, a series of convolutional layers produces an embedding of the observed state, zt = encode(st). Transition function. Every action is parameterised by a fully connected layer. We use residual connections (He et al., 2016) to calculate a next-state representation that carries information about the effect of taking action ai  A:
+
+zta+i 1 = zt + tanh(W ai zt),
+
+(6)
+
+where W ai  Rk×k is a learnable action-dependent transition matrix. The next-state representation is calculated for every action independently, but the transition function is shared for the same action throughout the tree.
+
+A caveat is that the model can still learn to use different parts of the latent state space in different parts of the tree, which could undermine the intended parameter sharing in the model structure. To help TreeQN learn useful transition functions that maintain quality and diversity in their plans, we introduce a unit-length projection of the state representations by simply dividing a state's vector representation by its L2 norm before each application of the transition function, zt := zt/ zt . This prevents the magnitude of the representation from growing or shrinking, which encourages the behaviour of the transition function to be more consistent through the tree.
+
+Reward function. In addition to predicting the next state, we also predict the immediate reward for every action ai  A in state zt using
+
+^r(zt) = W2rReLU(W1rzt + br1) + br2,
+
+(7)
+
+wthheeprereWdic1rted
+
+Rk×k , reward
+
+Wfor2rapaRrt|iAcu|×lakr
+
+and ReLU action r^tai
+
+is is
+
+the the
+
+rectified linear unit i-th element of the
+
+(Nair & Hinton, vector ^r(zt).
+
+2010),
+
+and
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Value function. The value of a state representation z is estimated with V (z) = w z + b,
+where w  Rk.
+
+(8)
+
+3.2 TRAINING
+
+The TreeQN architecture is fully differentiable, so we can directly use it in the place of a Q-function in any deep RL algorithm with discrete actions. Differentiating through the entire tree ensures that the learned components are useful for planning on-line, as long as that planning is performed in the same way as during training.
+
+While training, we also use an auxiliary reward-prediction loss, in the form of an L2 loss regressing
+
+tr^h1ae(ztrtu+ej
+
+), the predicted reward at the observed reward, for each of
+
+first level of the tree corresponding to the n timesteps of n-step Q-learning:
+
+the
+
+selected
+
+action
+
+a,
+
+to
+
+n
+
+L = Lnstep-Q + 
+
+(r^1a(zt+j ) - rt+j )2,
+
+envs j=1
+
+(9)
+
+where  is a hyperparameter weighting the loss. In our experiments we simply use  = 1, and we generally found the performance to be robust with respect to , though this may be a consequence of the well behaved reward scaling in our environments. The predicted rewards that this objective encourages the model to learn appear both in its own Q-value prediction and in the target for n-step Q-learning. Consequently, we expect this auxiliary loss to be well aligned with the true objective. By contrast, other potential auxiliary losses, e.g., an observation-prediction loss, might help representation learning but would not explicitly learn any part of the desired target.
+
+4 ATREEC
+
+The intuitions guiding the design of TreeQN
+
+are as applicable to policy search as to value-
+
+encode softmax
+
+based RL, in that a policy can use a tree planner
+
+to improve its estimates of the optimal action
+
+probabilities (Gelly & Silver, 2007; Silver et al., 2017a). As our proposed architecture is trained end-to-end, it can be easily adapted for use as a
+
+Tree Planning
+
+Q
+
+
+
+policy network.
+
+st fully-connected
+
+In particular, we propose ATreeC, an actor-critic extension of TreeQN. In this architecture, the policy network is identical to TreeQN, with an
+
+zt
+
+V
+
+additional softmax layer that converts the Q esti-
+
+Figure 3: High-level structure of ATreeC.
+
+mates into the probabilities of a stochastic policy.
+
+The critic shares the encoder parameters, and predicts a scalar state value with a single fully connected
+
+layer: Vcr(s) = Section 2, with
+
+twhecrazdd+itibocnr.
+
+The entire of the same
+
+setup, shown in Fig. 3, is trained with A2C as described in reward-prediction loss used for TreeQN. TreeQN could also
+
+be used in the critic, but we leave this possibility to future work.
+
+5 RELATED WORK
+There is a long history of work combining model-based and model-free RL. An early example is Dyna-Q (Sutton, 1990) which trains a model-free algorithm with samples drawn from a learned model. Similarly, van Seijen et al. (2011) train a sparse model with some environment samples that can be used to refine a model-free Q-function. Gu et al. (2016) use local linear models to generate additional samples for their model-free algorithm. However, these approaches do not attempt to use the model on-line to improve value estimates. In deep RL, value iteration networks (Tamar et al., 2016) use a learned differentiable model to plan on the fly, but require planning over the full state space, which must also possess a spatial structure with local dynamics such that convolution operations can execute the planning algorithm.
+
+5
+
+Under review as a conference paper at ICLR 2018
+The predictron (Silver et al., 2017b) instead learns abstract-state transition functions in order to predict values. However, it is restricted to policy evaluation without control. Value prediction networks (VPNs) (Oh et al., 2017) take a similar approach but are more closely related to our work because the learned model components are used in a tree for planning. However, this tree is only used to construct targets and choose actions, and not to compute the value estimates during training. Such estimates are instead produced from non-branching trajectories following on-policy action sequences. By contrast, TreeQN is a unified architecture that constructs the tree dynamically at every timestep and differentiates through it, eliminating any mismatch between the model at training and test time. Furthermore, we do not use convolutional transition functions, and hence do not impose spatial structure on the latent state representations. These differences simplify training, allow our model to be used more flexibly in other training regimes, and explain in part our substantially improved performance on the Atari benchmark. Donti et al. (2017) propose differentiating through a stochastic programming optimisation using a probabilistic model, to learn model parameters with respect to their true objective rather than a maximum-likelihood surrogate. However, they do not tackle the full RL setting, and do not use the model to repeatedly or recursively refine predictions. Imagination-augmented agents (Weber et al., 2017) learn to improve policies by aggregating rollouts predicted by a model. However, they rely on pretraining an observation-space model, which we argue will scale poorly to more complex environments. Further, their aggregation of rollout trajectories takes the form of a generic RNN rather than a value function and tree backup, so the inductive bias based on the structure of the MDP is not explicitly present. A class of value gradient methods (Deisenroth & Rasmussen, 2011; Fairbank & Alonso, 2012; Heess et al., 2015) also differentiates through models to train a policy. However, this approach does not use the model during execution to refine the policy, and requires continuous action spaces. Oh et al. (2015) and Chiappa et al. (2017) propose methods for learning observation-prediction models in the Atari domain, but apply these models only to improve exploration. Variants of scheduled sampling (Bengio et al., 2015) may be used to improve robustness of these models, but scaling to complex domains has proven challenging (Talvitie, 2014).
+6 EXPERIMENTS
+We evaluate TreeQN and ATreeC in a simple box-pushing environment, as well as on the subset of nine Atari environments that Oh et al. (2017) use to evaluate VPN. The experiments are designed to determine whether or not TreeQN and ATreeC outperform DQN, A2C, and VPN, and whether they can scale to complex domains. We also investigate the impact of tree depth, and the extent to which the trees represent meaningful plans. Full details of the experimental setup, as well as architecture and training hyperparameters, are given in the appendix. Box Pushing. First, we experiment in a simple box-pushing domain. We randomly place an agent, 12 boxes, 5 goals and 6 obstacles on the center 6 × 6 tiles of an 8 × 8 grid. Figure 5a shows a typical state. The agent's goal is to push boxes into goals in as few steps as possible while avoiding obstacles. Boxes may not be pushed into each other. The obstacles, however, are `soft' in that they are do not block movement, but generate a negative reward if the agent or a box moves onto an obstacle. This rewards better planning without causing excessive gridlock. This environment is inspired by Sokoban, as used by Weber et al. (2017), in that poor actions can generate irreversibly bad configurations. However, the level generation process for Sokoban is challenging to reproduce exactly and has not been open-sourced. More details of the environment and rewards are given in Appendix A.1. Atari. To demonstrate the general applicability of TreeQN and ATreeC to complex environments, we evaluate them on the Atari 2600 suite (Bellemare et al., 2013). Following Oh et al. (2017), we use their set of nine environments and a frameskip of 10 to facilitate planning over reasonable timescales.
+7 RESULTS & DISCUSSION
+In this section, we present our experimental results for TreeQN and ATreeC, as well as a qualitative analysis of learned trees for the box-pushing environment.
+6
+
+Under review as a conference paper at ICLR 2018
+
+Average Reward over 100 Episodes Average Reward over 100 Episodes
+
+DQN
+6 TreeQN-1 TreeQN-2 TreeQN-3
+5 4 3 2 1 0 1
+
+Push: Q-learning
+
+A2C
+8 ATreeC-1 ATreeC-2 ATreeC-3
+6 4 2 0
+
+Push: Actor-Critic
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 1e7
+Steps
+(a) DQN and TreeQN.
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 1e7
+Steps
+(b) A2C and ATreeC.
+
+Figure 4: Results for the box-pushing domain. The x-axis shows the number of transitions observed across all of the synchronous environment threads.
+
+7.1 BOX PUSHING
+Fig. 4a shows the results of TreeQN with tree depths 1, 2, and 3, compared to a DQN baseline. In this domain, there is a clear advantage for the TreeQN architecture over DQN. TreeQN learns policies that are substantially better at avoiding obstacles and lining boxes up with goals so they can be easily pushed in later. TreeQN also substantially speeds up learning. We hypothesise that the greater structure brought by our architecture regularises the model, encouraging appropriate state representations to be learned quickly. Even a depth-1 tree improves performance significantly, as disentangling the esimation of rewards and next-state values makes them easier to learn. This is further facilitated by the sharing of value-function parameters across branches. When trained with n-step Q-learning, there is a clear difference in the quality of TreeQN policies of different depths: deeper trees learn faster and plateau higher. In the box-pushing domain, useful transition functions are relatively easy to learn, and the extra computation time with those transition modules can help refine value estimates, yielding advantages for additional depth. Fig. 4b shows the results of ATreeC with tree depths 1, 2, and 3, compared to an A2C baseline. As with TreeQN, ATreeC substantially outperforms the baseline. Furthermore, thanks to its stochastic policy, it substantially outperforms TreeQN. Whereas TreeQN and DQN sometimes indecisively bounce back and forth between adjacent states, ATreeC captures this uncertainty in its policy probabilities and thus acts more decisively. However, unlike TreeQN, ATreeC shows no pronounced differences for different tree depths. We hypothesise that this is due to a ceiling effect in this domain. Nonetheless, this result demonstrates the ease with which TreeQN can be used as a drop-in replacement for any deep RL algorithm that learns policies or value functions for discrete actions. To shed further light on how TreeQN works, we can also inspect the learned policies and trees, whose values often correspond to intuitive reasoning about sensible policies. Fig. 5 shows one example. In Fig. 5a, the agent can push a box onto a goal by moving either left or right. Fig. 5c shows the corresponding tree values: each node contains the -mixed value of the path ending at that node, so the action chosen at each timestep is the first action in the highest value path. The two highest value paths are right-left, and left-right. Thus, TreeQN has learned that both outcomes are positive and that returning for the other box is the correct next move. Interestingly, the evaluation after the first level prefers to move left first, while the evaluation after the second level, after refining its values, prefers to move right first. This superior path allows the agent to quickly reach another box adjacent to a goal in the top left. Fig. 5b shows the environment after the agent takes its action (move right) and Fig. 5d shows the corresponding tree. The agent now prefers to move left twice, scoring for pushing the second box.
+7
+
+Under review as a conference paper at ICLR 2018
+
+++
+
+#- - #
+
++#X#+
+
+##-
+
++
+
+###
+
+-
+
+-#
+
+(a) The agent can score by pushing a box left or right.
+
+down 1.74
+
+1.75 down 2.42 left 1.87 up
+
+2.32 right
+
+2.61 down
+2.88 left 2.31 left 2.39 up
+2.93 right zt
+1.87 down
+
+down 1.86
+
+1.77 down 1.92 left 1.80 up
+
+1.80 right
+
+1.97 down
+2.13 left 2.01 left 1.95 up
+2.03 right zt
+1.83 down
+
+++
+
+#- - #
+
++#-X+
+
+##-
+
++
+
+###
+
+-
+
+-#
+
+(b) The agent must now traverse an obstacle to the left in order to push in another box.
+
+2.28 left 1.68 up 1.74 up
+2.30 right
+
+2.37 down
+
+2.27 right
+
+2.98 left 2.48 up 2.73 right
+
+(c) Tree for (a).
+
+1.95 left 1.85 up 1.79 up
+1.85 right
+
+1.80 down
+
+1.88 right
+
+1.96 left 1.83 up 1.85 right
+
+(d) Tree for (b).
+
+Figure 5: An example sequence of two states and corresonding value-trees as predicted by TreeQN, in which the values were easily interpretable (highest value path shown in blue). In the state diagrams, boxes are orange, obstacles are red, goals are green, and the agent is blue.
+
+Although walking over the red obstacle incurs a small penalty (accounted for by the lower absolute values in the tree), the correct action sequence is planned and executed. However, many of the planned action sequences do not correspond to the selected future actions. For example, the highest scoring path often consists of a repeated action, as in Fig. 5d, even if that is not the optimal sequence. We hypothesise that the agents use these paths to conduct extra action-conditional computations, which makes sense given that the levels in the tree are only weakly tied to the timesteps of the underlying MDP. Because TreeQN is flexible and trained end-to-end, it can learn to use its transition function in different ways depending on the circumstance. However, this flexibility can make the resulting plans less interpretable.
+7.2 ATARI Table 1 summarises all our Atari results, while Fig. 6 shows learning curves in depth. TreeQN shows substantial benefits in many environments compared to our DQN baseline, which itself often outperforms VPN (Oh et al., 2017). ATreeC also often outperforms A2C. We present the mean performance of three random seeds, while the VPN results reported by Oh et al. (2017), shown as dashed lines in Fig. 6, are the mean of the best five seeds of an unspecified number of trials.
+8
+
+Under review as a conference paper at ICLR 2018
+
+Average Reward over 100 Episodes
+
+3000 2500
+
+DQN TreeQN-1 TreeQN-2
+
+2000
+
+Alien
+
+1600 1400
+
+DQN TreeQN-1 TreeQN-2
+
+1200
+
+1000
+
+Amidar
+
+120000 100000
+
+DQN TreeQN-1 TreeQN-2
+
+80000
+
+CrazyClimber
+
+1500 VPN 1000 500
+
+800
+
+60000
+
+VPN
+
+600 VPN 40000
+
+400
+
+200 20000
+
+000
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+Enduro
+
+1e7
+
+Frostbite
+
+1e7
+
+Krull 1e7
+
+DQN TreeQN-1
+800 TreeQN-2
+
+8000 7000
+
+DQN TreeQN-1 TreeQN-2
+
+16000 14000
+
+DQN TreeQN-1 TreeQN-2
+
+VPN
+
+6000 12000
+
+600 5000 10000
+
+400 VPN
+
+4000 VPN 3000
+
+8000 6000
+
+200 2000 4000 1000 2000
+
+000
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+MsPacman
+
+1e7
+
+Qbert 1e7
+
+Seaquest
+
+1e7
+
+4000 3500
+
+DQN TreeQN-1 TreeQN-2
+
+3000
+
+17500 15000
+
+DQN TreeQN-1 TreeQN-2
+
+VPN
+
+16000 14000
+
+DQN TreeQN-1 TreeQN-2
+
+VPN 12500
+
+12000
+
+2500
+
+10000
+
+10000
+
+2000 1500
+
+7500
+
+8000 6000 VPN
+
+1000 5000 4000
+
+500 2500 2000
+
+0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 1e7
+
+0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 1e7
+Steps
+
+0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 1e7
+
+(a) DQN and TreeQN trained with n-step Q-learning.
+
+4000 3500
+
+A2C ATreeC-1 ATreeC-2
+
+3000
+
+2500
+
+2000
+
+1500
+
+1000
+
+500
+
+Alien
+VPN
+
+2000
+
+A2C ATreeC-1 ATreeC-2
+
+1500
+
+1000
+
+500
+
+Amidar
+VPN
+
+140000 120000 100000 80000 60000 40000 20000
+
+A2C ATreeC-1 ATreeC-2
+
+CrazyClimber
+VPN
+
+000
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+Enduro
+
+1e7
+
+Frostbite
+
+1e7
+
+Krull 1e7
+
+A2C ATreeC-1
+800 ATreeC-2
+
+4000
+
+3500 3000
+
+A2C ATreeC-1 ATreeC-2
+
+VPN
+
+16000 14000 12000
+
+A2C ATreeC-1 ATreeC-2
+
+VPN
+
+600 2500 10000
+
+400 VPN
+
+2000 1500
+
+8000 6000
+
+200 1000 4000 500 2000
+
+000
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+MsPacman
+
+1e7
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+Qbert 1e7
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0
+
+Seaquest
+
+1e7
+
+6000 5000
+
+A2C ATreeC-1 ATreeC-2
+
+175000 150000
+
+A2C ATreeC-1 ATreeC-2
+
+5000
+
+A2C ATreeC-1 ATreeC-2
+
+VPN
+
+4000 125000
+100000 3000 VPN 75000
+2000 50000
+
+4000 3000 2000
+
+1000 25000
+
+1000
+
+VPN
+
+0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 1e7
+
+0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 1e7
+
+0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 1e7
+
+Steps
+
+(b) A2C and ATreeC.
+
+Figure 6: Results for the Atari domain. 9
+
+Average Reward over 100 Episodes
+
+Under review as a conference paper at ICLR 2018
+
+DQN (Oh et al., 2017) VPN (Oh et al., 2017)
+n-step DQN TreeQN-1 TreeQN-2 A2C ATreeC-1 ATreeC-2
+
+Alien 1804 1429 2472 2819 3096
+2776 3758 2917
+
+Amidar
+535 641
+1329 1271 1186
+1910 2065 2106
+
+Crazy Climber
+41658 54119
+110947 116034 116779
+103866 131655 123257
+
+Enduro 326 382 897 913 915
+934 931 891
+
+Frostbite 3058 3811
+3054 893 1360 305 302 781
+
+Krull 12438 15930
+12405 12344 11980 6282 11067 6485
+
+Ms. Pacman
+2804 2689
+3290 3507 3426
+5172 4964 5225
+
+QBert
+12592 14517
+16323 17082 17355
+24872 25208 104657
+
+Seaquest 2951 5628 3271 8974 14654
+1739 1753 1756
+
+Table 1: Summary of Atari results. Each number is the best score throughout training, calculated as the mean of the last 100 episode rewards of three agents trained with different random seeds. Note that Oh et al. (2017) report the same statistic, but average instead over the best 5 of an unspecified number of agents.
+
+TreeQN. In Alien, CrazyClimber, and Seaquest, TreeQN significantly outperforms the baselines, while we see smaller advantages for Enduro, MsPacman and Qbert. Amidar and Krull show no significant differences between methods, and Frostbite has degenerately poor performance for all methods. Unsurprisingly, TreeQN performs well in domains that are suited to look-ahead planning, with simple dynamics that generalise well and tradeoffs between actions that become apparent only after several timesteps. For example, an incorrect action in Alien can trap the agent down a corridor with an alien. In Seaquest, planning ahead can help determine whether it is better to go deeper to collect more points or to surface for oxygen. By contrast, Enduro is a racing game with mostly reactive decisions that can be easily adjusted in subsequent timesteps. ATreeC. ATreeC, like TreeQN, outperforms its baseline strongly in Alien and Crazy Climber. Compared to TreeQN, ATreeC's performance is better across most environments, particularly on Qbert, reflecting an overall advantage for actor-critic also found by Mnih et al. (2016). Performance is worse on Seaquest, revealing a deficiency in exploration as policy entropy collapses too rapidly. In environments like Krull and Frostbite, all agents are clearly gated by their ability to explore. Both of these games require the completion of sub-levels in order to accumulate large scores, and none of our agents reliably explore beyond the initial stage of the game. Combining TreeQN and ATreeC with smart exploration mechanisms is an interesting direction for future work. Compared to the box-pushing domain, there is less of a clear performance difference between trees of different depths. In some environments (Alien, Seaquest), greater depth does appear to be employed usefully by TreeQN. However, for the Atari domain the embedding size for the transition function we use is much larger (512 compared to 128), and the dynamics are much more complex. Consequently, we expect that optimisation difficulties, and the challenge of learning abstract-state transition functions, impede the utility of deeper trees in some cases. We look to future work to further refine methods for learning to plan abstractly in complex domains.
+8 CONCLUSIONS & FUTURE WORK
+We presented TreeQN and ATreeC, new architectures for deep reinforcement learning in discreteaction domains that integrate differentiable on-line tree planning into the action-value function or policy. Experiments on a box-pushing domain and a set of Atari games show the benefit of these architectures over their model-free counterparts, as well as over VPN. In future work we intend to investigate enabling more efficient optimisation of deeper trees, encouraging the transition functions to produce interpretable plans, and integrating smart exploration. Stochastic transition functions for non-deterministic environments are also an interesting avenue for research.
+REFERENCES
+Marc G Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning environment: An evaluation platform for general agents. J. Artif. Intell. Res.(JAIR), 47:253­279, 2013.
+Samy Bengio, Oriol Vinyals, Navdeep Jaitly, and Noam Shazeer. Scheduled sampling for sequence prediction with recurrent neural networks. In Advances in Neural Information Processing Systems,
+10
+
+Under review as a conference paper at ICLR 2018
+pp. 1171­1179, 2015. Cameron B Browne, Edward Powley, Daniel Whitehouse, Simon M Lucas, Peter I Cowling, Philipp
+Rohlfshagen, Stephen Tavener, Diego Perez, Spyridon Samothrakis, and Simon Colton. A survey of monte carlo tree search methods. IEEE Transactions on Computational Intelligence and AI in games, 4(1):1­43, 2012. Silvia Chiappa, Se´bastien Racaniere, Daan Wierstra, and Shakir Mohamed. Recurrent environment simulators. arXiv preprint arXiv:1704.02254, 2017. Re´mi Coulom. Efficient selectivity and backup operators in monte-carlo tree search. In Computers and Games, 5th International Conference, CG 2006, Turin, Italy, May 29-31, 2006. Revised Papers, pp. 72­83, 2006. doi: 10.1007/978-3-540-75538-8 7. Marc Deisenroth and Carl E Rasmussen. Pilco: A model-based and data-efficient approach to policy search. In Proceedings of the 28th International Conference on machine learning (ICML-11), pp. 465­472, 2011. Priya L Donti, Brandon Amos, and J Zico Kolter. Task-based end-to-end model learning. arXiv preprint arXiv:1703.04529, 2017. Michael Fairbank and Eduardo Alonso. Value-gradient learning. In Neural Networks (IJCNN), The 2012 International Joint Conference on, pp. 1­8. IEEE, 2012. Sylvain Gelly and David Silver. Combining online and offline knowledge in uct. In Proceedings of the 24th international conference on Machine learning, pp. 273­280. ACM, 2007. Shixiang Gu, Timothy Lillicrap, Ilya Sutskever, and Sergey Levine. Continuous deep q-learning with model-based acceleration. In International Conference on Machine Learning, pp. 2829­2838, 2016. Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition. In 2016 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2016, Las Vegas, NV, USA, June 27-30, 2016, pp. 770­778, 2016. doi: 10.1109/CVPR.2016.90. Nicolas Heess, Gregory Wayne, David Silver, Tim Lillicrap, Tom Erez, and Yuval Tassa. Learning continuous control policies by stochastic value gradients. In Advances in Neural Information Processing Systems, pp. 2944­2952, 2015. Christopher Hesse, Matthias Plappert, Alec Radford, John Schulman, Szymon Sidor, and Yuhuai Wu. Openai baselines. https://github.com/openai/baselines, 2017. Donald E Knuth and Ronald W Moore. An analysis of alpha-beta pruning. Artificial intelligence, 6 (4):293­326, 1975. Levente Kocsis and Csaba Szepesva´ri. Bandit based monte-carlo planning. In Machine Learning: ECML 2006, 17th European Conference on Machine Learning, Berlin, Germany, September 18-22, 2006, Proceedings, pp. 282­293, 2006. doi: 10.1007/11871842 29. Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A. Rusu, Joel Veness, Marc G. Bellemare, Alex Graves, Martin A. Riedmiller, Andreas Fidjeland, Georg Ostrovski, Stig Petersen, Charles Beattie, Amir Sadik, Ioannis Antonoglou, Helen King, Dharshan Kumaran, Daan Wierstra, Shane Legg, and Demis Hassabis. Human-level control through deep reinforcement learning. Nature, 518(7540):529­533, 2015. doi: 10.1038/nature14236. Volodymyr Mnih, Adria` Puigdome`nech Badia, Mehdi Mirza, Alex Graves, Timothy P. Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. In Proceedings of the 33nd International Conference on Machine Learning, ICML 2016, New York City, NY, USA, June 19-24, 2016, pp. 1928­1937, 2016. Vinod Nair and Geoffrey E. Hinton. Rectified linear units improve restricted boltzmann machines. In Proceedings of the 27th International Conference on Machine Learning (ICML-10), June 21-24, 2010, Haifa, Israel, pp. 807­814, 2010.
+11
+
+Under review as a conference paper at ICLR 2018
+Junhyuk Oh, Xiaoxiao Guo, Honglak Lee, Richard L Lewis, and Satinder Singh. Action-conditional video prediction using deep networks in atari games. In Advances in Neural Information Processing Systems, pp. 2863­2871, 2015.
+Junhyuk Oh, Satinder Singh, and Honglak Lee. Value prediction network. arXiv preprint arXiv:1707.03497, 2017.
+Deepak Pathak, Pulkit Agrawal, Alexei A Efros, and Trevor Darrell. Curiosity-driven exploration by self-supervised prediction. arXiv preprint arXiv:1705.05363, 2017.
+David Silver, Richard S. Sutton, and Martin Mu¨ller. Temporal-difference search in computer go. Machine Learning, 87(2):183­219, 2012. doi: 10.1007/s10994-012-5280-0.
+David Silver, Aja Huang, Chris J. Maddison, Arthur Guez, Laurent Sifre, George van den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Vedavyas Panneershelvam, Marc Lanctot, Sander Dieleman, Dominik Grewe, John Nham, Nal Kalchbrenner, Ilya Sutskever, Timothy P. Lillicrap, Madeleine Leach, Koray Kavukcuoglu, Thore Graepel, and Demis Hassabis. Mastering the game of go with deep neural networks and tree search. Nature, 529(7587):484­489, 2016. doi: 10.1038/nature16961.
+David Silver, Julian Schrittwieser, Karen Simonyan, Ioannis Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert, Lucas Baker, Matthew Lai, Adrian Bolton, et al. Mastering the game of go without human knowledge. Nature, 550(7676):354­359, 2017a.
+David Silver, Hado van Hasselt, Matteo Hessel, Tom Schaul, Arthur Guez, Tim Harley, Gabriel Dulac-Arnold, David P. Reichert, Neil Rabinowitz, Andre´ Barreto, and Thomas Degris. The predictron: End-to-end learning and planning. In Proceedings of the 34th International Conference on Machine Learning, ICML 2017, Sydney, NSW, Australia, 6-11 August 2017, pp. 3191­3199, 2017b.
+Nathan R Sturtevant. An analysis of uct in multi-player games. In International Conference on Computers and Games, pp. 37­49. Springer, 2008.
+Richard S Sutton. Learning to predict by the methods of temporal differences. Machine learning, 3 (1):9­44, 1988.
+Richard S. Sutton. Integrated architectures for learning, planning, and reacting based on approximating dynamic programming. In Machine Learning, Proceedings of the Seventh International Conference on Machine Learning, Austin, Texas, USA, June 21-23, 1990, pp. 216­224, 1990.
+Richard S Sutton and Andrew G Barto. Reinforcement learning: An introduction, volume 1. MIT press Cambridge, 1998.
+Erik Talvitie. Model regularization for stable sample rollouts. In UAI, pp. 780­789, 2014. Erik Talvitie. Self-correcting models for model-based reinforcement learning. In AAAI, pp. 2597­
+2603, 2017. Aviv Tamar, Sergey Levine, Pieter Abbeel, Yi Wu, and Garrett Thomas. Value iteration networks. In
+Advances in Neural Information Processing Systems 29: Annual Conference on Neural Information Processing Systems 2016, December 5-10, 2016, Barcelona, Spain, pp. 2146­2154, 2016. Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural networks for machine learning, 4(2):26­31, 2012. Harm van Seijen, Shimon Whiteson, Hado van Hasselt, and Marco Wiering. Exploiting best-match equations for efficient reinforcement learning. Journal of Machine Learning Research, 12(Jun): 2045­2094, 2011. Christopher J. C. H. Watkins and Peter Dayan. Q-learning. Machine Learning, 8:279­292, 1992. doi: 10.1007/BF00992698.
+12
+
+Under review as a conference paper at ICLR 2018
+Theophane Weber, Se´bastien Racanie`re, David P. Reichert, Lars Buesing, Arthur Guez, Danilo Jimenez Rezende, Adria` Puigdome`nech Badia, Oriol Vinyals, Nicolas Heess, Yujia Li, Razvan Pascanu, Peter Battaglia, David Silver, and Daan Wierstra. Imagination-augmented agents for deep reinforcement learning. CoRR, abs/1707.06203, 2017.
+A APPENDIX
+A.1 BOX PUSHING Environment. For each episode a new level is generated by placing an agent, 12 boxes, 5 goals and 6 obstacles in the center 6 × 6 tiles of an 8 × 8 grid, sampling locations uniformly. The outer tiles are left empty to prevent situations where boxes cannot be recovered. The agent may move in the four cardinal directions. If the agent steps off the grid the episode ends and it receives a penalty of -1. If the agent moves into a box, it is pushed in the direction of movement. Moving a box out of the grid generates a penalty of -0.1. Moving a box into another box is not allowed and trying to do so generates a penalty of -0.1 while leaving all positions unchanged. When a box is pushed into a goal, it is removed and the agent receives a reward of +1. Obstacles generate a penalty of -0.2 when the agent or a box is moved onto them. Moving the agent over goals incurs no penalty. Lastly, at each timestep the agent receives a penalty of -0.01. Episodes terminate when 75 timesteps have elapsed, the agent has left the grid, or no boxes remain. The observation is given to the model as a tensor of size 5 × 8 × 8. The first four channels are binary encodings of the position of the agent, goals, boxes, and obstacles respectively. The final channel is filled with the number of timesteps remaining (normalised by the total number of timesteps allowed). Architecture. The encoder consists of (conv-3x3-1-32, conv-3x3-1-32, conv-4x4-1-64, fc-128), where conv-wxh-s-n denotes a convolution with n filters of size w × h and stride s and fc-h denotes a fully connected layer with h hidden units. All layers are separated with ReLU nonlinearities. The hidden layer of the reward function MLP has 64 hidden units. A.2 ATARI Preprocessing of inputs follows the procedure of Mnih et al. (2015), including concatenation of the last four frames as input, although we use a frameskip of 10. Architecture. The Atari experiments have the same architecture as for box-pushing, except for the encoder architecture which is as follows: (conv-8x8-4-32, conv-4x4-2-64, conv-3x3-1-64, fc-512). A.3 OTHER HYPERPARAMETERS All experiments use RMSProp (Tieleman & Hinton, 2012) with a learning rate of 1e-4, a decay of =0.99, and =1e-5. The learning rate was tuned coarsely by running DQN on the Seaquest environment, and kept the same for all subsequent experiments (box-pushing and Atari). For DQN and TreeQN, for -greedy exploration was decayed linearly from 1 to 0.05 over the first 4 million environment transitions observed. For A2C and ATreeC, we use a value-function loss coefficient  = 0.5 and an entropy regularisation  = 0.01. The reward prediction loss was scaled by  = 1. We use nsteps = 5 and nenvs = 16, for a total batch size of 80.
+13
+
+

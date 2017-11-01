@@ -1,0 +1,938 @@
+Under review as a conference paper at ICLR 2018
+DEEP GRADIENT COMPRESSION: REDUCING THE COMMUNICATION BANDWIDTH FOR DISTRIBUTED TRAINING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Large-scale distributed training requires significant communication bandwidth for gradient exchange that limits the scalability of multi-node training, and requires expensive high-bandwidth network infrastructure. The situation gets even worse with distributed training on mobile devices (federated learning), which suffers from higher latency, lower throughput, and intermittent poor connections. In this paper, we find 99.9% of the gradient exchange in distributed SGD is redundant, and propose Deep Gradient Compression (DGC) to greatly reduce the communication bandwidth. To preserve accuracy during this compression, DGC employs four methods: momentum correction, local gradient clipping, momentum factor masking, and warm-up training. We have applied Deep Gradient Compression to image classification, speech recognition, and language modeling with multiple datasets including Cifar10, ImageNet, Penn Treebank, and Librispeech Corpus. On these scenarios, Deep Gradient Compression achieves a gradient compression ratio from 270× to 600× without losing accuracy, cutting the gradient size of ResNet-50 from 97MB to 0.35MB, and for DeepSpeech from 488MB to 0.74MB. Deep gradient compression enables large-scale distributed training on inexpensive commodity 1Gbps Ethernet and facilitates distributed training on mobile.
+1 INTRODUCTION
+Large-scale distributed training improves the productivity of training deeper and larger models (Chilimbi et al., 2014; Xing et al., 2015; Moritz et al., 2015; Zinkevich et al., 2010). Synchronous stochastic gradient descent (SGD) is widely used for distributed training. By increasing the number of training nodes1 and taking advantage of data parallelism, the total computation time of the forward-backward passes on the same size training data can be dramatically reduced. However, gradient exchange is costly and dwarfs the savings of computation time (Li et al., 2014; Wen et al., 2017), especially for recurrent neural networks (RNN) where the computation-to-communication ratio is low. Therefore, the network bandwidth becomes a significant bottleneck for scaling up distributed training. This bandwidth problem gets even worse when distributed training is performed on mobile devices, such as federated learning (McMahan et al., 2016; Konecny` et al., 2016). Training on mobile devices is appealing due to better privacy and better personalization (Google, 2017), but a critical problem is that those mobile devices suffer from even lower network bandwidth, intermittent network connections, and expensive mobile data plan.
+DGC solves the communication bandwidth problem by compressing the gradients. To ensure no loss of accuracy, DGC employs momentum correction and local gradient clipping on top of the gradient sparsification to maintain model performance. DGC also uses momentum factor masking and warmup training to overcome the staleness problem caused by reduced communication.
+We empirically verified Deep Gradient Compression on a wide range of tasks, models, and datasets: CNN for image classification (with Cifar10 and ImageNet), RNN for language modeling (with Penn Treebank) and speech recognition (with Librispeech Corpus). These experiments demonstrate that gradients can be compressed up to 600× without loss of accuracy, which is an order of magnitude higher than previous work (Aji & Heafield, 2017).
+1One computational node has one or more GPUs.
+1
+
+Under review as a conference paper at ICLR 2018
+
+
+
+
+
+ 
+
+......
+
+Data
+
+Data
+
+Data
+
+Data
+
+Data
+
+Data
+
+Data
+
+Data
+
+Data
+
+Data
+
+Time:
+
+More Training Nodes
+
+Deep Gradient Compression
+
+computation communication
+
+computation communication
+
+comp. c.
+
+Figure 1: Deep Gradient Compression can reduce the communication time, improve the scalability, and speed up distributed training.
+
+2 RELATED WORK
+
+Researchers have proposed many approaches to overcome the communication bottleneck in distributed training. For instance, asynchronous SGD accelerates the training by removing gradient synchronization and updating parameters immediately once a node has completed back-propagation (Dean et al., 2012; Recht et al., 2011; Li et al., 2014). Gradient quantization and sparsification to reduce communication data size are also extensively studied.
+
+Gradient Quantization Quantizing the gradients to low-precision values can reduce the communication bandwidth. Seide et al. (2014) proposed 1-bit SGD to reduce gradients transfer data size and achieved 10× speedup in traditional speech applications. Alistarh et al. (2016) proposed another approach called QSGD which balance the trade-off between accuracy and gradient precision. Similar to QSGD, Wen et al. (2017) developed TernGrad which uses 3-level gradients. Both of these works demonstrate the convergence of quantized training, although TernGrad only examined CNNs and QSGD only examined the training loss of RNNs. There are also attempts to quantize the entire model, including gradients. DoReFa-Net (Zhou et al., 2016) uses 1-bit weights with 2-bit gradients.
+
+Graidient Sparsification Aji & Heafield (2017) proposed Gradient Dropping to transmit the sparse gradient. Gradient Dropping requires adding a layer normalization. Gradient Dropping saves 99% of gradient exchange while incurring 0.3% loss of accuracy on a machine translation task.
+Compared to Gradient Dropping, DGC pushes the gradient compression ratio from 66× to 600×. DGC does not require extra layer normalization, and thus does not need to change the model structure. Most importantly, Deep Gradient Compression results in no loss of accuracy.
+
+3 DEEP GRADIENT COMPRESSION
+
+3.1 GRADIENT SPARSIFICATION
+
+We reduce the communication bandwidth by sending only the important gradients (sparse update). We use the gradient magnitude as a simple heuristics for importance: only gradients larger than a threshold are transmitted. To avoid losing information, we accumulate the rest of the gradients locally. Eventually, these gradients become large enough to be transmitted. Thus, we send the large gradients immediately but eventually send all of the gradients over time. The method is shown in Algorithm 1.
+The insight is that the local gradient accumulation is equivalent to increasing the batch size over time. Let F (w) be the loss function which we want to optimize. Synchronous Distributed SGD performs the following update with N training nodes in total:
+
+1 F (w) = || f (x, w),
+x
+
+1N
+
+wt+1 = wt -  N b
+
+f (x, wt)
+
+k=0 xBk,t
+
+(1)
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 Gradient Sparsification on node k
+
+Input: dataset 
+
+Input: minibatch size b per node
+
+Input: the number of nodes N
+
+Input: optimization function SGD
+
+Input: init parameters w = {w[0], w[1], · · · , w[M ]}
+
+1: Gk  0
+
+2: for t = 0, 1, · · · do 3: Gkt  Gtk-1
+4: for i = 1, · · · , b do
+
+5: Sample data x from 
+
+6:
+
+Gkt
+
+
+
+Gtk
+
++
+
+1 Nb
+
+f (x; wt)
+
+7: end for
+
+8: for j = 0, · · · , M do 9: Select threshold: thr  s% of Gkt [j]
+
+10: M ask  Gkt [j] > thr
+
+11: Gkt [j]  Gkt [j] M ask
+
+12: Gkt [j]  Gkt [j] ¬M ask
+
+13: end for
+
+14:
+
+All-reduce Gkt : Gt 
+
+N k=1
+
+sparse(Gtk
+
+)
+
+15: wt+1  SGD (wt, Gt)
+
+16: end for
+
+-1
+
+
+
+Mask
+
+ 
+
+-1
+
+  -1 + 
+   -1 +      
+
+(a) Vanilla momentum correction
+
+-1
+
+
+
+Mask
+
+ 
+
+-1
+
+ 
+
+    -1 +    -1 +  +     
+
+(b) Nesterov momentum correction
+
+Figure 2: Gradient Sparsification with momentum correction
+
+where  is the training dataset, w are the weights of a network, f (x, w) is the loss computed from samples x  ,  is the learning rate, N is the number of training nodes, and Bk,t for 0  k < N is a sequence of N minibatches sampled from  at iteration t, each of size b.
+
+Consider the weight value w(i) of i-th position in flattened weights w. After T iterations, we have
+
+
+
+wt(+i)T
+
+=
+
+wt(i) - T
+
+·
+
+1 N bT
+
+N T -1
+
+
+k=0  =0 xBk,t+
+
+ (i)f (x, wt+ )
+
+(2)
+
+Equation (2) shows that local gradient accumulation can be considered as increasing the batch size from N b to N bT (the second summation over  ), where T is the length of the sparse update interval between two iterations at which the gradient of w(i) is sent. Learning rate scaling (Goyal et al., 2017) is a commonly used technique to deal with large minibatch. It is automatically satisfied in Equation (2) where the T in the learning rate T and batch size N bT are canceled out.
+
+3.2 IMPROVING THE LOCAL GRADIENT ACCUMULATION
+Without care, the sparse update will greatly harm convergence when sparsity is extremely high (99.9%). For example, Algorithm 1 incurred more than 1.00% loss of accuracy on the Cifar10 dataset. We find momentum correction and local gradient clipping can mitigate this problem.
+
+Momentum Correction Momentum SGD is widely used in place of vanilla SGD. However, Algorithm 1 doesn't directly apply to SGD with momentum, since it ignores the momentum factor within the sparse update interval. When the gradient sparsity is high, the interval dramatically increases, and thus the significant momentum effect will harm the model performance.
+
+To avoid this error, local gradient accumulation should adjust for the momentum term. The vanilla momentum SGD follows (Qian, 1999),
+
+ut+1 = mut + t, wt+1 = wt - ut+1
+
+where m is the momentum, and t =
+
+N k=0
+
+k t
+
+=
+
+1 Nb
+
+N k=0
+
+xBk,t f (x, wt).
+
+(3)
+
+In accordance with Equation (3), the gradient
+
+k t
+
+on
+
+node
+
+k
+
+is
+
+accumulated
+
+with
+
+momentum
+
+factor
+
+ukt ,
+
+N
+
+utk+1 = mutk +
+
+k t
+
+,
+
+vtk+1 = vtk + utk+1,
+
+wt+1 = wt - 
+
+sparse vtk+1
+
+(4)
+
+k=1
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+where vtk is the accumulation result, N is the number of training nodes, sparse () is the sparsification function which does sorting and hard thresholding.
+The conventional update rule for Nesterov momentum SGD (Nesterov, 1983) is:
+
+ut+1 = mut + t, wt+1 = wt -  (m · ut+1 + t)
+
+(5)
+
+Adding momentum correction for Nesterov momentum SGD (Figure 2(b)), we have:
+
+utk+1 = mukt +
+
+k t
+
+,
+
+vtk+1 = vtk + m · ukt+1 +
+
+k t
+
+,
+
+N
+wt+1 = wt -  sparse vtk+1
+k=1
+
+(6)
+
+With momentum correction, Equation (3) becomes (4), Equation (5) becomes (6). The Algorithm 1 with momentum correction is provided in Appendix B. As we will see in Section 4, momentum correction brings models with much less accuracy loss, while training curves follow the vanilla momentum SGD more closely.
+
+Local Gradient Clipping Gradient clipping is widely adopted to avoid the exploding gradient problem (Bengio et al., 1994). The method proposed by Pascanu et al. (2013) rescales the gradients whenever the sum of their L2-norms exceeds a threshold. This step is conventionally executed after gradient aggregation from all nodes. Because we accumulate gradients over iterations on each node independently, we perform the gradient clipping locally before adding the current gradient Gt to previous accumulation (Gt-1 in Algorithm 1 and Vt-1, Ut-1 in Figure 2(a), 2(b)). We scale the threshold by N -1/2, the current node's fraction of the global threshold if all N nodes had identical gradient distributions. In practice, we find that the local gradient clipping behaves very similarly to the vanilla gradient clipping in training, which suggests that our assumption might be valid in real-world data.
+
+3.3 OVERCOMING THE STALENESS EFFECT
+Because we delay the update of small gradients, when these updates do occur, they are outdated or stale. In our experiments, most of the parameters are updated every 600 to 1000 iterations when gradient sparsity is 99.9%, which is quite long compared to the number of iterations per epoch. Staleness can slow down convergence and degrade model performance. We mitigate staleness with momentum factor masking and warm-up training.
+
+Momentum Factor Masking Mitliagkas et al. (2016) discussed the staleness caused by asynchrony and attributed it to a term described as implicit momentum. Inspired by their work, we introduce momentum factor masking, to alleviate staleness. Instead of searching for a new momentum coefficient as suggested in Mitliagkas et al. (2016), we simply apply the same mask to both the gradients Gt and the momentum factor Ut in Figure 2(a) and 2(b):
+Ut[j]  Ut[j] ¬M ask
+This mask stops the momentum for delayed gradients, preventing the stale momentum from carrying the weights in the wrong direction.
+
+Warm-up Training In the early stages of training, the network is changing rapidly, and the gradients are more diverse and aggressive. Sparsifying gradients limits the range of variation of the model, and thus prolongs the period of drastic gradients. Meanwhile, the remaining aggressive gradients from the early stage are accumulated before being chosen for the next update, and therefore they may outweigh the latest gradients and misguide the optimization direction. The warm-up training method introduced in large minibatch training (Goyal et al., 2017) is helpful. During the warm-up period, we use a less aggressive learning rate to slow down the changing speed of the neural network at the start of training, and also less aggressive gradient sparsity, to reduce the number of extreme gradients being delayed. Instead of linearly ramping up the learning rate during the first several epochs, we exponentially increase the gradient sparsity from a relatively small value to the final value, in order to help the training adapt to the gradients of larger sparsity.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Table 1: Techniques in Deep Gradient Compression
+
+Techniques
+Gradient Sparsification Local Gradient Accumulation Momentum Correction Local Gradient Clipping Momentum Factor Masking Warm-up Training
+
+Gradient
+
+Deep
+
+Dropping
+
+Gradient
+
+(Aji & Heafield, 2017) Compression
+
+-
+
+Overcome Staleness
+
+Reduce Ensure
+
+Maintain
+
+Improve
+
+Bandwidth Convergence
+
+Convergence
+
+Accuracy
+
+Iterations
+
+-- -
+
+- --
+
+--
+
+-
+
+--
+
+--
+
+--
+
+4 EXPERIMENTS
+
+4.1 EXPERIMENT SETTINGS
+We validate our approach on three types of machine learning tasks: image classification on Cifar10 and ImageNet, language modeling on Penn Treebank dataset, and speech recognition on AN4 and Librispeech corpus.
+Image Classification We studied ResNet-110 on Cifar10, AlexNet and ResNet-50 on ImageNet. Cifar10 consists of 50,000 training images and 10,000 validation images in 10 classes (Krizhevsky & Hinton, 2009), while ImageNet contains over 1 million training images and 50,000 validation images in 1000 classes (Deng et al., 2009). We train the models with momentum SGD following the training schedule in Gross & Wilber (2016).
+
+Language Modeling The Penn Treebank corpus (PTB) dataset consists of 923,000 training, 73,000 validation and 82,000 test words (Marcus et al., 1993). The vocabulary we select is the same as the one in Mikolov et al. (2010). We adopt the 2-layer LSTM language model architecture with 1500 hidden units per layer (Press & Wolf, 2016), tying the weights of encoder and decoder as suggested in Inan et al. (2016) and using vanilla SGD with gradient clipping, while learning rate decays when no improvement has been made in validation loss.
+
+Speech Recognition The AN4 dataset contains 948 training and 130 test utterances (Acero, 1990) while Librispeech corpus contains 960 hours of reading speech (Panayotov et al., 2015). We use DeepSpeech architecture without n-gram language model, which is a multi-layer RNN following a stack of convolution layers (Hannun et al., 2014). We train a 5-layer LSTM of 800 hidden units per layer for AN4, and a 7-layer GRU of 1200 hidden units per layer for LibriSpeech, with Nesterov momentum SGD and gradient clipping, while learning rate anneals every epoch.
+
+4.2 RESULTS AND ANALYSIS
+We first examine Deep Gradient Compression on image classification task. Figure 3(a) and 3(b) are the Top-1 accuracy and training loss of ResNet-110 on Cifar10 with 4 nodes. The gradient sparsity is 99.9% (only 0.1% is non-zero). The learning curve of Gradient Dropping (Aji & Heafield, 2017) (red) is worse than the baseline due to gradient staleness. With momentum correction (yellow), the learning curve converges slightly faster, and the accuracy is much closer to the baseline. With momentum factor masking and warm-up training techniques (blue), gradient staleness is eliminated, and the learning curve closely follows the baseline. Table 2 shows the detailed accuracy. The accuracy of ResNet-110 is fully maintained while using Deep Gradient Compression.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+Loss Loss
+
+Top-1 Accuracy
+
+Top-1 Accuracy of ResNet-110 on Cifar10 Dataset 100
+80
+60
+40
+Baseline 20 Gradient Dropping
+Gradient Sparsification with momentum correction Deep Gradient Compression 0 0 20 40 60 80 100 120 140 160
+Epochs
+(a) Top-1 accuracy of ResNet-110 on Cifar10
+Top-1 Error of ResNet-50 on ImageNet Dataset 100
+Baseline Gradient Dropping Deep Gradient Compression 80
+
+Loss of ResNet-110 on Cifar10 Dataset 3
+Baseline Gradient Dropping 2.5 Gradient Sparsification with momentum correction Deep Gradient Compression 2
+1.5
+1
+0.5
+0 0 20 40 60 80 100 120 140 160 Epochs
+(b) Training loss of ResNet-110 on Cifar10
+Loss of ResNet-50 on ImageNet Dataset 7
+Baseline 6 Gradient Dropping
+Deep Gradient Compression
+5
+
+Top-1 Error
+
+4 60
+3 40 2
+
+20 0 10 20 30 40 50 60 70 80 90
+Epochs
+
+1
+0 10 20 30 40 50 60 70 80 90 Epochs
+
+(c) Top-1 error of ResNet-50 on ImageNet
+
+(d) Training loss of ResNet-50 on ImageNet
+
+Figure 3: Learning curves of ResNet in image classification task (the gradient sparsity is 99.9%).
+
+Table 2: ResNet-110 trained on Cifar10 Dataset
+
+# GPUs in total
+4
+8
+16
+32
+
+Batchsize in total per iteration 128
+256
+512
+1024
+
+Training Method
+Baseline Gradient Dropping (Aji & Heafield, 2017) Deep Gradient Compression Baseline Gradient Dropping (Aji & Heafield, 2017) Deep Gradient Compression Baseline Gradient Dropping (Aji & Heafield, 2017) Deep Gradient Compression Baseline Gradient Dropping (Aji & Heafield, 2017) Deep Gradient Compression
+
+Top 1 Accuracy
+
+93.75% 92.75% 93.87% 92.92% 93.02% 93.28% 93.14% 92.93% 93.20% 93.10% 92.10% 93.18%
+
+-1.00% +0.12%
++0.10% +0.37%
+-0.21% +0.06%
+-1.00% +0.08%
+
+Table 3: Comparison of gradient compression ratio on ImageNet Dataset
+
+Model AlexNet ResNet-50
+
+Training Method
+Baseline
+TernGrad (Wen et al., 2017) Deep Gradient Compression Baseline Deep Gradient Compression
+
+Top-1 Accuracy
+58.17% 57.28% (-0.89%) 58.20% (+0.03%) 75.96 76.15 (+0.19%)
+
+Top-5 Accuracy
+80.19% 80.23% (+0.04%) 80.20% (+0.01%) 92.91% 92.97% (+0.06%)
+
+Gradient Size
+232.56 MB
+2
+29.18 MB
+3
+0.39 MB 97.49 MB
+0.35 MB
+
+Compression Ratio 1×
+8×
+597 × 1×
+277 ×
+
+3The gradient of the last fully-connected layer of Alexnet is 32-bit float. (Wen et al., 2017) 3We only transmit 16-bit index distances and 32-bit values of non-zeros in flattened gradients.
+6
+
+Under review as a conference paper at ICLR 2018
+
+Perplexity of 2-Layer LSTM on PTB Dataset
+Baseline Deep Gradient Compression 200
+
+Loss of 2-Layer LSTM on PTB Dataset 6
+Baseline Deep Gradient Compression
+5.5
+
+Loss Loss
+
+Perplexity
+
+5 150
+4.5
+100 4
+
+0 5 10 15 20 25 30 35 40 Epochs
+
+3.5 0 5 10 15 20 25 30 35 40
+Epochs
+
+Figure 4: Perplexity and training loss of LSTM language model on PTB dataset (the gradient sparsity is 99.9%).
+
+WER of 5-layer LSTM on AN4 Dataset 100
+Baseline
+Gradient Dropping 80 Gradient Sparsification with momentum
+correction and local gradient clipping
+Deep Gradient Compression 60
+
+Loss of 5-layer LSTM on AN4 Dataset 70
+Baseline
+60 Gradient Dropping
+Gradient Sparsification with momentum 50 correction and local gradient clipping
+Deep Gradient Compression 40
+
+30
+40 20
+
+Word Error Rate (WER)
+
+10 20
+
+0 10 20 30 40 50 60 70 80 Epochs
+
+0 0 10 20 30 40 50 60 70 80
+Epochs
+
+Figure 5: WER and training loss of 5-layer LSTM on AN4 (the gradient sparsity is 99.9%).
+
+Table 4: Training results of language modeling and speech recognition with 4 nodes
+
+Task Training Method Baseline Deep Gradient Compression
+
+Language Modeling on PTB
+
+Perplexity
+
+Gradient Size
+
+Compression Ratio
+
+72.30 194.68 MB
+
+1×
+
+72.24 (-0.06)
+
+0.42 MB
+
+462 ×
+
+Speech Recognition on LibriSpeech
+
+Word Error Rate (WER) Gradient Compression
+
+test-clean test-other
+
+Size
+
+Ratio
+
+9.45%
+
+27.07% 488.08 MB
+
+1×
+
+9.06% (-0.39%)
+
+27.04% (-0.03%)
+
+0.74 MB
+
+608 ×
+
+When scaling to the large-scale dataset, Figure 3(c) and 3(d) show the learning curve of ResNet-50 when the gradient csparsity is 99.9%. The accuracy fully matches the baseline. An interesting observation is that the top-1 error of training with sparse gradients decreases faster than the baseline with the same training loss. Table 3 shows the results of AlexNet and ResNet-50 training on ImageNet with 4 nodes. We compare the gradient compression ratio with Terngrad (Wen et al., 2017) on AlexNet (ResNet is not studied in Wen et al. (2017)). Deep Gradient Compression gives 75× better compression than Terngrad with no loss of accuracy. For ResNet-50, the compression ratio is slightly lower (277× vs. 597×) with a slight increase in accuracy.
+For language modeling, Figure 4 shows the perplexity and training loss of the language model trained with 4 nodes when the gradient sparsity is 99.9%. The training loss with Deep Gradient Compression closely match the baseline, so does the validation perplexity. From Table 4, Deep Gradient Compression compresses the gradient by 462 × with a slight reduction in perplexity.
+For speech recognition, Figure 5 shows the word error rate (WER) and training loss curve of 5-layer LSTM on AN4 Dataset with 4 nodes when the gradient sparsity is 99.9%. The learning curves show the same improvement acquired from techniques in Deep Gradient Compression as for the image network. Table 4 shows word error rate (WER) performance on LibriSpeech test dataset, where test-clean contains clean speech and test-other noisy speech. The model trained with Deep Gradient Compression gains better recognition ability on both clean and noisy speech, even when gradients size is compressed by 608×.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Speed up Speed up
+
+Training Speedup on GPU cluster with 1Gbps Ethernet
+60 AlexNet Baseline AlexNet TernGrad
+50 AlexNet Deep Gradient Compression DeepSpeech Baseline
+40 DeepSpeech TernGrad DeepSpeech Deep Gradient Compression
+30
+20
+
+Training Speedup on GPU cluster with 10Gbps Ethernet
+70 AlexNet Baseline 60 AlexNet TernGrad
+AlexNet Deep Gradient Compression 50 DeepSpeech Baseline
+DeepSpeech TernGrad 40 DeepSpeech Deep Gradient Compression
+30
+20
+
+10 10
+
+0 1
+
+2 4 8 16 32 64
+# of training nodes
+
+0 1
+
+2 4 8 16 32 64
+# of training nodes
+
+(a) (b)
+
+Figure 6: Deep Gradient Compression improves the speedup and scalability of distributed training. Each training node has 4 NVIDIA Titan XP GPUs and one PCI switch.
+
+5 SYSTEM ANALYSIS AND PERFORMANCE
+Implementing DGC requires gradient sorting. Given the target sparsity ratio of 99.9%, we sort the gradients to pick the largest 0.1%. Sorting over millions of weights can be slow (the complexity is O(nlog(n · s)), where s is the expected gradient sparsity). We use sampling to reduce sorting time. We sample 0.1% to 1% of the gradients and sort the samples to estimate the threshold for the entire population. If the number of gradients exceeding the threshold is far more than expected, a precise threshold is calculated from the already-selected gradients. Hierarchically calculating the threshold significantly reduces sorting time. In practice, total extra computation time is negligible compared to network communication time which is usually from hundreds of milliseconds to several seconds depending on the network bandwidth.
+We use the performance model proposed in Wen et al. (2017) to perform the scalability analysis, combining the lightweight profiling on single training node with the analytical communication modeling. With the all-reduce communication model (Rabenseifner, 2004; Bruck et al., 1997), the density of sparse data doubles at every aggregation step in the worst case. However, even considering this effect, Deep Gradient Compression still significantly reduces the network communication time, as implied in Figure 6.
+Figure 6 shows the speedup with 1Gbps and 10Gbps Ethernet as the number of training nodes is increased, compared to the training with one node. Conventional training achieves much worse speedup with 1Gbps (Figure 6(a)) than 10Gbps Ethernet (Figure 6(b)). Nonetheless, Deep Gradient Compression enables the training with 1Gbps Ethernet to be competitive with conventional training with 10Gbps Ethernet. For instance, when training AlexNet with 64 nodes, conventional training only achieves nearly 30× speedup with 10Gbps Ethernet (Apache, 2016), while with DGC, more than 40× speedup is achieved even with 1Gbps Ethernet. From the comparison of Figure 6(a) and 6(b), Deep Gradient Compression benefits even more when the communication-to-computation ratio of the model is higher and the network bandwidth is lower.
+6 CONCLUSION
+Deep Gradient Compression (DGC) compresses the gradient by 270-600× for a wide range of CNNs and RNNs. To achieve this compression without slowing convergence, DGC employs momentum correction, local gradient clipping, momentum factor masking, and warm-up training. We further propose hierarchical threshold selection to speed up the gradient sparsification process. Deep Gradient Compression reduces the communication bandwidth and improves the scalability of distributed training with inexpensive, commodity networking infrastructure.
+8
+
+Under review as a conference paper at ICLR 2018
+
+REFERENCES
+Alejandro Acero. Acoustical and environmental robustness in automatic speech recognition. In Proc. of ICASSP, 1990.
+
+Alham Fikri Aji and Kenneth Heafield. Sparse communication for distributed gradient descent. In Empirical Methods in Natural Language Processing (EMNLP), 2017.
+
+Dan Alistarh, Jerry Li, Ryota Tomioka, and Milan Vojnovic. Qsgd: Randomized quantization for communication-optimal stochastic gradient descent. arXiv preprint arXiv:1610.02132, 2016.
+
+Apache. Image classification with mxnet. https://github.com/apache/incubator-mxnet/ tree/master/example/image-classification, 2016.
+
+Yoshua Bengio, Patrice Simard, and Paolo Frasconi. Learning long-term dependencies with gradient descent is difficult. IEEE transactions on neural networks, 5(2):157­166, 1994.
+
+Jehoshua Bruck, Ching-Tien Ho, Shlomo Kipnis, Eli Upfal, and Derrick Weathersby. Efficient algorithms for all-to-all communications in multiport message-passing systems. IEEE Transactions on parallel and distributed systems, 8(11):1143­1156, 1997.
+
+Trishul M Chilimbi, Yutaka Suzue, Johnson Apacible, and Karthik Kalyanaraman. Project adam: Building an efficient and scalable deep learning training system. In OSDI, volume 14, pp. 571­582, 2014.
+
+Jeffrey Dean, Greg Corrado, Rajat Monga, Kai Chen, Matthieu Devin, Mark Mao, Andrew Senior, Paul Tucker, Ke Yang, Quoc V Le, et al. Large scale distributed deep networks. In Advances in neural information processing systems, pp. 1223­1231, 2012.
+
+J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei. ImageNet: A Large-Scale Hierarchical Image Database. In CVPR09, 2009.
+
+Google.
+
+Federated learning: Collaborative machine learning without centralized train-
+
+ing data, 2017.
+
+URL https://research.googleblog.com/2017/04/
+
+federated-learning-collaborative.html.
+
+Priya Goyal, Piotr Dolla´r, Ross Girshick, Pieter Noordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch sgd: Training imagenet in 1 hour. arXiv preprint arXiv:1706.02677, 2017.
+
+S. Gross and M. Wilber. Training and investigating residual nets. https://github.com/facebook/ fb.resnet.torch, 2016.
+
+Awni Hannun, Carl Case, Jared Casper, Bryan Catanzaro, Greg Diamos, Erich Elsen, Ryan Prenger, Sanjeev Satheesh, Shubho Sengupta, Adam Coates, et al. Deep speech: Scaling up end-to-end speech recognition. arXiv preprint arXiv:1412.5567, 2014.
+
+Hakan Inan, Khashayar Khosravi, and Richard Socher. Tying word vectors and word classifiers: A loss framework for language modeling. arXiv preprint arXiv:1611.01462, 2016.
+
+Jakub Konecny`, H Brendan McMahan, Felix X Yu, Peter Richta´rik, Ananda Theertha Suresh, and Dave Bacon. Federated learning: Strategies for improving communication efficiency. arXiv preprint arXiv:1610.05492, 2016.
+
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. 2009.
+
+Mu Li, David G Andersen, Alexander J Smola, and Kai Yu. Communication efficient distributed machine learning with the parameter server. In Advances in Neural Information Processing Systems, pp. 19­27, 2014.
+
+Mitchell P. Marcus, Beatrice Santorini, and Mary Ann Marcinkiewicz. Building a large annotated corpus of english: The penn treebank. COMPUTATIONAL LINGUISTICS, 19(2):313­330, 1993.
+
+H Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, et al. Communication-efficient learning of deep networks from decentralized data. arXiv preprint arXiv:1602.05629, 2016.
+
+Tomas Mikolov, Martin Karafia´t, Lukas Burget, Jan Cernocky`, and Sanjeev Khudanpur. Recurrent neural network based language model. In Interspeech, volume 2, pp. 3, 2010.
+
+9
+
+Under review as a conference paper at ICLR 2018
+Ioannis Mitliagkas, Ce Zhang, Stefan Hadjis, and Christopher Re´. Asynchrony begets momentum, with an application to deep learning. In Communication, Control, and Computing (Allerton), 2016 54th Annual Allerton Conference on, pp. 997­1004. IEEE, 2016.
+Philipp Moritz, Robert Nishihara, Ion Stoica, and Michael I Jordan. Sparknet: Training deep networks in spark. arXiv preprint arXiv:1511.06051, 2015.
+Yurii Nesterov. A method of solving a convex programming problem with convergence rate o (1/k2). In Soviet Mathematics Doklady, volume 27, pp. 372­376, 1983.
+Vassil Panayotov, Guoguo Chen, Daniel Povey, and Sanjeev Khudanpur. Librispeech: an asr corpus based on public domain audio books. In Acoustics, Speech and Signal Processing (ICASSP), 2015 IEEE International Conference on, pp. 5206­5210. IEEE, 2015.
+Razvan Pascanu, Tomas Mikolov, and Yoshua Bengio. On the difficulty of training recurrent neural networks. In International Conference on Machine Learning, pp. 1310­1318, 2013.
+Ofir Press and Lior Wolf. Using the output embedding to improve language models. arXiv preprint arXiv:1608.05859, 2016.
+Ning Qian. On the momentum term in gradient descent learning algorithms. Neural networks, 12(1):145­151, 1999.
+Rolf Rabenseifner. Optimization of collective reduction operations. In International Conference on Computational Science, pp. 1­9. Springer, 2004.
+Benjamin Recht, Christopher Re, Stephen Wright, and Feng Niu. Hogwild: A lock-free approach to parallelizing stochastic gradient descent. In Advances in neural information processing systems, pp. 693­701, 2011.
+Frank Seide, Hao Fu, Jasha Droppo, Gang Li, and Dong Yu. 1-bit stochastic gradient descent and its application to data-parallel distributed training of speech dnns. In Fifteenth Annual Conference of the International Speech Communication Association, 2014.
+Wei Wen, Cong Xu, Feng Yan, Chunpeng Wu, Yandan Wang, Yiran Chen, and Hai Li. Terngrad: Ternary gradients to reduce communication in distributed deep learning. In Advances in Neural Information Processing Systems, 2017.
+Eric P Xing, Qirong Ho, Wei Dai, Jin Kyu Kim, Jinliang Wei, Seunghak Lee, Xun Zheng, Pengtao Xie, Abhimanu Kumar, and Yaoliang Yu. Petuum: A new platform for distributed machine learning on big data. IEEE Transactions on Big Data, 1(2):49­67, 2015.
+Shuchang Zhou, Yuxin Wu, Zekun Ni, Xinyu Zhou, He Wen, and Yuheng Zou. Dorefa-net: Training low bitwidth convolutional neural networks with low bitwidth gradients. arXiv preprint arXiv:1606.06160, 2016.
+Martin Zinkevich, Markus Weimer, Lihong Li, and Alex J Smola. Parallelized stochastic gradient descent. In Advances in neural information processing systems, pp. 2595­2603, 2010.
+10
+
+Under review as a conference paper at ICLR 2018
+
+A SYNCHRONOUS DISTRIBUTED STOCHASTIC GRADIENT DESCENT
+In practice, each training node performs the forward-backward pass on different batches sampled from the training dataset with the same network model. The gradients from all nodes are summed up to optimize their models. By this synchronization step, models on different nodes are always the same during the training. The aggregation step can be achieved in two ways. One method is using the parameter servers as the intermediary which store the parameters among several servers (Dean et al., 2012). The nodes push the gradients to the servers while the servers are waiting for the gradients from all nodes. Once all gradients are sent, the servers update the parameters, and then all nodes pull the latest parameters from the servers. The other method is to perform the All-reduce operation on the gradients among all nodes and to update the parameters on each node independently (Goyal et al., 2017), as shown in Algorithm 2 and Figure 7. In this paper, we adopt the latter approach by default.
+
+Forward Backward
+...
+Model Replicas
+
+Forward Backward
+...
+Model Replicas
+
+Forward Backward
+
+Forward Backward
+
+... ...... ...
+
+Model Replicas
+
+Model Replicas
+
+Data Worker 0
+
+Data Worker 1
+
+Data Worker 2
+
+Data Worker N
+
+(a) Each node independently calculates gradients
+
+...
+Model Replicas
+
+...
+Model Replicas
+
+... ...... ...
+
+Model Replicas
+
+Model Replicas
+
+Data Worker 0
+
+Data Worker 1
+
+Data Worker 2
+
+Data Worker N
+
+(b) All-reduce operation of gradient aggregation
+
+Figure 7: Distributed Synchronous SGD
+
+Algorithm 2 Distributed Synchronous SGD on node k
+
+Input: Dataset 
+
+Input: minibatch size b per node
+
+Input: the number of nodes N
+
+Input: Optimization Function SGD
+
+Input: Init parameters w = {w[0], · · · , w[M ]}
+
+1: for t = 0, 1, · · · do 2: Gkt  0 3: for i = 1, · · · , B do
+
+4: Sample data x from 
+
+5:
+
+Gtk
+
+
+
+Gtk
+
++
+
+1 Nb
+
+f (x; wt)
+
+6: end for
+
+7:
+
+All-reduce Gkt : Gt 
+
+N k=1
+
+Gtk
+
+8: wt+1  SGD (wt, Gt)
+
+9: end for
+
+B GRADIENT SPARSIFICATION WITH MOMENTUM CORRECTION
+
+Algorithm 3 Gradient sparsification with momen- Algorithm 4 Gradient sparsification with Nesterov mo-
+
+tum correction on node k
+
+mentum correction on node k
+
+Input: dataset 
+
+Input: minibatch size b per node
+
+Input: momentum m
+
+Input: the number of nodes N
+
+Input: optimization function momentum SGD
+
+Input: initial parameters w = {w[0], · · · , w[M ]}
+
+1: U k  0, V k  0
+
+2: for t = 0, 1, · · · do 3: Gtk  0
+4: for i = 1, · · · , b do
+
+5: Sample data x from 
+
+6:
+
+Gtk
+
+
+
+Gtk
+
++
+
+1 Nb
+
+f (x; t)
+
+7: end for
+
+8: Utk  m · Utk-1 + Gkt
+
+9: Vtk  Vtk-1 + Utk
+
+10: for j = 0, · · · , M do
+
+11: thr  s% of Vtk[j]
+
+12: M ask  Vtk[j] > thr
+
+13: Gkt [j]  Vtk[j] M ask
+
+14: Vtk[j]  Vtk[j] ¬M ask
+
+15: end for
+
+16:
+
+All-reduce: Gt 
+
+N k=1
+
+sparse(Gtk
+
+)
+
+17: t+1  momentum SGD (t, Gt)
+
+18: end for
+
+Input: dataset 
+
+Input: minibatch size b per node
+
+Input: momentum m
+
+Input: the number of nodes N
+
+Input: optimization function Nesterov momentum SGD
+
+Input: initial parameters w = {w[0], · · · , w[M ]}
+
+1: U k  0, V k  0
+
+2: for t = 0, 1, · · · do 3: Gk  0
+
+4: for i = 1, · · · , b do
+
+5: Sample data x from 
+
+6:
+
+Gkt
+
+
+
+Gtk
+
++
+
+1 Nb
+
+f (x; t)
+
+7: end for
+
+8: Utk  m · Utk-1 + Gtk
+
+9: Vtk  Vtk-1 + Utk + Gkt
+10: for j = 0, · · · , M do 11: thr  s% of Vtk[j]
+
+12: M ask  Vtk[j] > thr
+
+13: Gtk[j]  Vtk[j] M ask
+
+14: Vtk[j]  Vtk[j] ¬M ask
+
+15: end for
+
+16:
+
+All-reduce: Gt 
+
+N k=1
+
+sparse(Gkt
+
+)
+
+17: t+1  Nesterov momentum SGD (t, Gt)
+
+18: end for
+
+11
+
+

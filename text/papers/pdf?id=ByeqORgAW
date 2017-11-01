@@ -1,0 +1,1097 @@
+Under review as a conference paper at ICLR 2018
+PROXIMAL BACKPROPAGATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We propose proximal backpropagation (ProxProp) as a novel algorithm that takes implicit instead of explicit gradient steps to update the network parameters during neural network training. Our algorithm is motivated by the step size limitation of explicit gradient descent, which poses an impediment for optimization. ProxProp is developed from a general point of view on the backpropagation algorithm, currently the most common technique to train neural networks via stochastic gradient descent and variants thereof. Specifically, we show that backpropagation of a prediction error is equivalent to sequential gradient descent steps on a quadratic penalty energy, which comprises the network activations as variables of the optimization. We further analyze theoretical properties of ProxProp and in particular prove that the algorithm yields a descent direction in parameter space and can therefore be combined with a wide variety of convergent algorithms. Finally, we devise an efficient numerical implementation that integrates well with popular deep learning frameworks. We conclude by demonstrating promising numerical results and show that ProxProp can be effectively combined with common first order optimizers such as Adam.
+1 INTRODUCTION
+In recent years neural networks have gained considerable attention in solving difficult correlation tasks such as classification in computer vision (Krizhevsky et al., 2012) or sequence learning (Sutskever et al., 2014) and as building blocks of larger learning systems (Silver et al., 2016). Training neural networks is accomplished by optimizing a nonconvex, possibly nonsmooth, nested function of the network parameters. Since the introduction of stochastic gradient descent (SGD) (Robbins & Monro, 1951; Bottou, 1991), several more sophisticated optimization methods have been studied. One such class is that of quasi-Newton methods, as for example the comparison of L-BFGS with SGD in (Le et al., 2011), Hessian-free approaches (Martens, 2010), and the Sum of Functions Optimizer in (Sohl-Dickstein et al., 2013). Several works consider specific properties of energy landscapes of deep learning models such as frequent saddle points (Dauphin et al., 2014) and well-generalizable local optima (Chaudhari et al., 2017a). Among the most popular optimization methods in currently used deep learning frameworks are momentum based improvements of classical SGD, notably Nesterov's Accelerated Gradient (Nesterov, 1983; Sutskever et al., 2013), and the Adam optimizer (Kingma & Ba, 2015), which uses estimates of first and second order moments of the gradients for parameter updates.
+Nevertheless, the optimization of these models remains challenging, as learning with SGD and its variants requires careful weight initialization and a sufficiently small learning rate in order to yield a stable and convergent algorithm. Moreover, SGD often has difficulties in propagating a learning signal deeply into a network, commonly referred to as the vanishing gradient problem (Hochreiter et al., 2001).
+Training neural networks can be formulated as a constrained optimization problem by explicitly introducing the network activations as variables of the optimization, which are coupled via layerwise constraints to enforce a feasible network configuration. The authors of (Carreira-Perpin~a´n & Wang, 2014) have tackled this problem with a quadratic penalty approach, the method of auxiliary coordinates (MAC). Closely related, (Taylor et al., 2016) introduce additional auxiliary variables to further split linear and nonlinear transfer between layers and propose a primal dual algorithm for optimization. From a different perspective, (LeCun, 1988) takes a Lagrangian approach to formulate the constrained optimization problem.
+1
+
+Under review as a conference paper at ICLR 2018
+
+n0
+
+n1
+
+n1
+
+n2
+
+nL-2
+
+nL-2
+
+...
+
+. . . Ly
+
+...
+
+X  z1  a1  z2
+
+zL-2  aL-2 
+
+Figure 1: Notation overview. For an L-layer feed-forward network we denote the explicit layer-wise activation variables as zl and al. The transfer functions are denoted as  and . Layer l is of size nl.
+
+In this work, we start from a constrained optimization point of view on the classical backpropagation algorithm. We show that backpropagation can be interpreted as a method alternating between two steps. First, a forward pass of the data with the current network weights. Secondly, an ordered sequence of gradient descent steps on a quadratic penalty energy.
+Using this point of view, instead of taking explicit gradient steps to update the network parameters associated with the linear transfer functions, we propose to use implicit gradient steps (also known as proximal steps, for the definition see (6)). We prove that such a model yields a descent direction and can therefore be used in a wide variety of (provably convergent) algorithms under weak assumptions. Since an exact proximal step may be costly, we further consider a matrix-free conjugate gradient (CG) approximation, which can directly utilize the efficient pre-implemented forward and backward operations of any deep learning framework. We prove that this approximation still yields a descent direction and demonstrate the effectiveness of the proposed approach in PyTorch.
+
+2 MODEL AND NOTATION
+
+We propose a method to train a general L-layer neural network of the functional form
+
+J(; X, y) = Ly((L-1, ((· · · , ((1, X)) · · · )).
+
+(1)
+
+Here, J(; X, y) denotes the training loss as a function of the network parameters , the input data X and the training targets y. As the final loss function Ly we choose the softmax cross-entropy for our classification experiments.  is a linear transfer function and  an elementwise nonlinear transfer
+function. As an example, for fully-connected neural networks  = (W, b) and (, a) = W a + b1.
+
+While we assume the nonlinearities  to be continuously differentiable functions for analysis purposes, our numerical experiments indicate that the proposed scheme extends to rectified linear units (ReLU), (x) = max(0, x). Formally, the functions  and  map between spaces of different dimensions depending on the layer. However, to keep the presentation clean, we do not state this dependence explicitly. Figure 1 illustrates our notation for the fully-connected network architecture.
+
+Throughout this paper, we denote the Euclidean norm for vectors and the Frobenius norm for matrices by || · ||, induced by an inner product ·, · . We use the gradient symbol  to denote the transpose of the Jacobian matrix, such that the chain rule applies in the form "inner derivative times outer derivative". For all computations involving matrix-valued functions and their gradient/Jacobian, we uniquely identify all involved quantities with their vectorized form by flattening matrices in a column-first order. Furthermore, we denote by A the adjoint of a linear operator A.
+
+3 PENALTY FORMULATION OF BACKPROPAGATION
+
+The gradient descent iteration on a nested function J(; X, y),
+
+k+1 = k -  J (k; X, y),
+
+(2)
+
+is commonly implemented using the backpropagation algorithm (Rumelhart et al., 1986). As the basis for our proposed optimization method, we derive a connection between the classical backpropagation algorithm and quadratic penalty functions of the form
+
+E(,
+
+a,
+
+z)
+
+=
+
+Ly
+
+((L-1,
+
+aL-2))
+
++
+
+L-2
+
+ 2
+
+(zl) - al
+
+2+  2
+
+(l, al-1) - zl
+
+2.
+
+l=1
+
+(3)
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 - Penalty formulation of BackProp Algorithm 2 - ProxProp
+
+Input: Current parameters k.
+
+Input: Current parameters k.
+
+// Forward pass.
+for l = 1 to L - 2 do zlk = (lk, alk-1), akl = (zlk).
+end for
+
+// a0 = X.
+
+// Forward pass.
+for l = 1 to L - 2 do zlk = (lk, akl-1), alk = (zlk).
+end for
+
+// a0 = X.
+
+// Perform minimization steps on (3).
+a grad. step on E wrt. (L-1, aL-2). for l = L - 2 to 1 do
+b grad. step on E wrt. zl and al-1, c grad. step on E wrt. l. end for
+
+// Perform minimization steps on (3).
+a grad. step on E wrt. (L-1, aL-2). for l = L - 2 to 1 do
+b grad. step on E wrt. zl and al-1, c prox step on E wrt. l. end for
+
+Output: New parameters k+1.
+
+Output: New parameters k+1.
+
+The approach of (Carreira-Perpin~a´n & Wang, 2014) is based on the minimization of (3), as under mild conditions the limit ,    leads to the convergence of the sequence of minimizers of E to the minimizer of J (Nocedal & Wright, 2006, Theorem 17.1). In contrast to (Carreira-Perpin~a´n & Wang, 2014) we do not optimize (3), but rather use a connection of (3) to the classical backpropagation algorithm to motivate a semi-implicit optimization algorithm for the original cost function J.
+Indeed, the iteration shown in Algorithm 1 of forward passes followed by a sequential gradient descent on the penalty function E is equivalent to the classical gradient descent iteration. Proposition 1. Let Ly,  and  be continuously differentiable. For  =  = 1/ and k as the input to Algorithm 1, its output k+1 satisfies (2), i.e., Algorithm 1 computes one gradient descent iteration on J.
+Proof. For this and all further proofs we refer to Appendix A.
+
+4 PROXIMAL BACKPROPAGATION
+The interpretation of Proposition 1 leads to the natural idea of replacing the explicit gradient steps a , b and c in Algorithm 1 with other ­ possibly more powerful ­ minimization steps. We propose Proximal Backpropagation (ProxProp) as one such algorithm that takes implicit instead of explicit gradient steps to update the network parameters  in step c . This algorithm is motivated by the step size restriction of gradient descent.
+
+4.1 GRADIENT DESCENT AND PROXIMAL MAPPINGS
+
+Explicit gradient steps pose severe restrictions on the allowed step size  : Even for a convex, twice continuously differentiable, L -smooth function f : Rn  R, the convergence of the gradient descent algorithm can only be guaranteed for step sizes 0 <  < 2/L . The Lipschitz constant L of the gradient f is in this case equal to the largest eigenvalue of the Hessian H. With the
+interpretation of backpropagation as in Proposition 1, gradient steps are taken on quadratic functions.
+As an example for the first layer,
+
+f ()
+
+=
+
+1 ||X 2
+
+-
+
+z1||2
+
+.
+
+(4)
+
+In this case the Hessian is H = XX , which for the CIFAR-10 dataset has a largest eigenvalue of 6.7 · 106. Similar problems also arise in other layers where poorly conditioned matrices al pose
+limitations for guaranteeing the energy E to decrease.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+The proximal mapping (Moreau, 1965) of a function f : Rn  R is defined as:
+
+proxf (y)
+
+:=
+
+argmin
+xRn
+
+f (x)
+
++
+
+1 2
+
+||x
+
+-
+
+y||2.
+
+(5)
+
+By rearranging the optimality conditions to (5) and taking y = xk, it can be interpreted as an implicit gradient step evaluated at the new point xk+1 (assuming differentiability of f ):
+
+xk+1 := argmin f (x) + 1 ||x - xk||2 = xk -  f (xk+1).
+
+xRn
+
+2
+
+(6)
+
+The iterative algorithm (6) is known as the proximal point algorithm (Martinet, 1970). In con-
+
+trast to explicit gradient descent this algorithm is unconditionally stable, i.e. the update scheme
+
+(6) monotonically decreases f for any  > 0, since it holds by definition of the minimizer xk+1
+
+that f (xk+1) +
+
+1 2
+
+||xk+1
+
+-
+
+xk ||2
+
+
+
+f (xk).
+
+Thus proximal mappings yield unconditionally sta-
+
+ble subproblems in the following sense: The update in l provably decreases the penalty energy
+
+E(, ak, zk) from (3) for fixed activations (ak, zk) for any choice of step size. This motivates us
+
+to use proximal steps as depicted in Algorithm 2.
+
+4.2 PROXPROP
+
+We propose to replace explicit gradient steps with proximal steps to update the network parameters of the linear transfer function. More precisely, after the forward pass
+
+zlk = (lk, akl-1), akl = (zlk),
+we keep the explicit gradient update equations for zl and al. The last layer update is
+
+(7)
+
+and for all other layers,
+
+akL+-12/2 = akL-2 -  aL-2 Ly((L-1, aL-2)),
+
+(8)
+
+zlk+1/2 = zlk -  (zlk)((zlk) - akl +1/2),
+
+akl-+11/2 = alk-1 - 
+
+1 2
+
+(l, ·) - zl
+
+2
+
+(alk-1),
+
+(9) (10)
+
+where we use akl +1/2 and zlk+1/2 to denote the updated variables before the forward pass of the next iteration. However, instead of taking explicit gradient steps to update the linear transfer parameters l, we take proximal steps
+
+lk+1
+
+= argmin
+
+
+1 2
+
+||(,
+
+akl-1)
+
+-
+
+zlk+1/2||2
+
++
+
+1 2
+
+||
+
+-
+
+lk
+
+||2.
+
+(11)
+
+This update can be computed in closed form as it amounts to a linear solve (for details see Appendix B). While in principle one can take a proximal step on the final loss Ly, for efficiency reasons we choose an explicit gradient step, as the proximal step does not have a closed form solution
+in many scenarios (e.g. the softmax cross-entropy loss in classification problems). Specifically,
+
+Lk+-11 = Lk -1 -  L-1 Ly((Lk -1, aLk -2)).
+
+(12)
+
+Note that we have eliminated the step sizes in the updates for zl and al-1 in (9) and (10), as such
+
+updates correspond to the choice of 
+
+=
+
+
+
+=
+
+1 
+
+in the penalty function (3) and are natural in the
+
+sense of Proposition 1. For the proximal steps in the parameters  in (11) we have introduced a step
+
+size  which ­ as we will see in Proposition 2 below ­ changes the descent metric opposed to 
+
+which rather rescales the magnitude of the update.
+
+We refer to one sweep of updates according to equations (7) - (12) as ProxProp, as it closely resembles the classical backpropagation (BackProp), but replaces the parameter update by a proximal mapping instead of an explicit gradient descent step. In the following subsection we analyze the convergence properties of ProxProp more closely.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+4.2.1 CONVERGENCE OF PROXPROP
+
+ProxProp inherits all convergence-relevant properties from the classical backpropagation algorithm,
+despite replacing explicit gradient steps with proximal steps: It minimizes the original network energy J(; X, y) as its fixed-points are stationary points of J(; X, y), and the update direction k+1 - k is a descent direction such that it converges when combined with a suitable optimizer.
+In particular, it is straight forward to combine ProxProp with popular optimizers such as Nesterov's
+accelerated gradient descent (Nesterov, 1983) or Adam (Kingma & Ba, 2015).
+
+In the following, we give a detailed analysis of these properties. Proposition 2. For l = 1, . . . , L - 2, the update direction k+1 - k computed by ProxProp meets
+
+lk+1 - lk = -
+
+1 
+
+I
+
++
+
+((·,
+
+akl-1))((·,
+
+akl-1))
+
+-1
+l J (k; X, y).
+
+In other words, ProxProp multiplies the gradient l J with the inverse of the positive definite, symmetric matrix
+
+Mlk
+
+:=
+
+1 I
+
+
++
+
+((·, alk-1))((·, akl-1)),
+
+(13)
+
+which depends on the activations alk-1 of the forward pass. Proposition 2 has some important implications:
+Proposition 3. For any choice of  > 0 and  > 0, fixed points  of ProxProp are stationary points of the original energy J(; X, y).
+
+Moreover, we can conclude convergence in the following sense. Proposition 4. The ProxProp direction k+1 - k is a descent direction. Moreover, under the (weak) assumption that the activations alk remain bounded, the angle k between J(k; X, y) and k+1 - k remains uniformly bounded away from , i.e.
+cos(k) > c  0, k
+for some constant c.
+
+Proposition 4 immediately implies convergence of a whole class of algorithms that depend only on a provided descent direction. We refer the reader to (Nocedal & Wright, 2006, Chapter 3.2) for examples and more details.
+Furthermore, Proposition 4 states convergence for any minimization scheme in step c of Algorithm 2 that induces a descent direction in parameter space and thus provides the theoretical basis for a wide range of neural network optimization algorithms.
+Considering the advantages of proximal steps over gradient steps, it is tempting to also update the auxiliary variables a and z in an implicit fashion. This corresponds to a proximal step in b of Algorithm 2. However, one cannot expect an analogue version of Proposition 3 to hold anymore. For example, if the update of aL-2 in (8) is replaced by a proximal step, the propagated error does not correspond to the gradient of the loss function Ly, but to the gradient of its Moreau envelope. Consequently, one would then minimize a different energy. While in principle this could result in an optimization algorithm with, for example, favorable generalization properties, we focus on minimizing the original network energy in this work and therefore do not further pursue the idea of implicit steps on a and z.
+
+4.2.2 INEXACT SOLUTION OF PROXIMAL STEPS
+
+As we can see in Proposition 2, the ProxProp updates differ from vanilla gradient descent by the
+
+variable metric induced by the matrices (Mlk)-1 with Mlk defined in (13). Computing the ProxProp
+
+update
+
+direction
+
+vlk
+
+:=
+
+1 
+
+(lk+1
+
+- lk)
+
+therefore
+
+reduces
+
+to
+
+solving
+
+the
+
+linear
+
+equation
+
+Mlkvlk = -l J (k; X, y),
+
+(14)
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+which requires an efficient implementation. We propose to use a conjugate gradient (CG) method, not only because it is one of the most efficient methods for iteratively solving linear systems in general, but also because it can be implemented matrix-free: It merely requires the application of the linear operator Mlk which consists of the identity and an application of ((·, akl-1))((·, akl-1)). The latter, however, is preimplemented for many linear transfer functions  in common deep learning frameworks, because (x, akl-1) = ((·, alk-1))(x) is nothing but a forward-pass in , and (z, alk-1) = ((·, akl-1))(z) provides the gradient with respect to the parameters  if z is the backpropagated gradient up to that layer. Therefore, a CG solver is straight-forward to implement in any deep learning framework using the existing, highly efficient and high level implementations of  and .
+As we will analyze in more detail in Section 5.1, we approximate the solution to (14) with a few CG iterations, as the advantage of highly precise solutions does not justify the additional computational effort in obtaining them. Using any number of iterations provably does not harm the convergence properties of ProxProp:
+Proposition 5. The direction v~lk one obtains from approximating the solution vlk of (14) with the CG method remains a descent direction for any number of iterations.
+
+5 NUMERICAL EVALUATION
+ProxProp generally fits well with the API provided by modern deep learning frameworks, since it can be implemented as a network layer with a custom backward pass for the proximal mapping. We chose PyTorch for our implementation. In particular, our implementation can use the API's GPU compute capabilities; all numerical experiments reported below were conducted on an NVIDIA Titan X GPU. To directly compare the algorithms, we used our own layer for either proximal or gradient update steps (cf. step c in Algorithms 1 and 2). A ProxProp layer can be seamlessly integrated in a larger network architecture, also with other parametrized layers such as BatchNormalization.
+
+5.1 EXACT AND APPROXIMATE SOLUTIONS TO PROXIMAL STEPS
+
+We study the behavior of ProxProp in comparison to classical BackProp for a supervised visual
+
+learning problem on the CIFAR-10 dataset. We train a fully connected network with architecture
+
+3072 - 4000 - 1000 - 4000 - 10 and ReLU nonlinearities. As the loss function, we chose the cross-
+
+entropy between the probability distribution obtained by a softmax nonlinearity and the ground-truth
+
+labels. We used a set. We initialized
+
+subset of 45000 images for the parameters l uniformly
+
+itnra[i-ni1n/gwnhli-le1,k1e/epinnlg-510].00
+
+images
+
+as
+
+a
+
+validation
+
+Figure 2 shows the decay of the full batch training loss over epochs (left) and training time (middle) for a Nesterov momentum based optimizer using a momentum of 0.95 and minibatches of size 500. We used  = 0.05 for the ProxProp variants along with  = 1. For BackProp we chose  = 0.05 as the optimal value we found in a grid search.
+
+As we can see in Figure 2 using implicit steps indeed improves the optimization progress per epoch. Thanks to powerful linear algebra methods on the GPU1, the exact ProxProp solution is competitive
+with BackProp even in terms of runtime.
+
+The advantage of the CG-based approximations, however, is that they generalize to arbitrary linear transfer functions in a matrix-free manner, i.e. they are independent of whether the matrices Mlk can be formed efficiently. Moreover, the validation accuracies (right plot in Figure 2) suggest that
+these approximations have generalization advantages in comparison to BackProp as well as the exact
+ProxProp method. Finally, we found the exact solution to be significantly more sensitive to changes
+of  than its CG-based approximations. We therefore focus on the CG-based variants of ProxProp in the following. In particular, we can eliminate the hyperparameter  and consistently chose  = 1 for the rest of this paper. Consequently, there are no additional parameters compared with gradient
+descent using BackProp.
+
+1PyTorch uses the MAGMA library, http://icl.cs.utk.edu/magma/.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Full Batch Training Loss Full Batch Training Loss
+Validation Accuracy
+
+CIFAR-10, 3072-4000-1000-4000-10 MLP
+BackProp 2 ProxProp (cg3)
+ProxProp (cg5) ProxProp (cg10) 1.5 ProxProp (exact)
+1
+
+0.5
+
+0 0
+
+10 20 30 40 50 Epochs
+
+CIFAR-10, 3072-4000-1000-4000-10 MLP
+BackProp 2 ProxProp (cg3)
+ProxProp (cg5) ProxProp (cg10) 1.5 ProxProp (exact)
+1
+
+0.5
+
+0 0
+
+50 100 150 200 250 300 Time [s]
+
+CIFAR-10, 3072-4000-1000-4000-10 MLP
+
+0.5 0.4 0.3 0.2 0.1
+0
+
+BackProp ProxProp (cg3) ProxProp (cg5) ProxProp (cg10) ProxProp (exact)
+10 20 30 40 50 Epochs
+
+Figure 2: Exact and inexact solvers for ProxProp compared with BackProp. Left: A more precise solution of the proximal subproblem leads to overall faster convergence, while even a very inexact solution (only 3 CG iterations) already outperforms classical backpropagation. Center & Right: While the run time is comparable between the methods, the proposed ProxProp updates have better generalization performance ( 54% for backprop and  56% for ours on the test set).
+
+5.2 STABILITY FOR LARGER STEP SIZES
+We compare the behavior of ProxProp and BackProp for different step sizes. Table 5.2 shows the final full batch training loss after 50 epochs with various  . The ProxProp based approaches remain stable over a significantly larger range of  . Even more importantly, deviating from the optimal step size  by one order of magnitude resulted in a divergent algorithm for classical BackProp, but still provides reasonable training results for ProxProp with 3 or 5 CG iterations. These results are in accordance with our motivation developed in Section 4.1. From a practical point of view, this eases hyperparameter search over  .
+
+ 50 10
+
+5
+
+1
+
+0.5 0.1 0.05 5 · 10-3 5 · 10-4
+
+BackProp ­
+
+­
+
+­
+
+­
+
+­ 0.524 0.091 0.637 1.531
+
+ProxProp (cg1) 77.9 0.079 0.145 0.667 0.991 1.481 1.593 ProxProp (cg3) 94.7 0.644 0.031 2 · 10-3 0.012 1.029 1.334 ProxProp (cg5) 66.5 0.190 0.027 3 · 10-4 2 · 10-3 0.399 1.049
+
+1.881 1.814 1.765
+
+2.184 2.175 2.175
+
+Table 1: Full batch loss for conjugate gradient versions of ProxProp and BackProp after training for 50 epochs, where "­" indicates that the algorithm diverged to NaN. The implicit ProxProp algorithms remain stable for a significantly wider range of step sizes.
+
+5.3 PROXPROP AS A FIRST-ORDER ORACLE
+We show that ProxProp can be used as a gradient oracle for first-order optimization algorithms. In this section, we consider Adam (Kingma & Ba, 2015). Furthermore, to demonstrate our algorithm on a generic architecture with layers commonly used in practice, we trained on a convolutional neural network of the form:
+Conv[16 × 32 × 32]  ReLU  Pool[16 × 16 × 16]  Conv[20 × 16 × 16]  ReLU  Pool[20 × 8 × 8]  Conv[20 × 8 × 8]  ReLU  Pool[20 × 4 × 4]  FC + Softmax[10 × 1 × 1]
+
+Here, the first dimension denotes the respective number of filters with kernel size 5 × 5 and max pooling downsamples its input by a factor of two. We set the step size  = 10-3 for both BackProp and ProxProp.
+The results are shown in Fig. 3. Using parameter update directions induced by ProxProp within Adam leads to a significantly faster decrease of the full batch training loss in epochs. While the running time is higher than the highly optimized backpropagation method, we expect that it can be improved through further engineering efforts. We deduce from Fig. 3 that the best validation accuracy (72.9%) of the proposed method is higher than the one obtained with classical backpropagation
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Full Batch Loss
+
+CIFAR-10, Convolutional Neural Network Adam + BackProp Adam + ProxProp (3 cg)
+2 Adam + ProxProp (10 cg)
+1.5
+1
+0.5 0 10 20 30 40 50 Epochs CIFAR-10, Convolutional Neural Network
+
+Full Batch Loss
+
+CIFAR-10, Convolutional Neural Network Adam + BackProp
+2 Adam + ProxProp (3 cg) Adam + ProxProp (10 cg)
+1.5
+1
+0.5
+0 50 100 150 200 250 300 Time [s]
+CIFAR-10, Convolutional Neural Network
+
+0.6 0.6
+
+Validation Accuracy
+
+Validation Accuracy
+
+0.4 0.4
+
+0.2 0
+
+Adam + BackProp Adam + ProxProp (3 cg) Adam + ProxProp (10 cg)
+10 20 30 40 50 Epochs
+
+0.2 Adam + BackProp Adam + ProxProp (3 cg) Adam + ProxProp (10 cg)
+0 50 100 150 200 250 300 Time [s]
+
+Figure 3: ProxProp as a first-order oracle in combination with the Adam optimizer. The proposed method leads to faster decrease of the full batch loss in epochs and to an overall higher accuracy on the validation set.
+
+(71.7%). Such a positive effect of proximal smoothing on the generalization capabilities of deep networks is consistent with the observations of Chaudhari et al. (2017b). Finally, the accuracies on the test set after 50 epochs are 70.7% for ProxProp and 69.6% for BackProp which suggests that the proposed algorithm can lead to better generalization.
+
+6 CONCLUSION
+We have proposed proximal backpropagation (ProxProp) as an effective method for training neural networks. To this end, we first showed the equivalence of the classical backpropagation algorithm with an algorithm that alternates between sequential gradient steps on a quadratic penalty function and forward passes through the network. Subsequently, we developed a generalization of backprop, which replaces explicit gradient steps with implicit (proximal) steps, and proved that such a scheme yields a descent direction, even if the implicit steps are approximated by conjugate gradient iterations. Our numerical analysis demonstrates that ProxProp is stable across various choices of step sizes and shows promising results when compared with common stochastic gradient descent optimizers.
+We believe that the interpretation of gradient descent as the alternation between forward passes and sequential minimization steps on a penalty functional provides a theoretical basis for the development of further learning algorithms.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Le´on Bottou. Stochastic gradient learning in neural networks. Proceedings of Neuro-Nimes, 91(8), 1991.
+Miguel A´ . Carreira-Perpin~a´n and Weiran Wang. Distributed optimization of deeply nested systems. In Proceedings of the 17th International Conference on Artificial Intelligence and Statistics, AISTATS, 2014.
+Pratik Chaudhari, Anna Choromanska, Stefano Soatto, Yann LeCun, Carlo Baldassi, Christian Borgs, Jennifer Chayes, Levent Sagun, and Riccardo Zecchina. Entropy-SGD: Biasing gradient descent into wide valleys. In Proceedings of the 5th International Conference on Learning Representations, ICLR, 2017a.
+Pratik Chaudhari, Adam Oberman, Stanley Osher, Stefano Soatto, and Guillame Carlier. Deep Relaxation: partial differential equations for optimizing deep neural networks. arXiv preprint arXiv:1704.04932, 2017b.
+Yann N. Dauphin, Razvan Pascanu, Caglar Gulcehre, Kyunghyun Cho, Surya Ganguli, and Yoshua Bengio. Identifying and attacking the saddle point problem in high-dimensional non-convex optimization. In Proceedings of the 27th International Conference on Neural Information Processing Systems, NIPS, 2014.
+Sepp Hochreiter, Yoshua Bengio, and Paolo Frasconi. Gradient flow in recurrent nets: the difficulty of learning long-term dependencies. In Field Guide to Dynamical Recurrent Networks. IEEE Press, 2001.
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In Proceedings of the 3rd International Conference on Learning Representations, ICLR, 2015.
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. ImageNet classification with deep convolutional neural networks. In Proceedings of the 25th International Conference of Neural Information Processing Systems, NIPS, 2012.
+Quoc V Le, Adam Coates, Bobby Prochnow, and Andrew Y Ng. On optimization methods for deep learning. In Proceedings of The 28th International Conference on Machine Learning, ICML, 2011.
+Yann LeCun. A theoretical framework for back-propagation. In Proceedings of the 1988 Connectionist Models Summer School, pp. 21­28, 1988.
+James Martens. Deep learning via Hessian-free optimization. In Proceedings of the 27th International Conference on Machine Learning, ICML, 2010.
+Bernard Martinet. Re´gularisation d'ine´quations variationnelles par approximations successives. Rev. Francaise Inf. Rech. Oper., pp. 154­159, 1970.
+Jean-Jacques Moreau. Proximite´ et dualite´ dans un espace hilbertien. Bulletin de la Socie´te´ mathe´matique de France, 93:273­299, 1965.
+Yurii Nesterov. A method of solving a convex programming problem with convergence rate O(1/k2). Soviet Mathematics Doklady, 27(2):372­376, 1983.
+Jorge Nocedal and Stephen Wright. Numerical Optimization. Springer Series in Operations Research and Financial Engineering. Springer, 2006.
+Herbert Robbins and Sutton Monro. A stochastic approximation method. The Annals of Mathematical Statistics, 22(3):400­407, 1951.
+David E Rumelhart, Geoffrey E Hinton, and Ronald J Williams. Learning representations by backpropagating errors. Nature, 323(6088):533­536, 1986.
+9
+
+Under review as a conference paper at ICLR 2018
+David Silver, Aja Huang, Chris J. Maddison, Arthur Guez, Laurent Sifre, George van den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, Sander Dieleman, Dominik Grewe, John Nham, Nal Kalchbrenner, Ilya Sutskever, Timothy Lillicrap, Madeleine Leach, Koray Kavukcuoglu, Thore Graepel, and Demis Hassabis. Mastering the game of go with deep neural networks and tree search. Nature, 529(7587):484­489, 2016.
+Jascha Sohl-Dickstein, Ben Poole, and Surya Ganguli. Fast large-scale optimization by unifying stochastic gradient and quasi-newton methods. In Proceedings of The 31st International Conference on Machine Learning, ICML, 2013.
+Ilya Sutskever, James Martens, George Dahl, and Geoffrey Hinton. On the importance of initialization and momentum in deep learning. In Proceedings of the 30th International Conference on International Conference on Machine Learning, ICML, 2013.
+Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks. In Proceedings of the 27th International Conference of Neural Information Processing Systems, NIPS, 2014.
+Gavin Taylor, Ryan Burmeister, Zheng Xu, Bharat Singh, Ankit Patel, and Tom Goldstein. Training neural networks without gradients: A scalable ADMM approach. In Proceedings of the 33rd International Conference on Machine Learning, ICML, 2016.
+10
+
+Under review as a conference paper at ICLR 2018
+
+APPENDIX
+
+A THEORETICAL RESULTS
+
+Proof of Proposition 1. We first take a gradient step on
+
+L-2 
+
+E(, a, z) = Ly((L-1, aL-2)) +
+
+2
+
+(zl) - al
+
+2+  2
+
+(l, al-1) - zl
+
+2,
+
+l=1
+
+(15)
+
+with respect to (L-1, aL-2). The gradient step with respect to L-1 is the same as in the gradient
+
+descent update,
+
+k+1 = k -  J (k; X, y),
+
+(16)
+
+since J depends on L-1 only via Ly  .
+
+The gradient descent step on aL-2 in a yields
+
+aLk+-12/2 = akL-2 -  a(Lk -1, akL-2) · Ly((Lk -1, akL-2)),
+
+(17)
+
+where we use aLk+-12/2 to denote the updated variable aL-2 before the forward pass of the next iteration. To keep the presentation as clear as possible we slightly abused the notation of a right multiplication with a(Lk-1, aLk -2): While this notation is exact in the case of fully connected layers, it represents the application of the corresponding linear operator in the more general case,
+e.g. for convolutions.
+
+For all layers l  L - 2 note that due to the forward pass in Algorithm 1 we have
+
+(zlk) = akl , (lk, alk-1) = zlk and we therefore get the following update equations in the gradient step b
+
+zlk+1/2 = zlk -  (zlk) (zlk) - alk+1/2 = zlk - (zlk) alk - alk+1/2 ,
+
+(18)
+
+and in the gradient step c w.r.t. al-1,
+
+alk-+11/2 = alk-1 -  a(lk, alk-1) · (lk, akl-1) - zlk+1/2 = alk-1 - a(lk, akl-1) · zlk - zlk+1/2 .
+
+(19)
+
+Equations (18) and (19) can be combined to obtain:
+
+zlk - zlk+1/2 =(zlk)a(lk+1, alk) · zlk+1 - zlk++11/2 .
+
+(20)
+
+The above formula allows us to backtrack the differences of the old zlk and the updated zlk+1/2 up to layer L - 2, where we can use equations (18) and (17) to relate the difference to the loss. Altogether, we obtain
+
+
+L-2
+
+
+
+zlk - zlk+1/2 =   (zqk)a(qk+1, akq ) · Ly((Lk -1, akL-2)).
+
+q=l
+
+(21)
+
+By inserting (21) into the gradient descent update equation with respect to l in c , k+1 = k - (lk, akl-1) · zlk - zlk+1/2 ,
+
+(22)
+
+we obtain the chain rule for update (16).
+
+Proof of Proposition 2. Since only the updates for l, l = 1, . . . , L - 2, are performed implicitly, one can replicate the proof of Proposition 1 exactly up to equation (21). Let us denote the right hand side of (21) by glk, i.e. zlk+1/2 = zlk - glk and note that
+ l J (k; X, y) = (·, alk-1) · glk
+
+11
+
+Under review as a conference paper at ICLR 2018
+
+holds by the chain rule (as seen in (22)). We have eliminated the dependence of (lk, akl-1) on lk and wrote (·, akl-1) instead, because we assume  to be linear in  such that  does not depend on the point  where the gradient is evaluated anymore.
+We now rewrite the ProxProp update equation of the parameters  as follows
+
+lk+1 =
+
+argmin
+
+
+1 ||(, 2
+
+alk-1)
+
+-
+
+zlk+1/2||2
+
++
+
+1 2
+
+||
+
+-
+
+lk ||2
+
+=
+
+argmin
+
+
+1 2
+
+||(,
+
+alk-1)
+
+-
+
+(zlk
+
+-
+
+glk )||2
+
++
+
+1 2
+
+||
+
+-
+
+lk ||2
+
+=
+
+argmin
+
+
+1 2
+
+||(,
+
+akl-1)
+
+-
+
+((k ,
+
+alk-1)
+
+-
+
+glk )||2
+
++
+
+1 2
+
+||
+
+-
+
+lk ||2
+
+=
+
+argmin
+
+
+1 ||( 2
+
+-
+
+k,
+
+alk-1)
+
++
+
+glk ||2
+
++
+
+1 2
+
+||
+
+-
+
+lk ||2 ,
+
+where we have used that  is linear in . The optimality condition yields
+
+(23) (24) (25) (26)
+
+0
+
+=
+
+(·,
+
+alk-1)((lk+1
+
+-
+
+k,
+
+akl-1)
+
++
+
+glk )
+
++
+
+1 
+
+(lk+1
+
+-
+
+lk )
+
+Again, due to the linearity of  in , one has
+
+(, alk-1) = ((·, alk-1))(), where , denotes the adjoint of a linear operator. We conclude
+
+0
+
+=
+
+(·,
+
+akl-1)((·,
+
+alk-1))(lk+1
+
+-
+
+k)
+
++
+
+(·, akl-1)glk
+
++
+
+1 
+
+(lk+1
+
+-
+
+lk ),
+
+
+
+1 
+
+I
+
++
+
+(·,
+
+akl-1)((·,
+
+alk-1))
+
+(lk+1 - lk) = -(·, alk-1)glk = - l J (k; X, y),
+
+(27)
+
+which yields the assertion.
+
+Proof of Proposition 3. Under the assumption that k converges, k  ^, one finds that alk  a^l and zlk  z^l = (^l, a^l-1) converge to the respective activations of the parameters ^ due to the forward pass and the continuity of the network. As we assume J(·; X, y) to be continuously differentiable, we deduce from (27) that limk l J(k; X, y) = 0 for all l = 1, . . . , L - 2. The parameters of the last layer L-1 are treated explicitly anyways, such that the above equation also
+holds for l = L - 1, which then yields the assertion.
+
+Proof of Proposition 4. As the matrices
+
+Mlk
+
+:=
+
+1 I
+
+
++
+
+((·, alk-1))((·, alk-1))
+
+(with the convention MLk-1 = I) are positive definite, so are their inverses, and the claim that k+1 - k is a descent direction is immediate,
+
+lk+1 - lk, l J (k; Y, x) = - (Mlk)-1l J (k; Y, x), l J (k; Y, x) .
+
+We still have to guarantee that this update direction does not become orthogonal to the gradient in the limit k  . The largest eigenvalue of (Mlk)-1 is bounded from above by . If the akl-1 remain bounded, then so does (·, alk-1) and the largest eigenvalue of (·, akl-1)(·, alk-1) must be bounded by some constant c~. Therefore, the smallest eigenvalue of (Mlk)-1 must remain
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+bounded
+
+from
+
+from
+
+below
+
+by
+
+(
+
+1 
+
++
+
+c~)-1.
+
+Abbreviating
+
+v
+
+=
+
+l J (k; Y, x),
+
+it
+
+follows
+
+that
+
+cos(k)
+
+=
+
+ 
+
+(Mlk)-1v, v (Mlk)-1v v
+
+
+
+min((Mlk)-1) v (Mlk)-1v v
+
+2
+
+
+
+min ((Mlk )-1 ) max ((Mlk )-1 )
+
+which yields the assertion.
+
+Proof of Proposition 5. According to (Nocedal & Wright, 2006, p. 109, Thm. 5.3) and (Nocedal &
+Wright, 2006, p. 106, Thm. 5.2) the k-th iteration xk of the CG method for solving a linear system Ax = b with starting point x0 = 0 meets
+
+1
+
+xk
+
+=
+
+arg
+
+min
+xspan(b,Ab,...,Ak-1 b)
+
+2
+
+x, Ax
+
+-
+
+b, x ,
+
+i.e. is optimizing over an order-k Krylov subspace. The starting point x0 = 0 can be chosen
+without loss of generality. Suppose the starting point is x~0 = 0, then one can optimize the variable x = x~ - x~0 with a starting point x0 = 0 and b = ~b + Ax~0.
+
+We will assume that the CG iteration has not converged yet as the claim for a fully converged CG iteration immediately follow from Proposition 4. Writing the vectors b, Ab, . . . , Ak-1b as columns of a matrix Kk, the condition x  span(b, Ab, . . . , Ak-1b) can equivalently be expressed as x = Kk for some   Rk. In terms of  our minimization problem becomes
+
+1
+
+xk
+
+=
+
+Kk 
+
+=
+
+arg
+
+min
+Rk
+
+2
+
+, (Kk)T AKk
+
+-
+
+(Kk)T b,  ,
+
+leading to the optimality condition
+
+0 = (Kk)T AKk - (Kk)T b,
+ xk = Kk((Kk)T AKk)-1(Kk)T b.
+ T Note that A is symmetric positive definite and can therefore be written as A A, leading to
+ (Kk)T AKk = ( AKk)T ( AKk)
+
+being symmetric positive definite. Hence, the matrix ((Kk)T AKk)-1 is positive definite, too, and
+xk, b = Kk((Kk)T AKk)-1(Kk)T b, b = ((Kk)T AKk)-1(Kk)T b, (Kk)T b > 0.
+
+Note that (Kk)T b is nonzero if b is nonzero, as b 2 is its first entry.
+
+To translate the general analysis of the CG iteration to our specific case, using any number of CG iterations we find that an approximate solution v~lk of
+
+Mlkvlk = -l J (k; X, y)
+
+leads to
+
+v~lk, -l J (k; X, y) > 0,
+
+i.e., to v~lk being a descent direction.
+
+B PROXIMAL OPERATOR FOR LINEAR TRANSFER FUNCTIONS
+
+In order to update the parameters l of the linear transfer function, we have to solve the problem
+
+(11),
+
+k+1 = argmin 1 ||(, ak) - zk+1/2||2 + 1 || - k||2.
+
+2
+
+2
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+Since we assume that  is linear in  for a fixed ak, there exists a matrix Ak such that
+
+vec(k+1) = argmin 1 ||Akvec() - vec(zk+1/2)||2 + 1 ||vec() - vec(k)||2,
+
+2
+
+2
+
+and the optimality condition yields
+
+vec(k+1) = (I + (Ak)T Ak)-1(vec(k) + (Ak)T vec(zk+1/2)).
+In the main paper we sometimes use the more abstract but also more concise notion of (·, ak), which represents the linear operator
+
+(·, ak)(Y ) = vec-1((Ak)T vec(Y )).
+
+To also make the above more specific, consider the example of (, ak) = ak. In this case the variable  may remain in a matrix form and the solution of the proximal mapping becomes
+
+k+1 = zk+1/2 (ak) + 1 k 
+
+ak (ak )
+
+1 +I
+
+-1
+.
+
+
+
+(28)
+
+Since ak  Rn×N for some layer size n and batch size N , the size of the linear system is independent of the batch size.
+
+14
+
+

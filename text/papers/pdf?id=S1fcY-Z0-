@@ -1,0 +1,571 @@
+Under review as a conference paper at ICLR 2018
+BAYESIAN HYPERNETWORKS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We propose Bayesian hypernetworks: a framework for approximate Bayesian inference in neural networks. A Bayesian hypernetwork h is a neural network which learns to transform a simple noise distribution, p( ) = N (0, I), to a distribution q() := q(h( )) over the parameters  of another neural network (the "primary network"). We train q with variational inference, using an invertible h to enable efficient estimation of the variational lower bound on the posterior p(|D) via sampling. In contrast to most methods for Bayesian deep learning, Bayesian hypernets can represent a complex multimodal approximate posterior with correlations between parameters, while enabling cheap iid sampling of q(). In practice, Bayesian hypernets provide a better defense against adversarial examples than dropout, and also exhibit competitive performance on a suite of tasks which evaluate model uncertainty, including regularization, active learning, and anomaly detection.
+1 INTRODUCTION
+Simple and powerful techniques for Bayesian inference of deep neural networks' (DNNs) parameters have the potential to dramatically increase the scope of applications for deep learning techniques. In real-world applications, unanticipated mistakes may be costly and dangerous, whereas anticipating mistakes allows an agent to seek human guidance (as in active learning), engage safe default behavior (such as shutting down), or use a "reject option" in a classification context.
+DNNs are typically trained to find the single most likely value of the parameters (the "MAP estimate"), but this approach neglects uncertainty about which parameters are the best ("parameter uncertainty"), which may translate into higher predictive uncertainty when likely parameter values yield highly confident but contradictory predictions. Conversely, Bayesian DNNs model the full posterior distribution of a model's parameters given the data, and thus provides better calibrated confidence estimates, with corresponding safety benefits (Gal & Ghahramani, 2016; Amodei et al., 2016).1 Maintaining a distribution over parameters is also one of the most effective defenses against adversarial attacks (Carlini & Wagner, 2017).
+Techniques for Bayesian DNNs are an active research topic. The most popular approach is variational inference (Blundell et al., 2015; Gal, 2016), which typically restricts the variational posterior to a simple family of distributions, for instance a factorial Gaussian (Blundell et al., 2015; Graves, 2011). Unfortunately, from a safety perspective, variational approximations tend to underestimate uncertainty, by heavily penalizing approximate distributions which place mass in regions where the true posterior has low density. This problem can be exacerbated by using a restricted family of posterior distribution; for instance a unimodal approximate posterior will generally only capture a single mode of the true posterior. With this in mind, we propose learning an extremely flexible and powerful posterior, parametrized by a DNN h, which we refer to as a Bayesian hypernetwork in reference to Ha et al. (2017).
+A Bayesian hypernetwork (BHN) takes random noise  N (0, I) as input and outputs a sample from the approximate posterior q() for another DNN of interest (the "primary network"). The key
+1While Bayesian deep learning may capture parameter uncertainty, most approaches, including ours, emphatically do not capture uncertainty about which model is correct (e.g., neural net vs decision tree, etc.). Parameter uncertainty is often called "model uncertainty" in the literature, but we prefer our terminology because it emphasizes the existence of further uncertainty about model specification.
+1
+
+Under review as a conference paper at ICLR 2018
+insight for building such a model is the use of an invertible hypernet, which enables Monte Carlo estimation of the entropy term - logq() in the variational inference training objective.
+We begin the paper by reviewing previous work on Bayesian DNNs, and explaining the necessary components of our approach (Section 2). Then we explain how to compose these techniques to yield Bayesian hypernets, as well as design choices which make training BHNs efficient, stable and robust (Section 3). Finally, we present experiments which validate the expressivity of BHNs, and demonstrate their competitive performance across several tasks (Section 4).
+2 RELATED WORK
+We begin with an overview of prior work on Bayesian neural networks in Section 2.1 before discussing the specific components of our technique in Sections 2.2 and 2.3.
+2.1 BAYESIAN DNNS
+Bayesian DNNs have been studied since the 1990s (Neal, 1996; MacKay, 1994). For a thorough review, see Gal (2016). Broadly speaking, existing methods either 1) use Markov chain Monte Carlo (Welling & Teh, 2011; Neal, 1996), or 2) directly learn an approximate posterior distribution using (stochastic) variational inference (Graves, 2011; Gal & Ghahramani, 2016; Salimans et al., 2015; Blundell et al., 2015), expectation propagation (Hernandez-Lobato & Adams, 2015; Soudry et al., 2014), or -divergences (Li & Gal, 2017). We focus here on the most popular approach: variational inference.
+Notable recent work in this area includes Gal & Ghahramani (2016), who interprets the popular dropout (Srivastava et al., 2014) algorithm as a variational inference method ("MC dropout"). This has the advantages of being simple to implement and allowing cheap samples from q(). Kingma et al. (2015) emulates Gaussian dropout, but yields a unimodal approximate posterior, and does not allow arbitrary dependencies between the parameters.
+The other important points of reference for our work are Bayes by Backprop (BbB) (Blundell et al., 2015), and multiplicative normalizing flows (Louizos & Welling, 2017). Bayes by Backprop can be viewed as a special instance of a Bayesian hypernet, where the hypernetwork only performs an element-wise scale and shift of the input noise (yielding a factorial Gaussian distribution).
+More similar is the work of Louizos & Welling (2017), who propose and dismiss BHNs due to the issues of scaling BHNs to large primary networks, which we address in Section 3.3.2 Instead, in their work, they use a hypernet to generate scaling factors, z on the means µ of a factorial Gaussian distribution. Because z follows a complicated distribution, this forms a highly flexible approximate posterior: q() = q(|z)q(z)dz. However, this approach also requires them to introduce an auxiliary inference network to approximate q(z|) in order to estimate the entropy term of the variational lower bound, resulting in lower bound on the variational lower bound.
+Finally, the variational autoencoder (VAE) (Jimenez Rezende et al., 2014; Kingma & Welling, 2013) family of generative models is likely the best known application of variational inference in DNNs, but note that the VAE is not a Bayesian DNN in our sense. VAEs approximate the posterior over latent variables, given a datapoint; Bayesian DNNs approximate the posterior over model parameters, given a dataset.
+2.2 HYPERNETWORKS
+A hypernetwork (Ha et al., 2017; Brabandere et al., 2016; Bertinetto et al., 2016) is a neural net that outputs parameters of another neural net (the "primary network").3 The hypernet and primary net together form a single model which is trained by backpropagation. The number of parameters of a DNN scales quadratically in the number of units per layer, meaning naively parametrizing a
+2 The idea is also explored by Shi et al. (2017), who likewise reject it in favor of their implicit approach which estimates the KL-divergence using a classifier.
+3The name "hypernetwork" comes from Ha et al. (2017), who describe the general hypernet framework, but applications of this idea in convolutional networks were previously explored by Brabandere et al. (2016) and Bertinetto et al. (2016).
+2
+
+Under review as a conference paper at ICLR 2018
+
+large primary net requires an impractically large hypernet. One method of addressing this challenge is Conditional Batch Norm (CBN) (Dumoulin et al., 2016), and the closely related Conditional Instance Normalization (CIN) (Huang & Belongie, 2017; Ulyanov et al., 2016), and Feature-wise Linear Modulation (FiLM) (Perez et al., 2017; Kirkpatrick et al., 2016), which can be viewed as specific forms of a hypernet. In these works, the weights of the primary net are parametrized directly, and the hypernet only outputs scale () and shift () parameters for every neuron; this can be viewed as selecting which features are significant (scaling) or present (shifting). In our work, we employ the related technique of weight normalization (Salimans & Kingma, 2016), which normalizes the input weights for every neuron and introduces a separate parameter g for their scale.
+2.3 INVERTIBLE GENERATIVE MODELS
+Our proposed Bayesian hypernetworks employ a differentiable directed generator network (DDGN) (Goodfellow et al., 2016) as a generative model of the primary net parameters. DDGNs use a neural net to transform simple noise (most commonly isotropic Gaussian) into samples from a complex distribution, and are a common component of modern deep generative models such as variational autoencoders (VAEs) (Kingma & Welling, 2013; Jimenez Rezende et al., 2014) and generative adversarial networks (GANs) (Goodfellow et al., 2014a; Goodfellow, 2017).
+We take advantage of techniques for invertible DDGNs developed in several recent works on generative modeling (Dinh et al., 2014; 2016) and variational inference of latent variables (Rezende & Mohamed, 2015; Kingma et al., 2016). Training these models uses the change of variables formula, which involves computing the log-determinant of the inverse Jacobian of the generator network. This computation involves a potentially costly matrix determinant, and these works propose innovative architectures which reduce the cost of this operation but can still express complicated deformations, which are referred to as "normalizing flows".
+
+3 METHODS
+
+We now describe how variational inference is applied to Bayesian deep nets (Section 3.1), and how we compose the methods described in Sections 2.2 and 2.3 to produce Bayesian hypernets (Section 3.2).
+
+3.1 VARIATIONAL INFERENCE
+
+In variational inference, the goal is to maximize a lower bound on the marginal log-likelihood of the data, log p(D) under some statistical model. This involves both estimating parameters of the
+model, and approximating the posterior distribution over unobserved random variables (which may themselves also be parameters, e.g., as in the case of Bayesian DNNs). Let   RD be parameters given the Bayesian treatment as random variables, D a training set of observed data, and q() a learned approximation to the true posterior p(|D). Since the KL divergence is always non-negative,
+we have, for any q():
+
+log p(D) = KL(q() p(|D)) + Eq[log p(D|) + log p() - log q()]  Eq[log p(D|) + log p() - log q()] .
+
+(1) (2)
+
+The right hand side of (2) is the evidence lower bound, or "ELBO".
+
+The above derivation applies to any statistical model and any dataset. In our experiments, we focus
+
+on modeling conditional likelihoods p(D) = p(Y|X ). Using the conditional independence as-
+
+sumption, we further decompose log p(D|) := log p(Y|X , ) as
+
+n i=1
+
+log
+
+p(yi|xi,
+
+),
+
+and
+
+apply
+
+stochastic gradient methods for optimization.
+
+3.1.1 VARIATIONAL INFERENCE FOR DEEP NETWORKS
+Computing the expectation in (2) is generally intractable for deep nets, but can be estimated by Monte Carlo sampling. For a given value of , log p(D|) and log() can be computed and differentiated exactly as in a non-Bayesian DNN, allowing training by backpropagation. The entropy term Eq[- logq()] is also straightforward to evaluate for simple families of approximate posteriors
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+such as Gaussians. Similarly, the likelihood of a test data-point under the predictive posterior using S samples can be estimated using Monte Carlo:4
+
+p(y1:n|x1:n, D) = p(y1:n|x1:n, ) p(|D)d
+
+1 S
+
+S
+
+p(y1:n|x1:n, s),
+
+s  q() .
+
+s=1
+
+(3) (4)
+
+3.2 BAYESIAN HYPERNETS
+Bayesian hypernets (BHNs) express a flexible q() by using a DDGN (section 2.3), h  RD  RD, to transform random noise  N (0, ID) into independent samples from q(). This makes it cheap to compute Monte Carlo estimations of expectations with respect to q; these include the ELBO, and its derivatives, which can be backpropagated to train the hypernet h.
+Since BHNs are both trained and evaluated via samples of q(), expressing q() as a generative model is a natural strategy. However, while DDGNs are convenient to sample from, computing the entropy term (Eq[- logq()]) of the ELBO additionally requires evaluating the likelihood of generated samples, and most popular DDGNs (such as VAEs and GANs) do not provide a convenient way of doing so.5 In general, these models can be many-to-one mappings, and computing the likelihood of a given parameter value requires integrating over the latent noise variables  RD:
+
+q() = q(; h( ))q( )d .
+
+(5)
+
+To avoid this issue, we use an invertible h, allowing us to compute q() simply by using the change
+
+of variables formula:
+
+q() = q
+
+(h-1())
+
+h-1() det
+
+,
+
+
+
+(6)
+
+where q is the distribution of .
+
+As discussed in Section 2.3, a number of techniques have been developed for efficiently training such invertible DDGNs. In this work, we employ both RealNVP (RNVP) (Dinh et al., 2016) and Inverse Autoregressive Flows (IAF) (Kingma et al., 2016). Note that the latter can be efficiently applied, since we only require the ability to evaluate likelihood of generated samples (not arbitrary points in the range of h, as in generative modeling applications, e.g., Dinh et al. (2016)); and this also means that we can use a lower-dimensional to generate samples along a submanifold of the entire parameter space, as detailed below.
+
+3.3 EFFICIENT PARAMETRIZATION AND TRAINING OF BAYESIAN HYPERNETS
+
+In order to scale BHNs to large primary networks, we use the weight normalization reparametrization (Salimans & Kingma, 2016):
+
+v
+
+j = g u ,
+
+u := , v2
+
+g  R,
+
+(7)
+
+where j are the input weights associated with a single unit j in the primary network. We only output the scaling factors g from the hypernet, and learn a maximum likelihood estimate of v.6 This allows us to overcome the computational limitations of naively-parametrized BHNs noted by Louizos & Welling (2017), since computation now scales linearly, instead of quadratically, in the number of primary net units. Using this parametrization restricts the family of approximate posteriors, but still allows for a high degree of multimodality and dependence between the parameters.
+
+4Here we approximate the posterior distribution p(|D) using the approximate posterior q(). We further use S Monte Carlo samples to approximate the integral.
+5Note that the entropy term is the only thing encouraging dispersion in q; the other two terms of (2) encourage the hypernet to ignore the noise inputs and deterministically output the MAP-estimate for .
+6This parametrization strongly resembles the "correlated" version of variational Gaussian dropout (Kingma et al., 2015, Sec. 3.2); the only difference is that we restrict the u to have norm 1.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+y
+
+traditional
+1.0 0.5 0.0 0.5 1.0 1.5
+0.2 0.0 0.2x 0.4 0.6
+
+hypernet 0.2 0.0 0.2x 0.4 0.6
+
+NUTS (HMC) 0.2 0.0 0.2x 0.4 0.6
+
+Figure 1: Illustration of a BHN (center) and a traditional non-Bayesian DNN (left) on the toy problem from Blundell et al. (2015). We also show the predictions from a NUTS MCMC sampler (Hoffman & Gelman, 2014) for reference. Each shaded region represents half a standard deviation in the posterior on the predictive mean. The red crosses are 50 examples from the training dataset.
+
+We also employ weight normalization within the hypernet, and found this stabilizes training dramatically. Initialization plays an important role as well; we recommend initializing the hypernet weights to small values to limit the impact of noise at the beginning of training. We also find clipping the outputs of the softmax to be within (0.001, 0.999) critical for numerical stability.
+4 EXPERIMENTS
+We perform experiments on MNIST, CIFAR10, and a 1D regression task. There is no single metric for how well a model captures uncertainty; to evaluate our model, we perform experiments on regularization (Section 4.2), active learning (Section 4.3), anomaly detection (Section 4.4), and detection of adversarial examples (Section 4.5). Active learning and anomaly detection problems make natural use of uncertainty estimates: In anomaly detection, higher uncertainty indicates a likely anomaly. In active learning, higher uncertainty indicates a greater opportunity for learning. Parameter uncertainty also has regularization benefits: integrating over the posterior creates an implicit ensemble. Intuitively, when the most likely hypothesis predicts "A", but the posterior places more total mass on hypotheses predicting "B", we prefer predicting "B". By improving our estimate of the posterior, we more accurately weigh the evidence for different hypotheses. Adversarial examples are an especially difficult kind of anomaly designed to fool a classifier, and finding effective defenses against adversarial attacks remains an open challenge in deep learning.
+For the hypernet architecture, we try both RealNVP (Dinh et al., 2016) and IAF(Kingma et al., 2016) with MADE(Germain et al., 2015), with 1-layer ReLU-MLP coupling functions with 200 hidden units (each). In general, we find that IAF performs better. We use an isotropic standard normal prior on the weights of the network. We use Adam with default hyper-parameter settings (Kingma & Ba, 2014) and gradient clipping in all of our experiments. Our mini-batch size is 128, and to reduce computation, we use the same noise-sample (and thus the same primary net parameters) for all examples in a mini-batch. We experimented with independent noise, but did not notice any benefit. Our baselines for comparison are Bayes by Backprop (BbB) (Blundell et al., 2015), MC dropout (MCdropout) (Gal & Ghahramani, 2016), and non-Bayesian DNN baselines (with and without dropout).
+4.1 QUALITATIVE RESULTS AND VISUALIZATION
+We first demonstrate the behavior of the network on the toy 1D-regression problem from Blundell et al. (2015) in Figure 1. As expected, the uncertainty of the network increases away from the observed data, although the model still suffers from overconfidence to some extent compared with Hamiltonian Monte Carlo (Neal et al., 2011), which excels on low-dimensional problems. Next, we demonstrate the distinctive ability of Bayesian hypernets to learn multi-modal, dependent distributions. Figure 6 (appendix) shows that BHNs do learn approximate posteriors with dependence be-
+5
+
+Under review as a conference paper at ICLR 2018
+
+b
+accuracy (%)
+
+hypernet
+3 2 1 0 1 2 3
+2 0a 2
+
+NUTS (HMC) 2 0a 2
+
+Figure 2: Learning the identity function with an overparametrized network: y^ = a · b · x. This parametrization results in symmetries shown by the dashed red lines, and the Bayesian hypernetwork assigns significant probability mass to both modes of the posterior (a = b = 1 and a = b = -1).
+
+tween different parameters, as measured by the Pearson correlation coefficient. Meanwhile, Figure 2
+shows that BHNs are capable of learning multimodal posteriors. For this experiment, we trained an over-parametrized linear (primary) network: y^ = a · b · x on a dataset generated as y = x + , and the BHN learns capture both the modes of a = b = 1 and a = b = -1.
+
+4.2 CLASSIFICATION
+
+We now show that BHNs act as a regularizer, outperforming dropout and traditional mean field (BbB). Results are presented in Table 1. In our experiments, we find that BHNs perform on par with dropout on full datasets of MNIST and CIFAR10; furthermore, increasing the flexibility of the posterior by adding more coupling layers improves performance, especially compared with models with 0 coupling layers, which cannot model dependencies between the parameters. We also evaluate on a subset of MNIST (the first 5,000 examples); results are presented in the last two columns of Table 1. Replicating these experiments (with 8 coupling layers) for 10 trials yields Figure 3.
+In these MNIST experiments, we use MLPs with 2 hidden layers of 800 or 1200 hidden units each. For CIFAR10, we train a convolutional neural net (CNN) with 4 hidden layers of [64, 64, 128, 128] channels, 2 × 2 max pooling after the second and the fourth layers, filter size of 3, and a single fully connected layer of 512 units.
+
+96.4 96.2 96.0 95.8 95.6 95.4 95.2 95.0 dropout
+
+BHN (IAF) BHN (RNVP)
+
+Figure 3: Box plot of performance across 10 trials. Bayesian hypernets (BHNs) with inverse autoregressive flows (IAF) consistently outperform the other methods.
+
+4.3 ACTIVE LEARNING
+We now turn to active learning, where we compare to the MNIST experiments of Gal et al. (2017), replicating their architecture and training procedure. Briefly, they use an initial dataset of 20 examples (2 from each class), and acquire 10 new examples at a time, training for 50 epochs between each acquisition. While Gal et al. (2017) re-initialize the network after every acquisition, we found that "warm-starting" from the current learned parameters was essential for good performance with BHNs, although it is likely that longer training or better initialization schemes could perform the same role. Overall, warm-started BHNs suffered at the beginning of training, but outperformed all other methods for moderate to large numbers of acquisitions.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Table 1: Generalization results on MNIST and CIFAR10 for BHNs with different numbers of RealNVP coupling layers (#), and comparison methods (dropout / maximum likelihood (MLE)). Bayes-by-backprop (Blun-
+
+dell et al., 2015) (*) models each parameter as an independent Gaussian, which is equivalent to using a hypernet
+
+with 0 coupling layers. We achieved a better result outputting a distribution over scaling factors (only). MNIST
+
+5000 (A) and (B) are generalization results on subset (5,000 training data) of MNIST, (A) MLP with 800 hidden
+
+nodes. (B) MLP with 1,200 hidden nodes.
+
+MNIST 50,000
+
+CIFAR10 50,000 MNIST 5,000 (A) MNIST 5,000 (B)
+
+#
+
+Accuracy
+
+# Accuracy
+
+# Accuracy
+
+# Accuracy
+
+0 2 4 6 8 dropout
+
+98.28% (98.01%*) 98.39% 98.47% 98.59% 98.63% 98.73%
+
+0 4 8 dropout MLE
+
+67.83% 74.77% 74.90% 74.08% 72.75%
+
+0 8 12 dropout
+
+92.06% 94.25% 96.16% 95.58%
+
+0 8 12 dropout
+
+90.91% 96.27% 96.51% 95.52%
+
+Figure 4: Active learning: Bayesian hypernets outperform other approaches after sufficient acquisitions when warm-starting (left), for both random acquisition function (top) and BALD acquisition function (bottom). Warm-starting improves stability for all methods, but hurts performance for other approaches, compared with randomly re-initializing parameters as in Gal et al. (2017) (right). We also note that the baseline model (no dropout) is competitive with MCdropout, and outperforms the Dropout baseline used by (Gal et al., 2017).8 These curves are the average of three experiments.
+4.4 ANOMALY DETECTION
+For anomaly detection, we take Hendrycks & Gimpel (2016) as a starting point, and perform the same suite of MNIST experiments, evaluating the ability of networks to determine whether an input came from their training distribution ("Out of distribution detection"). Hendrycks & Gimpel (2016) found that the confidence expressed in the softmax probabilities of a (non-Bayesian) DNN trained on a single dataset provides a good signal for both of these detection problems. We demonstrate that Bayesian DNNs outperform their non-Bayesian counterparts.
+8For the deterministic baseline, the value of the BALD acquisition function is always zero, and so acquisitions should be random, but due to numerical instability this is not the case in our implementation; surprisingly, we found the BALD values our implementation computes provide a better-than-random acquisition function (compare the blue line in the top and bottom plots).
+7
+
+Under review as a conference paper at ICLR 2018
+
+Table 2: Anomaly detection on MNIST. Since we use the same datasets as Hendrycks & Gimpel (2016), we have the same base error rates, and refer the reader to that work.
+
+Dataset
+
+MLP
+
+MC dropout
+
+BHN
+
+ROC PR(+) PR(-) ROC PR(+) PR(-) ROC PR(+) PR(-)
+
+Uniform OmniGlot CIFARbw Gaussian notMNIST
+
+96.99 94.92 95.55 87.70 81.12
+
+97.99 95.63 96.47 87.66 97.56
+
+94.71 93.85 93.72 88.05 39.70
+
+98.90 95.87 98.70 97.70 97.78
+
+99.15 96.44 98.98 98.11 99.78
+
+98.63 94.84 98.39 96.94 78.53
+
+98.97 94.89 96.63 89.22 90.07
+
+99.27 95.56 97.25 86.62 98.51
+
+98.52 93.64 95.78 89.85 56.59
+
+Just as in active learning, in anomaly detection, we use MC to estimate the predictive posterior, and use this to score datapoints. For active learning, we would generally like to acquire points where there is higher uncertainty. In a well-calibrated model, these points are also likely to be challenging or anomalous examples, and thus acquisition functions from the active learning literature are good candidates for scoring anomalies.
+We consider all of the acquisition functions listed in (Gal et al., 2017) as possible scores for the Area Under the Curve (AUC) of Precision-Recall (PR) and Receiver Operating Characteristic (ROC) metrics, but found that the maximum confidence of the softmax probabilities (i.e., "variation ratio") acquisition function used by Hendrycks & Gimpel (2016) gave the best performance. Both BHN and MCdropout achieve significant performance gains over the non-Bayesian baseline, and MCdropout performs significantly better than BHN in this task. Results are presented in Table 2.
+Second, we follow the same experimental setup, using all the acquisition functions, and exclude one class in the training set of MNIST at a time. We take the excluded class of the training data as out-of-distribution samples. The result is presented in Table 3 (Appendix). This experiment shows the benefit of using scores that reflect dispersion in the posterior samples (such as mean standard deviation and BALD value) in Bayesian DNNs.
+4.5 ADVERSARY DETECTION
+Finally, we consider this same anomaly detection procedure as a novel tool for detecting adversarial examples. Our setup is similar to Li & Gal (2017) and Louizos & Welling (2017), where it is shown that when more perturbation is added to the data, model uncertainty increases and then drops. We use the Fast Gradient Sign method (FGS) (Goodfellow et al., 2014b) for adversarial attack, and use one sample of our model to estimate the gradient.9 We find that, compared with dropout, BHNs are less confident on data points which are far from the data manifold. In particular, BHNs constructed with IAF consistently outperform RealNVP-BHNs and dropout in detecting adversarial examples and errors. Results are shown in Figure 5.
+5 CONCLUSIONS
+We introduce Bayesian hypernets (BHNs), a new method for variational Bayesian deep learning which uses an invertible hypernetwork as a generative model of parameters. BHNs feature efficient training and sampling, and can express complicated multimodal distributions, thereby addressing issues of overconfidence present in simpler variational approximations. We present a method of parametrizing BHNs which allows them to scale successfully to real world tasks, and show that BHNs can offer significant benefits over simpler methods for Bayesian deep learning. Future work could explore other methods of parametrizing BHNs, for instance using the same hypernet to output different subsets of the primary net parameters.
+
+9 Li & Gal (2017) and Louizos & Welling (2017) used 10 and 1 model samples, respectively, to estimate gradient. We report the result with 1 sample; results with more samples are given in the appendix.
+8
+
+Under review as a conference paper at ICLR 2018
+
+(%)
+
+11..00 0.8 00..86 0.4 00..62 0.0 0.4 0.00
+0.2
+0.00.0
+
+Accuracy
+
+Average Score
+
+BALD
+0.20
+
+Entropy
+0.35
+
+Variation Ratio
+
+Mean STD
+
+0.125 0.04
+
+0.15 0.30 0.100 0.03
+
+0.10
+
+0.25 0.075 0.20 0.050
+
+0.02
+
+0.05 0.000.00
+
+0.25
+
+0.15 0.10 0.50 0.00
+
+0.25
+
+0.025 0.50 0.00
+
+0.25
+
+0.01 0.50 0.00
+
+0.25
+
+0.50
+
+Adversary Detection
+
+0.8 0.8 0.8 0.8
+
+0.7 0.7 0.7 0.7
+
+0.25 0.50 0.6 0.6 0.6 0.6
+
+Error Detection
+
+BHN (IAF) BHN (RNVP) dropout
+
+0.5 0.5 0.5 0.5 0.00 0.25 0.50 0.00 0.25 0.50 0.00 0.25 0.50 0.00 0.25 0.50
+1.0 1.0 1.0 1.0 0.8 0.8 0.8 0.8 0.6 0.6 0.6 0.6 0.4 0.4 0.4 0.4
+
+0.2 0.2 0.2 0.2
+
+0.2 0.00 0.25 00.5.40 0.s0t0ep siz0e.25 00.5.60 0.00 0.25 0.05.08 0.00 0.25 0.15.00
+
+Figure 5: Adversary detection: Horizontal axis is the step size of the FGS algorithm. While accuracy drops when more perturbation is added to the data (left), uncertainty measures also increase (first row). In particular, the BALD and Mean STD scores, which measure epistemic uncertainty, are strongly increasing for BHNs, but not for dropout. The second row and third row plots show results for adversary detection and error detection (respectively) in terms of the AUC of ROC (y-axis) with increasing perturbation along the x-axis. Gradient direction is estimated with one Monte Carlo sample of the weights/dropout mask.
+REFERENCES
+Dario Amodei, Chris Olah, Jacob Steinhardt, Paul Christiano, John Schulman, and Dan Mane´. Concrete problems in AI safety. CoRR, abs/1606.06565, 2016. URL http://arxiv.org/abs/ 1606.06565.
+Luca Bertinetto, Joa~o F. Henriques, Jack Valmadre, Philip H. S. Torr, and Andrea Vedaldi. Learning feed-forward one-shot learners. CoRR, abs/1606.05233, 2016. URL http://arxiv.org/ abs/1606.05233.
+Charles Blundell, Julien Cornebise, Koray Kavukcuoglu, and Daan Wierstra. Weight uncertainty in neural networks. In Proceedings of The 32nd International Conference on Machine Learning, pp. 1613­1622, 2015.
+Bert De Brabandere, Xu Jia, Tinne Tuytelaars, and Luc Van Gool. Dynamic filter networks. CoRR, abs/1605.09673, 2016. URL http://arxiv.org/abs/1605.09673.
+Nicholas Carlini and David Wagner. Adversarial examples are not easily detected: Bypassing ten detection methods. arXiv preprint arXiv:1705.07263, 2017.
+Laurent Dinh, David Krueger, and Yoshua Bengio. NICE: Non-linear independent components estimation. arXiv preprint arXiv:1410.8516, 2014.
+Laurent Dinh, Jascha Sohl-Dickstein, and Samy Bengio. Density estimation using real NVP. arXiv preprint arXiv:1605.08803, 2016.
+Vincent Dumoulin, Jonathon Shlens, and Manjunath Kudlur. A learned representation for artistic style. CoRR, abs/1610.07629, 2016. URL http://arxiv.org/abs/1610.07629.
+Yarin Gal. Uncertainty in deep learning. 2016.
+9
+
+Under review as a conference paper at ICLR 2018
+Yarin Gal and Zoubin Ghahramani. Dropout as a Bayesian approximation: Representing model uncertainty in deep learning. In International Conference on Machine Learning, pp. 1050­1059, 2016.
+Yarin Gal, Riashat Islam, and Zoubin Ghahramani. Deep Bayesian active learning with image data. In Proceedings of the 34th International Conference on Machine Learning, ICML 2017, Sydney, NSW, Australia, 6-11 August 2017, pp. 1183­1192, 2017. URL http://proceedings. mlr.press/v70/gal17a.html.
+Mathieu Germain, Karol Gregor, Iain Murray, and Hugo Larochelle. MADE: masked autoencoder for distribution estimation. In Proceedings of the 32nd International Conference on Machine Learning (ICML-15), pp. 881­889, 2015.
+Ian J. Goodfellow. NIPS 2016 tutorial: Generative adversarial networks. CoRR, abs/1701.00160, 2017. URL http://arxiv.org/abs/1701.00160.
+Ian J. Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron C. Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in Neural Information Processing Systems 27: Annual Conference on Neural Information Processing Systems 2014, December 8-13 2014, Montreal, Quebec, Canada, pp. 2672­2680, 2014a. URL http://papers.nips.cc/paper/5423-generative-adversarial-nets.
+Ian J. Goodfellow, Jonathon Shlens, and Christian Szegedy. Explaining and harnessing adversarial examples. arXiv preprint arXiv:1412.6572, 2014b.
+Ian J. Goodfellow, Yoshua Bengio, and Aaron Courville. Deep Learning. MIT Press, 2016. URL http://www.deeplearningbook.org.
+Alex Graves. Practical variational inference for neural networks. In J. Shawe-Taylor, R. S. Zemel, P. L. Bartlett, F. Pereira, and K. Q. Weinberger (eds.), Advances in Neural Information Processing Systems 24, pp. 2348­2356. Curran Associates, Inc., 2011. URL http://papers.nips.cc/ paper/4329-practical-variational-inference-for-neural-networks. pdf.
+David Ha, Andrew Dai, and Quoc V. Le. Hypernetworks. 2017. URL https://openreview. net/pdf?id=rkpACe1lx.
+Dan Hendrycks and Kevin Gimpel. A baseline for detecting misclassified and out-of-distribution examples in neural networks. arXiv preprint arXiv:1610.02136, 2016.
+Jose Miguel Hernandez-Lobato and Ryan Adams. Probabilistic backpropagation for scalable learning of Bayesian neural networks. In Proceedings of The 32nd International Conference on Machine Learning, pp. 1861­1869, 2015.
+Matthew D. Hoffman and Andrew Gelman. The No-U-Turn Sampler: Adaptively setting path lengths in Hamiltonian Monte Carlo. Journal of Machine Learning Research, 15(1):1593­1623, 2014.
+Xun Huang and Serge J. Belongie. Arbitrary style transfer in real-time with adaptive instance normalization. CoRR, abs/1703.06868, 2017. URL http://arxiv.org/abs/1703.06868.
+D. Jimenez Rezende, S. Mohamed, and D. Wierstra. Stochastic backpropagation and approximate inference in deep generative models. arXiv e-prints, January 2014.
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. CoRR, abs/1412.6980, 2014. URL http://arxiv.org/abs/1412.6980.
+Diederik P. Kingma and Max Welling. Auto-encoding variational Bayes. arXiv preprint arXiv:1312.6114, 2013.
+Diederik. P. Kingma, T. Salimans, and M. Welling. Variational Dropout and the Local Reparameterization Trick. arXiv e-prints, June 2015.
+10
+
+Under review as a conference paper at ICLR 2018
+Diederik P. Kingma, Tim Salimans, Rafal Jozefowicz, Xi Chen, Ilya Sutskever, and Max Welling. Improved variational inference with inverse autoregressive flow. In Advances in Neural Information Processing Systems, pp. 4743­4751, 2016.
+James Kirkpatrick, Razvan Pascanu, Neil C. Rabinowitz, Joel Veness, Guillaume Desjardins, Andrei A. Rusu, Kieran Milan, John Quan, Tiago Ramalho, Agnieszka Grabska-Barwinska, Demis Hassabis, Claudia Clopath, Dharshan Kumaran, and Raia Hadsell. Overcoming catastrophic forgetting in neural networks. CoRR, abs/1612.00796, 2016. URL http://arxiv.org/abs/ 1612.00796.
+Yingzhen Li and Yarin Gal. Dropout inference in Bayesian neural networks with alpha-divergences. arXiv preprint arXiv:1703.02914, 2017.
+Christos Louizos and Max Welling. Multiplicative normalizing flows for variational bayesian neural networks. arXiv e-prints, March 2017.
+David J.C. MacKay. Bayesian neural networks and density networks. In Nuclear Instruments and Methods in Physics Research, A, pp. 73­80, 1994.
+Radford M. Neal. Bayesian Learning for Neural Networks. Springer-Verlag New York, Inc., Secaucus, NJ, USA, 1996. ISBN 0387947248.
+Radford M. Neal et al. MCMC using Hamiltonian dynamics. Handbook of Markov Chain Monte Carlo, 2(11), 2011.
+Ethan Perez, Harm de Vries, Florian Strub, Vincent Dumoulin, and Aaron C. Courville. Learning visual reasoning without strong priors. CoRR, abs/1707.03017, 2017. URL http://arxiv. org/abs/1707.03017.
+Danilo Rezende and Shakir Mohamed. Variational inference with normalizing flows. In Proceedings of The 32nd International Conference on Machine Learning, pp. 1530­1538, 2015.
+Tim Salimans and Diederik P. Kingma. Weight normalization: A simple reparameterization to accelerate training of deep neural networks. CoRR, abs/1602.07868, 2016. URL http:// arxiv.org/abs/1602.07868.
+Tim Salimans, Diederik P. Kingma, and Max Welling. Markov chain Monte Carlo and variational inference: Bridging the gap. In Proceedings of the 32nd International Conference on Machine Learning (ICML-15), pp. 1218­1226, 2015.
+Jiaxin Shi, Shengyang Sun, and Jun Zhu. Implicit variational inference with kernel density ratio fitting. arXiv preprint arXiv:1705.10119, 2017.
+Daniel Soudry, Itay Hubara, and Ron Meir. Expectation backpropagation: Parameter-free training of multilayer neural networks with continuous or discrete weights. In Advances in Neural Information Processing Systems, pp. 963­971, 2014.
+Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: A simple way to prevent neural networks from overfitting. J. Mach. Learn. Res., 15 (1):1929­1958, January 2014. ISSN 1532-4435. URL http://dl.acm.org/citation. cfm?id=2627435.2670313.
+Dmitry Ulyanov, Andrea Vedaldi, and Victor S. Lempitsky. Instance normalization: The missing ingredient for fast stylization. CoRR, abs/1607.08022, 2016. URL http://arxiv.org/ abs/1607.08022.
+Max Welling and Yee Whye Teh. Bayesian learning via stochastic gradient Langevin dynamics, 2011.
+11
+
+Under review as a conference paper at ICLR 2018
+A ADDITIONAL RESULTS
+A.1 LEARNING CORRELATED WEIGHTS
+
+Figure 6: Histogram of Pearson correlation coefficient p-values (left) and a scatter matrix (right) of samples from a hypernet approximate posterior. We see that the hypernet posterior includes correlations between different parameters. Many of the p-values of the Pearson correlation test are below .05.
+
+A.2 UNSEEN MODE DETECTION We replicate the experiments of anomaly detection with unseen classes of MNIST.
+
+Table 3: Anomaly detection on MNIST with unseen classes. The first column indicates the missing class label in the training set. Top-most block: ROC score; middle: positive precision-recall; bottom: negative precision-recall.
+
+Variation ratio
+
+Mean std
+
+BALD
+
+MLP dropout BHN 4 BHN 8 dropout BHN 4 BHN 8 dropout BHN 4 BHN 8
+
+0 95.52 1 96.70 2 92.83 3 93.03 4 89.08 5 88.53 6 95.40 7 92.46 8 96.35 9 94.75
+
+97.44 94.60 95.77 93.11 88.96 94.66 96.33 96.61 98.05 95.95
+
+96.62 96.62 92.99 95.03 75.73 93.20 93.67 95.08 95.86 95.62
+
+96.45 96.46 93.47 95.34 81.19 87.95 94.69 93.70 96.85 96.54
+
+97.90 94.01 96.02 93.65 89.45 95.37 96.99 97.08 97.67 96.03
+
+96.53 96.62 93.03 94.86 75.73 93.08 93.80 94.68 95.74 95.46
+
+96.77 96.25 93.57 94.77 81.31 88.31 94.80 92.82 96.98 96.42
+
+97.89 93.92 96.08 93.65 89.34 95.45 96.96 97.06 97.23 96.10
+
+96.59 96.92 93.59 94.87 74.31 92.61 93.27 94.88 95.48 95.84
+
+96.55 96.19 94.26 94.96 84.34 85.77 94.50 92.89 96.87 96.37
+
+0 97.68 1 98.26 2 96.06 3 96.00 4 93.73 5 93.92 6 97.68 7 95.56 8 98.18 9 97.32
+
+98.68 97.03 97.74 95.74 93.93 97.31 97.99 98.16 99.03 97.94
+
+98.34 98.23 95.63 97.28 84.66 96.79 96.38 97.40 97.97 97.76
+
+98.32 98.15 96.07 97.68 86.40 93.15 97.27 96.51 98.37 98.27
+
+98.87 96.58 97.83 95.97 94.10 97.60 98.29 98.36 98.87 97.93
+
+98.31 98.20 95.31 97.09 85.16 96.62 96.55 97.07 97.96 97.71
+
+98.45 98.04 96.01 97.37 86.46 93.34 97.29 95.82 98.53 98.31
+
+98.87 96.58 97.87 96.00 94.00 97.61 98.29 98.32 98.70 98.02
+
+98.35 98.35 95.80 97.13 83.32 96.34 96.05 97.17 97.83 98.00
+
+98.35 98.00 96.45 97.49 90.00 90.72 97.13 95.89 98.45 98.29
+
+0 90.11 1 92.84 2 85.74 3 87.46 4 80.96 5 80.41 6 89.34 7 87.08 8 91.88 9 88.10
+
+94.44 89.08 91.13 87.78 79.04 87.74 92.26 92.69 95.82 90.71
+
+92.17 92.48 86.61 89.46 64.02 84.15 88.17 88.91 90.52 89.70
+
+90.95 91.99 87.52 88.75 72.11 78.16 88.60 86.85 92.83 91.67
+
+96.08 88.11 92.04 89.72 81.82 90.48 94.21 94.02 94.40 91.49
+
+92.06 92.71 88.22 89.99 64.33 84.85 88.28 89.07 89.69 88.72
+
+92.67 91.53 88.51 87.09 73.69 78.96 89.10 86.64 92.82 90.85
+
+96.08 87.67 92.16 89.78 81.89 90.81 94.07 94.33 92.80 91.56
+
+91.92 93.11 89.20 90.22 64.16 84.27 87.14 89.70 88.41 88.79
+
+91.91 91.55 89.90 87.21 75.72 76.99 87.89 86.71 92.08 90.30
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+A.3 STRONGER ATTACK
+Here we use 32 samples to estimate the gradient direction with respect to the input. A better estimate of gradient amounts to a stronger attack, so accuracy drops lower for a given step size while an adversarial example can be more easily detected with a more informative uncertainty measure.
+
+(%)
+
+11..00 0.8 00..68 0.4 00..26 0.0 0.4 0.00
+0.2
+0.00.0
+
+Accuracy
+
+Average Score
+
+BALD
+0.20
+
+Entropy
+0.4
+
+Variation Ratio
+
+Mean STD
+
+0.125 0.04
+
+0.15
+
+0.3 0.100
+
+0.03
+
+0.10 0.05 0.000.00
+
+0.25
+
+0.2 0.1 0.50 0.00
+
+0.25
+
+0.075 0.050 0.025
+0.50 0.00
+
+0.25
+
+0.02 0.01
+0.50 0.00
+
+0.25
+
+0.50
+
+Adversary Detection
+
+0.8 0.8 0.8 0.8
+
+0.7 0.7 0.7 0.7
+
+0.25 0.50 0.6 0.6 0.6 0.6
+
+Error Detection
+
+BHN (IAF) BHN (RNVP) dropout
+
+0.5 0.5 0.5 0.5 0.00 0.25 0.50 0.00 0.25 0.50 0.00 0.25 0.50 0.00 0.25 0.50
+1.0 1.0 1.0 1.0 0.8 0.8 0.8 0.8 0.6 0.6 0.6 0.6 0.4 0.4 0.4 0.4
+
+0.2 0.2 0.2 0.2
+
+0.2 0.00 0.25 00.5.40 0.s0t0ep siz0e.25 00.5.60 0.00 0.25 0.05.08 0.00 0.25 0.15.00
+
+Figure 7: Adversary detection with 32-sample estimate of gradient.
+
+13
+
+

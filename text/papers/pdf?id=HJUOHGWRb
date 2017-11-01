@@ -1,0 +1,2040 @@
+Under review as a conference paper at ICLR 2018
+CONTEXTUAL EXPLANATION NETWORKS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We introduce contextual explanation networks (CENs)--a class of models that learn to predict by generating and leveraging intermediate explanations. CENs are deep networks that generate parameters for context-specific probabilistic graphical models which are further used for prediction and play the role of explanations. Contrary to the existing post-hoc model-explanation tools, CENs learn to predict and to explain jointly. Our approach offers two major advantages: (i) for each prediction, valid instance-specific explanations are generated with no computational overhead and (ii) prediction via explanation acts as a regularization and boosts performance in low-resource settings. We prove that local approximations to the decision boundary of our networks are consistent with the generated explanations. Our results on image and text classification and survival analysis tasks demonstrate that CENs are competitive with the state-of-the-art while offering additional insights behind each prediction, valuable for decision support.
+1 INTRODUCTION
+Model interpretability is a long-standing problem in machine learning that has become quite acute with the accelerating pace of widespread adoption of complex predictive algorithms. While high performance often supports our belief in predictive capabilities of a system, perturbation analysis reveals that black-box models can be easily broken in an unintuitive and unexpected manner (Szegedy et al., 2013; Nguyen et al., 2015). Therefore, for a machine learning system to be used in a social context (e.g., in healthcare) it is imperative to provide a sound reasoning for each decision.
+Restricting the class of models to only human-intelligible (Caruana, 2015) is a potential remedy, but often is limiting in modern practical settings. Alternatively, we may fit a complex model and explain its predictions post-hoc, e.g., by searching for linear local approximations of the decision boundary (Ribeiro et al., 2016). While such approaches achieve their goal, the explanations are generated a posteriori, require additional computation per data instance, and most importantly are never the basis for the predictions made in the first place which may lead to erroneous interpretations.
+Explanation is a fundamental part of the human learning and decision process (Lombrozo, 2006). Inspired by this fact, we introduce contextual explanation networks (CENs)--a class of deep neural networks that generate parameters for probabilistic graphical models. The generated models not only play the role of explanations but are used for prediction and can encode arbitrary prior knowledge. The data often consists of two representations: (1) low-level or unstructured features (e.g., text, image pixels, sensory inputs), and (2) high-level or human-interpretable features (e.g., categorical variables). To ensure interpretability, CENs use deep networks to process the low-level representation (called the context) and construct explanations as context-specific probabilistic models on the high-level features (cf. Koller & Friedman, 2009, Ch. 5.3). Importantly, the explanation mechanism is an integral part of CEN, and our models are trained to predict and to explain jointly.
+A motivating example. Consider a CEN for diagnosing the risk of developing heart arrhythmia (Figure 1a). The causes of the condition are quite diverse, ranging from smoking and diabetes to an injury from previous heart attacks, and may carry different effects on the risk of arrhythmia in different contexts. Assume that the data for each patient consists of medical notes in the form of raw text (which is used as the context) and a number of specific attributes (such as high blood pressure, diabetes, smoking, etc.). Further, assume that we have access to a parametric class of expert-designed models that relate the attributes to the condition. The CEN maps the medical notes to the parameters of the model class to produce a context-specific hypothesis, which is further used to make a prediction.
+1
+
+Under review as a conference paper at ICLR 2018
+
+Medical notes (context):  regular smoker  family history of diabetes  [no previous heart attacks]
+
+Diabetes
+
+Smoking
+
+Arythmia
+
+High blood pressure
+
+Previous heart attack
+
+(a)
+
+ Y1 Y2 Y3 w
+C X1 X2 X3 N
+(b)
+
+ qp
+C
+
+Y1 Y2 Y3
+X1 X2 X3 N
+(c)
+
+Figure 1: (a) An illustration of CEN for arrhythmia risk diagnosis. Shades of red denote the strength of association between the variables. (b) A graphical model for CEN with context encoder and CRF-based explanations. The model is parameterized by w. (c) A graphical model for CEN with context autoencoding via the inference network, qw( | C), generator network, pu(C | ), and CRF-based explanations.
+
+In the sequel, we formalize these intuitions and refer to this toy example in our discussion to illustrate different aspects of the framework. The main contributions of the paper are as follows:
+(i) We formally define CENs as a class of probabilistic models, consider special cases (e.g., Jacobs et al., 1991), and derive learning and inference algorithms for simple and structured outputs.
+(ii) We prove that post-hoc approximations of CEN's decision boundary are consistent with the generated explanations and show that, in practice, while both methods tend to produce virtually identical explanations, CENs construct them orders of magnitude faster.
+(iii) It turns out that noisy features can render post-hoc methods inconsistent and misleading, and we show how CENs can help to detect and avoid such situations.
+(iv) We implement CENs by extending a number of established domain-specific deep architectures for image and text data and design new architectures for survival analysis. Experimentally, we demonstrate the value of learning with explanations for prediction and model diagnostics. Moreover, we show that explanations can act as a regularizer and improve sample efficiency.
+2 RELATED WORK
+The idea of combining deep networks with graphical models has been explored extensively. To mention a few, recent papers include work on structured prediction (e.g. Collobert et al., 2011; Jaderberg et al., 2014; Belanger & McCallum, 2016), kernel learning (e.g., Wilson et al., 2016; Al-Shedivat et al., 2016), and state-space modeling (e.g., Krishnan et al., 2015; Johnson et al., 2016). The key difference between CENs and the previous art is that the latter proposed to directly integrate neural networks into the graphical models as components (e.g., using neural potential functions). While flexible, the resulting deep graphical models could no longer be clearly interpreted in terms of crisp relationships between specific variables.
+The idea of using a network to generate parameters for another model (typically, also a neural net) has been considered most notably for zero-shot learning (Lei Ba et al., 2015) and meta-learning (Ha et al., 2016; Edwards & Storkey, 2016; Vinyals et al., 2016), but is not suitable for interpretability purposes. CENs generate parameters for models from a restricted class and further use the attention mechanism (Xu et al., 2015) to also improve interpretability. Using explanations based on domain knowledge is known to improve generalization (Mitchell et al., 1986) and could be used as scaffolding to help at solving complex downstream tasks such as program induction (Ling et al., 2017).
+Our discussion focuses on explanations defined as simple models that locally approximate behavior of a complex model. A few methods that allow to construct such explanations in a post-hoc manner have been proposed recently (Ribeiro et al., 2016; Shrikumar et al., 2017; Lundberg & Lee, 2017). There are multiple other complementary approaches to interpretability ranging from a variety of visualization techniques (Simonyan & Zisserman, 2014; Yosinski et al., 2015; Mahendran & Vedaldi, 2015; Karpathy et al., 2015), to explanations by example (Caruana et al., 1999; Kim et al., 2014; Kim et al., 2016; Koh & Liang, 2017), to natural language rationales (Lei et al., 2016). Finally, we point out that our framework encompasses the class of so-called personalized or instance-specific models that learn to partition the space of inputs and fit local sub-models (e.g., Wang & Saligrama, 2012).
+2
+
+Under review as a conference paper at ICLR 2018
+
+C Context Encoder
+
+Dictionary
+
+
+
+dot
+
+Y1 Y2 Y3
+
+Y4 CEN
+
+X
+
+X1 X2 X3 X4
+
+Context
+
+Attention
+
+Y1 Y2 Y3
+
+dot
+
+Y1 Y2 Y3 Y4 X1 X2 X3 X4
+
+Y1 Y2 Y3 Y4 X1 X2 X3 X4
+
+Y4 MoE
+
+Y1 Y2 Y3 Y4 X1 X2 X3 X4
+
+Attributes
+
+Figure 2: An example of CEN architecture. The context is represented by an image and transformed by a convnet encoder into an attention vector, which is used to construct a contextual hypothesis from a dictionary of sparse atoms. MoE uses a similar attention mechanism but for combining predictions of each model in the dictionary.
+
+3 METHODS
+We consider the problem of learning from a collection of data where each instance is represented by three random variables: the context, C  C, the attributes, X  X , and the targets, Y  Y. Our goal is to learn a model, pw(Y | X, C), parametrized by w that can predict Y from X and C. We define contextual explanation networks as models that assume the following form (Figure 1b):
+Y  p(Y | X, ),   pw( | C), pw(Y | X, C) = p(Y | X, )pw( | C)d (1)
+where p(Y | X, ) is a predictor parametrized by . We call such predictors explanations, since they explicitly relate interpretable variables, X, to the targets, Y. For example, when the targets are scalar and binary, explanations may take the form of linear logistic models; when the targets are more complex, dependencies between the components of Y can be represented by a graphical model, e.g., a conditional random field (Lafferty et al., 2001).
+CENs assume that each explanation is context-specific: pw( | C) defines a conditional probability of an explanation  being valid in the context C. To make a prediction, we marginalize out 's; to interpret a prediction, Y = y, for a given data instance, (x, c), we infer the posterior, pw( | Y = y, x, c). The main advantage of this approach is to allow modeling conditional probabilities, pw( | C), in a black-box fashion while keeping the class of explanations, p(Y | X, ), simple and interpretable. For instance, when the context is given as raw text, we may choose pw( | C) to be represented with a recurrent neural network, while p(Y | X, ) be in the class of linear models.
+Implications of the assumptions made by (1) are discussed in Appendix A. Here, we move on to describing a number of practical choices for pw( | C) and learning and inference for those.
+3.1 CONTEXTUAL EXPLANATION NETWORKS
+In practice, we represent pw( | C) with a neural network that encodes the context into the parameter space of explanations. There are multiple ways to construct an encoder, which we consider below.
+Deterministic Encoding. Consider pw( | C) :=  (w(C), ), where (·, ·) is a delta-function and w is the network that maps C to . Collapsing the conditional distribution to a delta-function makes  depend deterministically on C and results into the following tractable conditional log-likelihood:
+log p(yi | xi, ci; w) = log p(yi | xi, ) (w(ci), ) d = log p(yi | xi, i = w(ci)) (2)
+Since pw(i | yi, xi, ci)  p(yi | xi, i) (w(ci), i), the posterior also collapses to i = w(ci), and hence the inference is done via a single forward pass.
+Constrained Deterministic Encoding. The downside of deterministic encoding is the lack of constraints on the generated explanations. There are multiple reasons why this might be an issue: (i) when the context encoder is unrestricted, it might generate unstable, overfitted local models, (ii) explanations are not guaranteed to be human-interpretable per se, and often require imposing additional constraints, such as sparsity, and (iii) when we want to reason about the patterns in the data as a whole, local explanations are not enough. To address these issues, we constrain the space of
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+explanations by introducing a global dictionary, D := {k}kK=1, where each atom of the dictionary, k, is sparse. The encoder generates context-specific explanations using soft attention over the dictionary, i.e., each explanation becomes a convex combination of the sparse atoms (Figure 2):
+
+KK
+
+w,D(c) = pw(k | c)k = w(c) D,
+
+w(k)(c) = 1, k : w(k)(c)  0 (3)
+
+k=1
+
+k=1
+
+where w(c) is the attention over the dictionary. As previously, the encoder is a delta-distribution, pw,D( | C) :=  (w,D(C), ). The model is trained by learning the weights, w and the dictionary,
+D. The log-likelihood is as given in (2), and learning and inference are done via a forward pass.
+
+Mixtures of Experts. So far, we represented pw( | C) by a delta-function centered around the
+
+output of the encoder. It is natural to extend pw( | C) to a mixture of delta-distributions, in which
+
+case CENs recover the mixtures of experts (MoE, Jacobs et al., 1991). In particular, let D := {k}kK=1
+
+be now a dictionary of experts, and define the encoder as pw,D( | C) =
+
+K k=1
+
+pw(k
+
+|
+
+C)(,
+
+k ).
+
+The log-likelihood in such case is the same as for MoE:
+
+K
+
+log pw,D(yi | xi, ci) = log p(yi|xi, )pw,D(|ci)d = log pw(k|ci)p(yi|xi, k) (4)
+
+k=1
+
+Note that pw(k | C) is also represented as soft attention over the dictionary, D, which is now used for combining predictions of each expert, k, for a given context, C, instead of constructing a single context-specific explanation. Learning is done by either directly optimizing the log-likelihood (4) or
+
+via EM. To infer an explanation for a given context, we compute the posterior (see Appendix C).
+
+Contextual Variational Autoencoders. Modeling p(Y | X, C) in the form of (1) avoids represent-
+
+ing the joint distribution, p(, C), which is a good decision when the data is abundant. However,
+
+incorporating a generative model of the context provides a few benefits: (i) a better regularization in
+
+low-resource settings, and (ii) a coherent Bayesian framework that allows imposing additional priors
+
+on the parameters of explanations, . We accomplish this by representing p(, C) with a variational
+
+autoencoder (VAE) (Kingma & Welling, 2013; Rezende et al., 2014) whose latent variables are
+
+explanation parameters (Figure 1c). The generative process and the evidence lower bound (ELBO)
+
+are as follows:   p (), C  pu(C | ), Y  p(Y | X, ), log p(Y, C | X)  Eqw(|C) [log p(Y, C | X, )] - KL (qw( | C) p())
+
+(5)
+
+where p(Y, C | X, ) := p(Y | X, )pu(C | ), and qw( | C) and pu(C | ) the encoder and
+
+decoder, respectively. We consider encoders that also make use of the global learnable dictionary, D,
+
+and represent qw( | C) in the form of logistic normal distribution over the simplex spanned by the atoms of D. For the prior, p (), we use a Dirichlet distribution with parameters k < 1 to induce
+
+sharp attention. Derivations are deferred to Appendix D.
+
+3.2 CEN-GENERATED VS. POST-HOC EXPLANATIONS
+
+In this section, we analyze the relationship between CEN-generated and LIME-generated post-hoc
+
+explanations. LIME (Ribeiro et al., 2016) constructs explanations as local linear approximations of
+
+the decision boundary of a model f in the neighborhood of a given point (x, c) via optimization:
+
+^ = argmin L(f, , x,c) + (),
+
+
+(6)
+
+where L(f, , x,c) measures the quality of the linear model g : X  Y as an approximation to f in the neighborhood of (x, c), and () is a regularizer. The typical choice for L and  is L2 and L1 losses, respectively. The neighborhood of (x, c) is defined by a distribution x,c concentrated around
+the point of interest. Given a trained CEN, we can use LIME to approximate its decision boundary
+
+and compare the explanations produced by both methods. The question we ask:
+
+How does the local approximation, ^, relate to the actual explanation,  , generated and used by CEN to make a prediction in the first place?
+
+For the case of binary1 classification, it turns out that when the context encoder is deterministic and the space of explanations is linear, local approximations, ^, obtained by solving (6) recover the
+original CEN-generated explanations,  . Formally, our result is stated in the following theorem.
+
+1Analysis of the multi-class case can be reduced to the binary in the one-vs-all fashion.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Theorem 1. Let the explanations and the local approximations be in the class of linear models, p(Y = 1 | x, )  exp x  . Further, let the encoder be L-Lipschitz and pick a sampling
+distribution, x,c, that concentrates around the point (x, c), such that px,c ( z - z > t) < (t), where z := (x, c) and (t)  0 as t  . Then, if the loss function is defined as
+
+L= 1 K
+
+K
+
+(logit p(Y = 1 | xk, ck) - logit p(Y = 1 | xk, ))2 , (xk, ck)  x,c,
+
+k=1
+
+(7)
+
+the solution of (6) concentrates around  as Px,c
+
+^ - 
+
+>t
+
+
+
+K,L(t),
+
+for
+
+K,L
+
+-
+t
+
+0.
+
+Intuitively, by sampling from a distribution sharply concentrated around (x, c), we ensure that ^ will recover  with high probability. The proof is given in Appendix B.
+
+This result establishes an equivalence between the explanations generated by CEN and those produced by LIME post-hoc when approximating CEN. Note that when LIME is applied to a model other than CEN, equivalence between explanations is not guaranteed. Moreover, as we further show experimentally, certain conditions such as incomplete or noisy interpretable features may lead to LIME producing inconsistent and erroneous explanations.
+
+3.3 STRUCTURED EXPLANATIONS FOR SURVIVAL TIME PREDICTION
+
+While CEN and LIME generate similar explanations in the case of simple classification (i.e., when Y is a scalar), when Y is structured (e.g., as a sequence), constructing coherent local approximations in a post-hoc manner is non-trivial. At the same time, CENs naturally let us represent p(Y | X, ) using arbitrary graphical models. To demonstrate our approach, we consider survival time prediction task where interpretability can be uniquely valuable (e.g., in a medical setting). Survival analysis can be re-formulated as a sequential prediction problem (Chun-Nam et al., 2011). To this end, we design CENs with CRF-based explanations suitable for sequentially structured outputs.
+
+Our setup is as follows. Again, the data instances are represented by contexts, C, attributes, X, and targets, Y. The difference is that now targets are sequences of m binary variables, Y := (y1, . . . , ym), that indicate occurrence of an event. If the event occurred at time t  [ti, ti+1), then yj = 0, j  i and yk = 1, k > i. If the event was censored (i.e., we lack information for times after t  [ti, ti+1)), we represent targets (yi+1, . . . , ym) with latent variables. Note that only m + 1 sequences are valid,
+i.e., assigned non-zero probability by the model. We define CRF-based CEN as:
+
+t  pw(t | C), t  {1, . . . , m}, Y  p(Y | X, 1:m),
+
+m
+
+p(Y = (y1, y2, . . . , ym) | x, 1:m)  exp
+
+yi(x t) + (yt, yt+1)
+
+(8)
+
+t=1
+pw(t | C) := (t, tw,D(c)), tw,D(c) := (ht) D, ht := RNN(ht-1, c)
+
+Note that here we have explanations for each time point, 1:m, and use an RNN-based encoder t. The potentials between attributes, x, and targets, y1:m, are linear functions parameterized by 1:m;
+the pairwise potentials between targets, (yi, yi+1), ensure that configurations (yi = 1, yi+1 = 0) are improbable (i.e., (1, 0) = - and (0, 0) = 00, (0, 1) = 01, (1, 1) = 10 are learnable parameters). Given these constraints, the likelihood of an uncensored event at time t  [tj, tj+1) is
+
+
+
+m
+
+
+
+p(T = t | x, ) = exp
+
+x i
+
+m
+exp
+
+m
+x i
+
+(9)
+
+ i=j
+
+ k=0
+
+i=k+1
+
+and the likelihood of an event censored at time t  [tj, tj+1) is
+
+mm
+
+p(T  t | x, ) =
+
+exp
+
+x i
+
+m
+exp
+
+m
+x i
+
+(10)
+
+k=j+1
+
+i=k+1
+
+k=0
+
+i=k+1
+
+The joint log-likelihood of the data consists of two parts: (a) the sum over the non-censored instances, for which we compute log p(T = t | x, ), and (b) sum over the censored instances, for which we use log p(T  t | x, ). We provide a much more elaborate discussion of the survival time
+prediction setup and our architectures in Appendix E.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+Table 1: Performance of the models on classification tasks (averaged over 5 runs; the std. are on the order of the least significant digit). The subscripts denote the features on which the linear models are built: pixels (pxl), HOG (hog), bag-or-words (bow), topics (tpc), embeddings (emb), discrete attributes (att).
+
+MNIST
+
+CIFAR10
+
+IMDB
+
+Satellite
+
+Model Err (%) Model Err (%) Model Err (%) Model Acc (%) AUC (%)
+
+LRpxl LRhog CNN
+
+8.00 LRpxl 2.98 LRhog 0.75 VGG
+
+60.1 LRbow 48.6 LRtpc
+9.4 LSTM
+
+13.3 LRemb 17.1 LRatt 13.2 MLP
+
+62.5 68.1 75.7 82.2 77.4 78.7
+
+MoEpxl MoEhog CENpxl CENhog
+
+1.23 1.10 0.76 0.73
+
+MoEpxl MoEhog CENpxl CENhog
+
+13.0 11.7
+9.6 9.2
+
+MoEbow MoEtpc CENbow CENtpc
+
+13.9 12.2 6.9
+7.8
+
+MoEatt CENatt
+VCENatt
+
+77.9 81.5
+83.4
+
+85.4 84.2
+84.6
+
+Best previous results for supervised learning and similar LSTM architectures: 8.1% (Johnson & Zhang, 2016).
+
+4 EXPERIMENTS
+For empirical evaluation, we consider applications that involve different data modalities of the context: image, text, and time-series. In each case, CENs are based on deep architectures designed for learning from the given type of context. In the first part, we focus on classification tasks and use linear logistic models as explanations. In the second part, we apply CENs to survival analysis and use structured explanations in the form of conditional random fields (CRFs).
+We design our experiments around the following questions:
+(i) When explanation is a part of the learning and prediction process, how does that affect performance of the predictive model? Does the learning become more or less efficient both in terms of convergence and sample complexity? How do CENs stand against vanilla deep nets?
+(ii) Explanations are as good as the features they use to explain predictions. We ask how noisy interpretable features affect explanations generated post-hoc by LIME and whether CEN can help to detect and avoid such situations.
+(iii) Finally, we ask what kind of insight we can gain by visualizing and inspecting explanations?
+Additional details on the setup, all hyperparameters, and training procedures are given in Appendix F.
+4.1 CLASSIFICATION TASKS AND LINEAR EXPLANATIONS
+Classical datasets. We consider two classical image datasets, MNIST2 and CIFAR103, and a text dataset for sentiment classification of IMDB reviews (Maas et al., 2011). For MNIST and CIFAR10: full images are used as the context; to imitate high-level features, we use (a) the original images cubically downscaled to 20 × 20 pixels, gray-scaled and normalized, and (b) HOG descriptors computed using 3 × 3 blocks (Dalal & Triggs, 2005). For IMDB: the context is represented by sequences of words; for high-level features we use (a) the bag-of-words (BoW) representation and (b) the 50-dimensional topic representation produced by a separately trained off-the-shelf topic model. Neither data augmentation, nor pre-training or other unsupervised techniques were used.
+Remote sensing. We also consider the problem of poverty prediction for household clusters in Uganda from satellite imagery and survey data (the dataset is referred to as Satellite). Each household cluster is represented by a collection of 400 × 400 satellite images (used as the context) and 65 categorical variables from living standards measurement survey (used as the interpretable attributes). The task is binary classification of the households into poor and not poor. We follow the original study of Jean et al. (2016) and use a pre-trained VGG-F network to compute 4096-dimensional embeddings of the satellite images on top of which we build contextual models. Note that this datasets is fairly small (642 points), and hence we keep the VGG-F part of the model frozen to avoid overfitting.
+2http://yann.lecun.com/exdb/mnist/ 3http://www.cs.toronto.edu/~kriz/cifar.html
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Validation error (%) Train error (%) Test error (%)
+
+MNIST
+
+IMDB
+
+30
+
+6 CNN
+
+LSTM
+
+CEN-pxl
+
+CEN-bow
+
+CEN-hog 20
+
+CEN-tpc
+
+4
+
+2 10
+
+0 1 4 42 43 44 45 0 1 4 42 43 44 45
+
+Dictionary size
+
+Dictionary size
+
+(a)
+
+MNIST
+
+CNN
+
+60
+
+1.0 CEN-pxl CEN-hog 40
+
+IMDB
+LSTM CEN-tpc
+
+0.5 20
+
+0.25 0
+
+10 20 0
+
+500 1000
+
+Epoch number
+
+Batch number
+
+(b)
+
+MNIST
+
+40
+
+10
+
+CNN
+CEN-pxl 30
+
+CEN-hog
+
+20 5
+
+10
+
+IMDB
+LSTM CEN-bow CEN-tpc
+
+0 0 5 10 15 Train set size (%)
+
+0 0 10 20 30 40 Train set size (%)
+
+(c)
+
+Figure 3: (a) Validation error vs. the size of the dictionary. (b) Training error vs. iteration (epoch or batch) for baselines and CENs. (c) Test error for models trained on random subsets of data of different sizes.
+
+Models. For each task, we use linear regression and vanilla deep nets as baselines. For MNIST and CIFAR10, the networks are a simple convnet (2 convolutions followed by max pooling) and the VGG-16 architecture (Simonyan & Zisserman, 2014), respectively. For IMDB, following Johnson & Zhang (2016) and we use a bi-directional LSTM with max pooling. For Satellite, we use a fixed VGG-F followed by a multi-layer perceptron (MLP) with 1 hidden layer. Our models used the baseline deep architectures as their context encoders and were of three types: (a) CENs with constrained deterministic encoding (b) mixture of experts (MoE), (c) CENs with variational context autoencoding (VCEN). All our models use the dictionary constraint and sparsity regularization.
+
+4.1.1 EXPLANATIONS AS A REGULARIZER
+In this part, we compare CENs with the baselines in terms of performance. In each task, CENs are trained to simultaneously generate predictions and construct explanations using a global dictionary. When the dictionary size is 1, they become equivalent to linear models. For larger dictionaries, CENs become as flexible as deep nets (Figure 3a). Overall, CENs show very competitive performance and are able to approach or surpass baselines in a number of cases, especially on the IMDB data (Table 1). Thus, forcing the model to produce explanations along with predictions does not limit its capacity.
+Additionally, the "explanation layer" in CENs somehow affects the geometry of the optimization problem, and we notice that it often causes faster convergence (Figure 3b). When the models are trained on a subset of data (size varied between 1% and 20% for MNIST and 2% and 40% for IMDB), explanations play the role of a regularizer which strongly improves the sample efficiency of our models (Figure 3c). This becomes even more evident from the results on the Satellite dataset that had only 500 training points: contextual explanation networks significantly improved upon the sparse linear models on the survey features (known as the gold standard in remote sensing). Note that training an MLP on both the satellite image features and survey variables, while beneficial, does not come close to the result achieved by contextual explanation networks (Table 1).
+
+Test error (%) Test error (%)
+
+MNIST
+
+64 CNN 64
+LIME-pxl
+
+16
+
+CEN-pxl CEN-hog
+
+32
+
+4 16
+
+1 -30 -20 -10 0 SNR, dB
+
+8 10 -20
+(a)
+
+IMDB
+LSTM LIME-bow CEN-bow CEN-tpc
+
+-10 0 SNR, dB
+
+10
+
+MNIST
+
+100 CNN 50
+
+75 LIME-pxl
+
+CEN-pxl
+
+40
+
+50
+
+CEN-hog
+
+30
+
+25 20
+
+IMDB
+LSTM LIME-bow CEN-bow CEN-tpc
+
+0 10 0 50 100 0 50 100 Feature subset size (%) Feature subset size (%)
+
+(b)
+
+Figure 4: The effect of feature quality on explanations. (a) Explanation test error vs. the level of the noise added to the interpretable features. (b) Explanation test error vs. the total number of interpretable features.
+
+4.1.2 CONSISTENCY OF EXPLANATIONS
+While regularization is a useful aspect, the main use case for explanations is model diagnostics. Linear explanation assign weights to the interpretable features, X, and hence their quality depends on the way we select these features. We consider two cases where (a) the features are corrupted with
+7
+
+Under review as a conference paper at ICLR 2018
+
+-0.7 -0.7 Nightlight intensity 0.8
+
+-0.2 -0.8 Has electricity -0.1 0.4 Vegetation -0.3 -0.3 Is water payed
+
+0.4 0.0 -0.4 -0.8
+
+0.5 0.2 Roof: Thatch, Straw
+
+0.3 -0.2 Walls: Unburnt bricks
+
+-0.6 -1.2 Water src: Public tap
+
+0.9 -0.4 Water: Unreliable
+M1 M2
+(a)
+
+HH type: Tenement (%) Times model selected (%)
+
+0.7 M1 0.6 M2
+0.5
+0.4
+0.3
+0.4
+M1 0.3 M2
+
+0.2
+
+0.1 Rural
+
+Urban
+
+(b)
+
+Uganda: Contextual Models
+Arua
+Gulu Kasese
+Iganga Kampala (capital) Masaka
+(c)
+
+Uganda: Nightlight Intensity
+Arua M2
+Gulu M1 Kasese
+
+100% 0%
+
+Iganga Kampala (capital) Masaka
+(d)
+
+Figure 5: Qualitative results for the Satellite dataset: (a) Weights given to a subset of features by the two models (M1 and M2) discovered by CEN. (b) How frequently M1 and M2 are selected for areas marked rural or urban (top) and the average proportion of Tenement-type households in an urban/rural area for which M1 or M2 was selected. (c) M1 and M2 models selected for different areas on the Uganda map. M1 tends to be selected for more urbanized areas while M2 is picked for the rest. (d) Nightlight intensity of different areas of Uganda.
+
+additive noise, and (b) the selected features are incomplete. For analysis, we use MNIST and IMDB datasets. Our question is, Can we trust the explanations on noisy or incomplete features?
+The effect of noisy features. In this experiment, we inject noise4 into the features X and ask LIME and CEN to fit explanations to the corrupted features. Note that after injecting noise, each data point has a noiseless representation C and noisy X. LIME constructs explanations by approximating the decision boundary of the baseline model trained to predict Y from C features only. CEN is trained to construct explanations given C and then make predictions by applying explanations to X. The predictive performance of the produced explanations on noisy features is given on Figure 4a. Since baselines take only C as inputs, their performance stays the same and, regardless of the noise level, LIME "successfully" overfits explanations--it is able to almost perfectly approximate the decision boundary of the baselines using very noisy features. On the other hand, performance of CEN gets worse with the increasing noise level indicating that model fails to learn when the selected interpretable representation is of low quality.
+The effect of feature selection. Here, we use the same setup, but instead of injecting noise into X, we construct X by randomly subsampling a set of dimensions. Figure 4b demonstrates the result. While performance of CENs degrades proportionally to the size of X, we see that, again, LIME is able to fit explanations to the decision boundary of the original models despite the loss of information.
+These two experiments indicate a major drawback of explaining predictions post-hoc: when constructed on poor, noisy, or incomplete features, such explanations can overfit the decision boundary of a predictor and are likely to be misleading. For example, predictions of a perfectly valid model might end up getting absurd explanations which is unacceptable from the decision support point of view.
+4.1.3 QUALITATIVE ANALYSIS
+Here, we focus on the poverty prediction task to analyze CEN-generated explanations qualitatively5. After training CEN with a dictionary of size 32, we discover that the encoder tends to sharply select one of the two explanations (M1 and M2) for different household clusters in Uganda (see Figure 5a, also Figure 13a in appendix). In the survey data, each household cluster is marked as either urban or rural. We notice that, conditional on a satellite image, CEN tends to pick M1 for urban areas and M2 for rural (Figure 5b). Notice that explanations weigh different categorical features, such as reliability of the water source or the proportion of houses with walls made of unburnt brick, quite differently. When visualized on the map, we see that CEN selects M1 more frequently around the major city areas, which also correlates with high nightlight intensity in those areas (Figures 5c,5d). High performance of the model makes us confident in the produced explanations (contrary to LIME as discussed in the previous section) and allows us to draw conclusions about what causes the model to classify certain households in different neighborhoods as poor.
+4We use Gaussian noise with zero mean and select variance for each signal-to-noise ratio level appropriately. 5We additionally visualize learned explanations for MNIST and IMDB datasets in Appendix F.
+8
+
+Under review as a conference paper at ICLR 2018
+
+Table 2: Performance of the classical Cox and Aalen models, CRF-based models, and CENs that use LSTM or MLP for context embedding and CRF for explanations. The numbers are averages from 5-fold cross-validation; the std. are on the order of the least significant digit. @K denotes the temporal quantile, i.e., the time point such that K% of the patients in the data have died or were censored before that point.
+
+SUPPORT2
+
+PhysioNet Challenge 2012
+
+Model
+
+Acc@25 Acc@50 Acc@75 RAE Model
+
+Acc@25 Acc@50 Acc@75 RAE
+
+Cox 84.1 73.7 47.6 0.90 Cox
+
+93.0 69.6 49.1 0.24
+
+Aalen
+
+87.1 66.2 45.8 0.98 Aalen
+
+93.3 78.7 57.1 0.31
+
+CRF 84.4 89.3 79.2 0.59 CRF
+
+93.2 85.1 65.6 0.14
+
+MLP-CRF
+
+87.7
+
+89.6
+
+80.1 0.62 LSTM-CRF
+
+93.9
+
+86.3
+
+68.1 0.11
+
+MLP-CEN
+
+85.5 90.8 81.9 0.56 LSTM-CEN 94.8 87.5 70.1 0.09
+
+4.2 SURVIVAL ANALYSIS AND STRUCTURED EXPLANATIONS
+Finally, we apply CENs to survival analysis and showcase how to use our networks with structured explanations. In survival analysis, the goal is to learn a predictor for the time of occurrence of an event (in this case, the death of a patient) as well as be able to assess the risk (or hazard) of the occurrence. The classical models for this task are the Aalen's additive model (Aalen, 1989) and the Cox proportional hazard model (Cox, 1972), which linearly regress attributes of a particular patient, X, to the hazard function. Chun-Nam et al. (2011) have shown that survival analysis can be formulated as a structured prediction problem and solved using a CRF variant. Here, we propose to use CENs with deep nets as encoders and CRF-structured explanations (as described in Section 3.3). More details on the architectures of our models, the baselines, as well as more background on survival analysis are provided in Appendix E.
+Datasets. We use two publicly available datasets for survival analysis of of the intense care unit (ICU) patients: (a) SUPPORT26, and (b) data from the PhysioNet 2012 challenge7. The data was preprocessed and used as follows:
+SUPPORT2: The data had 9105 patient records and 73 variables. We selected 50 variables for both C and X features (see Appendix F). Categorical features (such as race or sex) were one-hot encoded. The values of all features were non-negative, and we filled the missing values with -1. For CRF-based predictors, the survival timeline was capped at 3 years and converted into 156 discrete intervals of 7 days each. We used 7105 patient records for training, 1000 for validation, and 1000 for testing.
+PhysioNet: The data had 4000 patient records, each represented by a 48-hour irregularly sampled 37-dimensional time-series of different measurements taken during the patient's stay at the ICU. We resampled and mean-aggregated the time-series at 30 min frequency. This resulted in a large number of missing values that we filled with 0. The resampled timeseries were used as the context, C, while for the attributes, X, we took the values of the last available measurement for each variable in the series. For CRF-based predictors, the survival timeline was capped at 60 days and converted into 60 discrete intervals.
+Models. For baselines, we use the classical Aalen and Cox models and the CRF from (Chun-Nam et al., 2011), where all used X as inputs. Next, we combine CRFs with neural encoders in two ways:
+(i) We apply CRFs to the outputs from the neural encoders (the models denoted MLP-CRF and LSTM-CRF, all trainable end-to-end). Similar models have been show very successful in the natural language applications (Collobert et al., 2011). Note that parameters of the CRF layer assign weights to the latent features and are no longer interpretable in terms of the attributes of interest.
+(ii) We use CENs with CRF-based explanations, that process the context variables, C, using the same neural networks as in (i) and output parameters for CRFs that act on the attributes, X.
+Details on the architectures are given in Appendix F.
+6http://biostat.mc.vanderbilt.edu/wiki/Main/DataSets. 7https://physionet.org/challenge/2012/.
+9
+
+Under review as a conference paper at ICLR 2018
+
+dementia avtisst slos hday ca_yes
+sfdm2_Coma or Intub sfdm2_SIP>=30 0
+
+Patient ID: 3520 (Died)
+10 20 30 40 50 0 Time after leaving hospital (weeks)
+
+Patient ID: 1100 (Survived)
+10 20 30 40 50 Time after leaving hospital (weeks)
+
+4 2 0 2 4
+
+Figure 7: Weights of the CEN-generated CRF explanations for two patients from SUPPORT2 dataset for a set of the most influential features: dementia (comorbidity), avtisst (avg. TISS, days 3-25), slos (days from study entry to discharge), hday (day in hospital at study admit), ca yes (the patient had cancer), sfdm2 Coma or Intub (intubated or in coma at month 2), sfdm2 SIP (sickness impact profile score at month 2). Higher weight values correspond to higher feature contributions to the risk of death after a given time point.
+
+Metrics. Following Chun-Nam et al. (2011), we use two
+
+Survived
+
+Died metrics specific to survival analysis: (a) accuracy of correctly
+
+1.0 predicting survival of a patient at times that correspond to
+
+Survival probability
+
+0.8 25%, 50%, and 75% population-level temporal quantiles (i.e.,
+
+time points such that the corresponding % of the patients in 0.6 the data were discharged from the study due to censorship or
+
+0.4 death) and (b) the relative absolute error (RAE) between the predicted and actual time of death for non-censored patients.
+
+0.2
+0.0 0 25 50 Time after leaving hospital (weeks)
+
+Quantitative results. The results for all models are given in Table 2. Our implementation of the CRF baseline reproduces (and even slightly improves) the performance reported by Chun-Nam et al. (2011). MLP-CRF and LSTM-CRF im-
+
+Figure 6: CEN-predicted survival curves prove upon plain CRFs but, as we noted, can no longer be for 500 random patients from SUP- interpreted in terms of the original variables. On the other PORT2 test set. Color indicates death hand, CENs outperform neural CRF models on certain metrics
+
+within 1 year after leaving the hospital. (and closely match on the others) while providing explanations
+
+for risk prediction for each patient at each point in time.
+
+Qualitative results. To inspect predictions of CENs qualitatively, for any given patient, we can visualize the weights assigned by the corresponding explanation to the respective attributes. Figure 7 explanation weights for a subset of the most influential features for two patients from SUPPORT2 dataset who were predicted as survivor and non-survivor. These explanations allow us to better understand patient-specific temporal dynamics of the contributing factors to the survival rates predicted by the model (Figure 6).
+
+5 CONCLUSION
+In this paper, we have introduced contextual explanation networks (CENs)--models that learn to predict by generating and leveraging intermediate context-specific explanations. We have formally defined CENs as a class of probabilistic models, considered a number of special cases (e.g., the mixture of experts mode), and derived learning and inference procedures within the encoder-decoder framework for simple and sequentially-structured outputs. We have shown that, while explanations generated by CENs are provably equivalent to those generated post-hoc under certain conditions, there are cases when post-hoc explanations are misleading. Such cases are hard to detect unless explanation is a part of the prediction process itself. Learning to predict and to explain jointly turned out to have a number of benefits, including strong regularization, consistency, and ability to generate explanations with no computational overhead. We believe that the proposed class of models has a potential to be useful not only for improving prediction capabilities, but also for model diagnostics, pattern discovery, and general data analysis, especially when machine learning is used for decision support in high-stakes applications.
+
+10
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Szegedy, Christian, Wojciech Zaremba, Ilya Sutskever, Joan Bruna, Dumitru Erhan, Ian Goodfellow & Rob Fergus (2013). "Intriguing properties of neural networks". In: arXiv preprint arXiv:1312.6199.
+Nguyen, Anh, Jason Yosinski & Jeff Clune (2015). "Deep neural networks are easily fooled: High confidence predictions for unrecognizable images". In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 427­436.
+Caruana, Rich et al. (2015). "Intelligible models for healthcare: Predicting pneumonia risk and hospital 30-day readmission". In: Proceedings of the 21th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining. ACM, pp. 1721­1730.
+Ribeiro, Marco Tulio, Sameer Singh & Carlos Guestrin (2016). "Why Should I Trust You?: Explaining the Predictions of Any Classifier". In: Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining. ACM, pp. 1135­1144.
+Lombrozo, Tania (2006). "The structure and function of explanations". In: Trends in cognitive sciences 10.10, pp. 464­470.
+Koller, Daphne & Nir Friedman (2009). Probabilistic Graphical Models: Principles and Techniques. MIT press.
+Jacobs, Robert A, Michael I Jordan, Steven J Nowlan & Geoffrey E Hinton (1991). "Adaptive mixtures of local experts". In: Neural computation 3.1, pp. 79­87.
+Collobert, Ronan, Jason Weston, Léon Bottou, Michael Karlen, Koray Kavukcuoglu & Pavel Kuksa (2011). "Natural language processing (almost) from scratch". In: Journal of Machine Learning Research 12.Aug.
+Jaderberg, Max, Karen Simonyan, Andrea Vedaldi & Andrew Zisserman (2014). "Deep structured output learning for unconstrained text recognition". In: arXiv preprint arXiv:1412.5903.
+Belanger, David & Andrew McCallum (2016). "Structured prediction energy networks". In: Proceedings of the International Conference on Machine Learning.
+Wilson, Andrew Gordon, Zhiting Hu, Ruslan Salakhutdinov & Eric P Xing (2016). "Deep kernel learning". In: Proceedings of the 19th International Conference on Artificial Intelligence and Statistics, pp. 370­378.
+Al-Shedivat, Maruan, Andrew Gordon Wilson, Yunus Saatchi, Zhiting Hu & Eric P Xing (2016). "Learning Scalable Deep Kernels with Recurrent Structure". In: arXiv preprint arXiv:1610.08936.
+Krishnan, Rahul G, Uri Shalit & David Sontag (2015). "Deep kalman filters". In: arXiv preprint arXiv:1511.05121.
+Johnson, Matthew, David K Duvenaud, Alex Wiltschko, Ryan P Adams & Sandeep R Datta (2016). "Composing graphical models with neural networks for structured representations and fast inference". In: Advances in Neural Information Processing Systems, pp. 2946­2954.
+Lei Ba, Jimmy, Kevin Swersky, Sanja Fidler & Ruslan Salakhutdinov (2015). "Predicting deep zero-shot convolutional neural networks using textual descriptions". In: Proceedings of the IEEE International Conference on Computer Vision, pp. 4247­4255.
+Ha, David, Andrew Dai & Quoc V Le (2016). "HyperNetworks". In: arXiv preprint arXiv:1609.09106.
+Edwards, Harrison & Amos Storkey (2016). "Towards a neural statistician". In: arXiv preprint arXiv:1606.02185.
+Vinyals, Oriol, Charles Blundell, Tim Lillicrap, Daan Wierstra, et al. (2016). "Matching networks for one shot learning". In: Advances in Neural Information Processing Systems, pp. 3630­3638.
+Xu, Kelvin, Jimmy Ba, Ryan Kiros, Kyunghyun Cho, Aaron Courville, Ruslan Salakhudinov, Rich Zemel & Yoshua Bengio (2015). "Show, attend and tell: Neural image caption generation with visual attention". In: International Conference on Machine Learning, pp. 2048­2057.
+Mitchell, Tom M, Richard M Keller & Smadar T Kedar-Cabelli (1986). "Explanation-based generalization: A unifying view". In: Machine learning 1.1, pp. 47­80.
+11
+
+Under review as a conference paper at ICLR 2018
+Ling, Wang, Dani Yogatama, Chris Dyer & Phil Blunsom (2017). "Program Induction by Rationale Generation: Learning to Solve and Explain Algebraic Word Problems". In: arXiv preprint arXiv:1705.04146.
+Shrikumar, Avanti, Peyton Greenside & Anshul Kundaje (2017). "Learning important features through propagating activation differences". In: arXiv preprint arXiv:1704.02685.
+Lundberg, Scott & Su-In Lee (2017). "A unified approach to interpreting model predictions". In: arXiv preprint arXiv:1705.07874.
+Simonyan, Karen & Andrew Zisserman (2014). "Very deep convolutional networks for large-scale image recognition". In: arXiv preprint arXiv:1409.1556.
+Yosinski, Jason, Jeff Clune, Anh Nguyen, Thomas Fuchs & Hod Lipson (2015). "Understanding neural networks through deep visualization". In: arXiv preprint arXiv:1506.06579.
+Mahendran, Aravindh & Andrea Vedaldi (2015). "Understanding deep image representations by inverting them". In: Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 5188­5196.
+Karpathy, Andrej, Justin Johnson & Li Fei-Fei (2015). "Visualizing and understanding recurrent networks". In: arXiv preprint arXiv:1506.02078.
+Caruana, Rich, Hooshang Kangarloo, JD Dionisio, Usha Sinha & David Johnson (1999). "Case-based explanation of non-case-based learning methods." In: Proceedings of the AMIA Symposium, p. 212.
+Kim, Been, Cynthia Rudin & Julie A Shah (2014). "The bayesian case model: A generative approach for case-based reasoning and prototype classification". In: Advances in Neural Information Processing Systems, pp. 1952­1960.
+Kim, Been, Oluwasanmi O Koyejo & Rajiv Khanna (2016). "Examples are not enough, learn to criticize! Criticism for Interpretability". In: Advances In Neural Information Processing Systems, pp. 2280­2288.
+Koh, P. W. & P. Liang (2017). "Understanding Black-box Predictions via Influence Functions". In: International Conference on Machine Learning (ICML).
+Lei, Tao, Regina Barzilay & Tommi Jaakkola (2016). "Rationalizing neural predictions". In: arXiv preprint arXiv:1606.04155.
+Wang, Joseph & Venkatesh Saligrama (2012). "Local Supervised Learning through Space Partitioning". In: NIPS.
+Lafferty, John, Andrew McCallum, Fernando Pereira, et al. (2001). "Conditional random fields: Probabilistic models for segmenting and labeling sequence data". In: Proceedings of the eighteenth international conference on machine learning, ICML. Vol. 1, pp. 282­289.
+Kingma, Diederik P & Max Welling (2013). "Auto-encoding variational bayes". In: arXiv preprint arXiv:1312.6114.
+Rezende, Danilo Jimenez, Shakir Mohamed & Daan Wierstra (2014). "Stochastic Backpropagation and Approximate Inference in Deep Generative Models". In: Proceedings of The 31st International Conference on Machine Learning, pp. 1278­1286.
+Chun-Nam, J Yu, Russell Greiner, Hsiu-Chin Lin & Vickie Baracos (2011). "Learning patientspecific cancer survival distributions as a sequence of dependent regressors". In: Advances in Neural Information Processing Systems, pp. 1845­1853.
+Johnson, Rie & Tong Zhang (2016). "Supervised and Semi-Supervised Text Categorization using LSTM for Region Embeddings". In: Proceedings of The 33rd International Conference on Machine Learning, pp. 526­534.
+Maas, Andrew L, Raymond E Daly, Peter T Pham, Dan Huang, Andrew Y Ng & Christopher Potts (2011). "Learning word vectors for sentiment analysis". In: Proceedings of the 49th Annual Meeting of the Association for Computational Linguistics: Human Language Technologies-Volume 1. Association for Computational Linguistics, pp. 142­150.
+12
+
+Under review as a conference paper at ICLR 2018 Dalal, Navneet & Bill Triggs (2005). "Histograms of oriented gradients for human detection". In:
+Computer Vision and Pattern Recognition, 2005. CVPR 2005. IEEE Computer Society Conference on. Vol. 1. IEEE, pp. 886­893. Jean, Neal, Marshall Burke, Michael Xie, W Matthew Davis, David B Lobell & Stefano Ermon (2016). "Combining satellite imagery and machine learning to predict poverty". In: Science 353.6301, pp. 790­794. Aalen, O.O. (1989). "A linear regression model for the analysis of life time". In: Statistics in Medicine, 8(8):907­925. Cox, DR (1972). "Regression Models and Life-Tables". In: Journal of the Royal Statistical Society. Series B (Methodological), pp. 187­220.
+13
+
+Under review as a conference paper at ICLR 2018
+
+A ANALYSIS OF THE ASSUMPTIONS MADE BY CEN
+
+As described in the main text, CENs represent the predictive distribution in the following form:
+
+p(Y | X, C) = p(Y | X, )p( | C)d
+
+and the assumed generative process behind the data is either:
+(CEN) Y  p(Y | X, ),   p( | C) for the purely discriminative setting.
+(VCEN) Y  p(Y | X, ),   p(), C  p(C | ) when we model the joint distribution of the explanations, , and contexts, C, e.g., using encoder-decoder framework.
+We would like to understand whether CEN, as defined above, can represent any conditional distribution, p(Y | X, C), when the class of explanations is limited (e.g., to linear models), and, if not, what are the limitations?
+Generally, CEN can be seen as a mixture of predictors. Such mixture models could be quite powerful as long as the mixing distribution, p( | C), is rich enough. In fact, even a finite mixture exponential family regression models can approximate any smooth d-dimensional density at a rate O(m-4/d) in the KL-distance (Jiang & Tanner, 1999). This result suggests that representing the predictive distribution with contextual mixtures should not limit the representational power of the model. The two caveats are:
+(i) In practice, p( | C) is limited, e.g., either deterministic encoding, a finite mixture, or a simple distribution parametrized by a deep network.
+(ii) The classical setting of predictive mixtures does not separate inputs into two subsets, (C, X). We do this intentionally to produce hypotheses/explanations in terms of specific features that could be useful for interpretability or model diagnostics down the line. However, it could be the case that X contains only some limited information about Y, which could limit the predictive power of the full model.
+We leave the point (ii) to future work. To address (i), we consider p( | C) that fully factorizes over the dimensions of : p( | C) = j p(j | C), and assume that hypotheses, p(Y | X, ), factorize according to some underlying graph, GY = (VY, EY). The following proposition shows that in such case p(Y | X, C) inherits the factorization properties of the hypothesis class.
+Proposition 1. Let p( | C) := j p(j | C) and let p(Y | X, ) factorize according to some graph GY = (VY, EY). Then, p(Y | X, C) defined by CEN with p( | C) encoder and p(Y | X, ) explanations also factorizes according to G.
+Proof. Assume that p(Y | X, ) factorizes as VY p(Y | YMB(), X, ), where  denotes subsets of the Y variables and MB() stands for the corresponding Markov blankets. Using the definition of CEN, we have:
+
+p(Y | X, C) = p(Y | X, )p( | C)d
+
+(11)
+
+= p(Y | YMB(), X, ) p(j | C)d
+
+VY
+
+j
+
+
+
+=  p(Y | YMB(), X, ) p(j | C)d
+
+VY
+
+j
+
+= p(Y | YMB(), X, C),
+VY
+
+(12) (13) (14)
+
+Remark 1. All the encoding distributions, p( | C), considered in the main text of the paper, including delta functions, their mixtures, and encoders parametrized by neural nets fully factorize over the dimensions of .
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+Remark 2. The proposition has no implications for the case of scalar targets, Y. However, in case
+of structured prediction, regardless of how good the context encoder is, CEN will assume the same set of independencies as given by the class of hypotheses, p(Y | X, ).
+
+B APPROXIMATING THE DECISION BOUNDARY OF CEN
+
+Ribeiro et al. (2016) proposed to construct approximations of the of the decision boundary of an
+
+arbitrary predictor, f , in the locality of a specified point, x, by solving the following optimization
+
+problem:
+
+g^ = argmin L(f, g, x) + (g),
+gG
+
+(15)
+
+where L(f, g, x) measures the quality of g as an approximation to f in the neighborhood of x defined by x and (g) is a regularizer that is usually used to ensure human-interpretability of the selected local hypotheses (e.g., sparsity). Now, consider the case when f is defined by a CEN, instead of x we have (c, x), and the class of approximations, G, coincides with the class of explanations, and
+hence can be represented by . In this setting, we can pose the same problem as:
+
+^ = argmin L(f, , c,x) + ()
+
+
+(16)
+
+Suppose that CEN produces  explanation for the context c using a deterministic encoder, . The question is whether and under which conditions ^ can recover  . Theorem 1 answers the question in
+affirmative and provides a concentration result for the case when hypotheses are linear. Here, we prove Theorem 1 for a little more general class of log-linear explanations: logit p(Y = 1 | x, ) = a(x) ,
+where a is a C-Lipschitz vector-valued function whose values have a zero-mean distribution when (x, c) are sampled from x,c8. For simplicity of the analysis, we consider binary classification and omit the regularization term, (g). We define the loss function, L(f, , x,c), as:
+
+L= 1 K
+
+K
+
+(logit p(Y = 1 | xk - x, ck) - logit p(Y = 1 | xk - x, ))2 ,
+
+k=1
+
+(17)
+
+where (xk, ck)  x,c and x,c := xc is a distribution concentrated around (x, c). Without loss of generality, we also drop the bias terms in the linear models and assume that a(xk - x) are centered.
+
+Proof of Theorem 1. The optimization problem (16) reduces to the least squares linear regression:
+
+^ = argmin 1 K
+
+
+
+K
+k=1
+
+logit p(Y
+
+= 1 | xk - x, ck) - a(xk - x)
+
+
+
+2
+
+(18)
+
+We consider deterministic encoding, p( | c) := (, (c)), and hence logit p(Y = 1 | xk - x, ck) takes the following form:
+
+logit p(Y = 1 | xk - x, ck) = logit p(Y = 1 | xk - x,  = (ck)) = a(xk - x) (ck) (19)
+
+To simplify the notation, we denote ak := a(xk - x), k := (ck), and  := (c). The solution of (18) now can be written in a closed form:
+
+^ =
+
+1K K akak
+
++
+
+1K K akak k
+
+k=1
+
+k=1
+
+(20)
+
+Note that ^ is a random variable since (xk, ck) are randomly generated from x,c. To further simplify
+
+the
+
+notation,
+
+denote
+
+M
+
+:=
+
+1 K
+
+K k=1
+
+ak ak
+
+.
+
+To
+
+get
+
+a
+
+concentration
+
+bound
+
+on
+
+^ - 
+
+, we will use
+
+the continuity of (·) and a(·), concentration properties of x,c around (x, c), and some elementary
+
+results from random matrix theory. To be more concrete, since we assumed that x,c factorizes, we
+
+further let x and c concentrate such that px ( x -x > t) < x(t) and pc ( c -c > t) < c(t), respectively, where x(t) and c(t) both go to 0 as t  , potentially at different rates.
+
+8In case of logistic regression, a(x) = [1, x1, . . . , xd] .
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+First, we have the following bound from the convexity of the norm:
+
+p( ^ - 
+
+> t)
+
+=
+
+p( 1 K K
+
+M +akak (k - )
+
+k=1
+
+> t)
+
+(21)
+
+
+
+p( 1 K K
+
+M +akak (k - ) > t)
+
+k=1
+
+(22)
+
+By making use of the inequality Ax  A x , where A denotes the spectral norm of the matrix A, the L-Lipschitz property of (c), the C-Lipschitz property of a(x), and the concentration
+of xk around x, we have
+
+p( ^ - 
+
+> t)
+
+
+
+p(L 1 K K
+
+M +akak
+
+k=1
+
+ck - c > t)
+
+(23)
+
+
+
+p(CL M + 1 K K
+
+ak ak
+
+k=1
+
+ck - c > t)
+
+(24)
+
+
+
+p
+
+(
+
+CL min(M
+
+)
+
+1 K
+
+K k=1
+
+xk - x
+
+ck - c > t)
+
+(25)
+
+
+
+p
+
+(
+
+CL 2 min(M
+
+)
+
+> t) + p(
+
+xk - x
+
+ck - c >  2)
+
+(26)
+
+
+
+p(min
+
+M/(C )2
+
+<
+
+L C2t
+
+)
+
++
+
+x( )
+
++
+
+c( )
+
+(27)
+
+Note that we used the fact that the spectral norm of a rank-1 matrix, a(xk)a(xk) , is simply the norm of a(xk), and the spectral norm of the pseudo-inverse of a matrix is equal to the inverse of the least non-zero singular value of the original matrix: M +  max(M +) = -m1in(M ).
+
+Finally, we need a concentration bound on min M/(C )2 to complete the proof. Note that
+
+M C22
+
+=
+
+1 K
+
+K ak k=1 C
+
+ak C
+
+, where the norm of
+
+ak C
+
+is bounded by 1. If we denote µmin(C )
+
+the minimal eigenvalue of Cov
+
+ak C
+
+, we can write the matrix Chernoff inequality (Tropp, 2012) as
+
+follows:
+
+p(min M/(C )2 < )  d exp {-KD( µmin(C ))} ,   [0, µmin(C )],
+
+where d is the dimension of ak,  :=
+
+L C2t
+
+,
+
+and
+
+D(a
+
+b) denotes the binary information divergence:
+
+D(a b) = a log
+
+a b
+
++ (1 - a) log
+
+1-a 1-b
+
+.
+
+The final concentration bound has the following form:
+
+p( ^ - 
+
+> t)  d exp
+
+-K D
+
+L C2t
+
+µmin(C )
+
++ x( ) + c( )
+
+(28)
+
+We see that as    and t   all terms on the right hand side vanish, and hence ^ concentrates around  . Note that as long as µmin(C ) is far from 0, the first term can be made negligibly small by sampling more points around (x, c). Finally, we set   t and denote the right hand side by K,L,C (t) that goes to 0 as t   to recover the statement of the original theorem.
+Remark 3. We have shown that ^ concentrates around  under mild conditions. With more assumptions on the sampling distribution, x,c, (e.g., sub-gaussian) one could derive precise convergence rates. Note that we are in total control of any assumptions we put on x,c since precisely that distribution is used for sampling. This is a major difference between the local approximation setup
+here and the setup of linear regression with random design; in the latter case, we have no control over
+the distribution of the design matrix, and any assumptions we make could potentially be unrealistic.
+Remark 4. Note that concentration analysis of a more general case when the loss L is a general convex function and (g) is a decomposable regularizer could be done by using results from the M-estimation theory (Negahban et al., 2009), but would be much more involved and unnecessary for
+our purposes.
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+C LEARNING AND INFERENCE IN THE CONTEXTUAL MIXTURE OF EXPERTS
+
+As noted in the main text, to make a prediction, MoE uses each of the K experts where the predictive distribution is computed as follows:
+
+K
+
+pw,D(Y | X, C) = pw(k|C)p(Y | X, k).
+
+(29)
+
+k=1
+
+Since each expert contributes to the predictive probability, we can explain a prediction, y^, for the instance (x, c) in terms of the posterior weights assigned to each expert model:
+
+pw(k
+
+|
+
+y^, x, c)
+
+=
+
+pw(y^, k pw(y^ |
+
+| x, c) x, c)
+
+=
+
+p(y^ | x, k)pw(k | c)
+
+K k=1
+
+pw(k|c)p(y^
+
+|
+
+x,
+
+k )
+
+(30)
+
+If the p(k | y^, x, c) assigns very high weight to a single expert, we can treat that expert model as
+
+an explanation. Note that however, in general, this may not be the case and posterior weights could
+
+be quite spread out (especially, if the number of experts is small and the class of expert models,
+
+p(Y | X, ), is too simple and limited). Therefore, there may not exist an equivalent local explanation
+
+in the class of expert models that would faithfully approximate the decision boundary.
+
+To learn contextual MoE, we can either directly optimize the conditional log-likelihood, which is non-convex yet tractable, or use expectation maximization (EM) procedure. For the latter, we write the log likelihood in the following form:
+
+K
+
+log p(y | x, c) =
+
+q(k) log p(y | x, c)
+
+(31)
+
+k=1
+
+=
+
+K k=1
+
+q(k)
+
+log
+
+p(y | x, k)pw(k | c)q(k) pw(k | y, x, c)q(k)
+
+(32)
+
+=
+
+K
+
+q(k)
+
+log
+
+p(y
+
+|
+
+x,
+
+k )pw (k q(k)
+
+|
+
+c)
+
++
+
+KL
+
+(q(k)
+
+pw(k | y, x, c))
+
+(33)
+
+k=1
+
+At each iteration, we do two steps:
+
+(E-step) Compute posteriors for each data instance, qi(k) = pw(k | yi, xi, ci).
+
+(M-step) Optimize Q(w) =
+
+K k=1
+
+q(k)
+
+log
+
+p(y
+
+|
+
+x,
+
+k )pw (k
+
+|
+
+c).
+
+It is well known that this iterative procedure is guaranteed to converge to a local optimum.
+
+D CONTEXTUAL VARIATIONAL AUTOENCODERS
+
+We can express the evidence for contextual variational autoencoders as follows: log p(Y, C | X)
+
+= qw( | C) log p(Y, C | X)d
+
+=
+
+qw(
+
+|
+
+C)
+
+log
+
+p(Y
+
+| X, )pu(C | )p pu( | Y, X, C)
+
+()
+
+d
+
+=
+
+qw(
+
+|
+
+C)
+
+log
+
+p(Y
+
+|
+
+X, )pu(C | qw( | C)
+
+)p() d
+
++
+
+KL
+
+(qw(
+
+|
+
+C)
+
+pu( | Y, X, C))
+
+ L(w, u; Y, X, C),
+
+(34)
+
+where L(w, u; Y, X, C) is the evidence lower bound (ELBO):
+
+L(w, u; Y, X, C)
+
+= Eqw
+
+log
+
+p(Y
+
+|
+
+X, )pu(C | qw( | C)
+
+)p()
+
+= Eqw [log p(Y | X, )] + Eqw [log pu(C | )] - KL (q( | C) p())
+
+(35)
+
+17
+
+Under review as a conference paper at ICLR 2018
+
+We notice that the ELBO consists of three terms:
+
+(1) the expected conditional likelihood of the explanation, Eqw [log p(Y | X, )], (2) the expected context reconstruction error, Eqw [log pu(C | )], and (3) the KL-based regularization term, -KL (q( | C) p()).
+
+We can optimize the ELBO using first-order methods by estimating the gradients via Monte Carlo
+sampling with reparametrization. When the encoder has a classical form of a Gaussian distribution (or any other location-scale type of distribution), qw( | C) = N (; µw(C), diag (w(C))), reparametrization of the samples is straightforward (Kingma & Welling, 2013).
+
+In our experiments, we mainly consider encoders that output probability distributions over a simplex spanned by a dictionary, D, which turned out to have better performance and faster convergence. In particular, sampling from the encoder is as follows:
+
+z  N (; µw(C), diag (w(C))) ,
+
+0 = 1+
+
+1
+
+K j=1
+
+ezj
+
+,
+
+i
+
+=
+
+1+
+
+ezi
+
+K j=1
+
+ezj
+
+,
+
+i
+
+=
+
+1,
+
+.
+
+.
+
+.
+
+,
+
+K,
+
+ = D·
+
+(36)
+
+The samples, , will be logistic normal distributed and are easy to be re-parametrized. For prior, we use the Dirichlet distribution over  with the parameter vector . In that case, the stochastic estimate of the KL-based regularization term has the following form:
+
+-KL (q( | C) p())
+
+1 L log N L
+l=1
+
+log
+
+-(l0) 0(l)
+
+; µw(C), diag (w(C))
+
+-  log((l)),
+
+(37)
+
+where -(l0) is a parameter vector without the first element, and l indexes samples taken from the encoder, p( | C). In practice, we use L = 1.
+
+E SURVIVAL ANALYSIS AND CONTEXTUAL CONDITIONAL RANDOM FIELDS
+
+We provide some general background on survival analysis, the classical Aalen additive hazard (Aalen, 1989) and Cox proportional hazard (Cox, 1972) models, derive the structured prediction approach (Chun-Nam et al., 2011), and describe CENs with CRF-based explanations used in our experiments in detail.
+
+In survival time prediction, our goal is to estimate the occurrence time of an event in the future (e.g., death of a patient, earthquake, hard drive failure, customer turnover, etc.). The unique aspect of the survival data is that there is always a fraction of points for which the event time has not been observed (such data instances are called censored). The common approach is to model the survival time, T , either for a population (i.e., average survival time) or for each instance. In particular, we can introduce the survival function, S(t) := p(T  t), which gives the probability of the event not happening at least up to time t (e.g., patient survived up to time t). The derivative of the survival function is called the hazard function, (t), which is the instantaneous rate of failure:
+
+t
+S(t) := - ( )d
+0
+
+(38)
+
+This allows us to model survival on a population level. Now, proportional hazard models assume
+that  is also a function of the available features of a given instance, i.e., (t; x). Cox's proportional hazard model assumes (t; x) := 0(t) exp(x ). Aalen's model is a time-varying extension and assumes that (t; x) := x (t), where (t) is a function of time.
+
+Survival analysis is a regression problem as it originally works with continuous time. The time can be discretized (e.g., into days, months, etc.), and hence we can approach survival time prediction as a multi-task classification problem (Efron, 1988). Chun-Nam et al. (2011) went one step further, noted that the output space is structure in a particular way, and proposed a model called sequence of dependent regressors, which is in essence a conditional random field with a particular structure of the
+
+18
+
+Under review as a conference paper at ICLR 2018
+
+t  [t2, t3)
+y1 y2 y3 1 2 3
+x1 x2 x3
+c h1 h2 h3
+
+t  [t2, t3)
+y1 y2 y3 1 2 3
+c1 c2 c3 x1 x2 x3
+h1 h2 h3 h1 h2 h3
+
+(a) Architecture used for SUPPORT2
+
+(b) Architecture used for PhysioNet
+
+Figure 8: CEN architectures used in our survival analysis experiments. Context encoders were time-distributed
+single hidden layer MLP (a) and LSTM (b) that produced inputs for another LSTM over the output time intervals (denoted with h1, h2, h3 hidden states respectively). Each hidden state of the output LSTM was used to generate the corresponding t that were further used to construct the log-likelihood for CRF.
+
+pairwise potentials between the labels. In particular, as we described in Section 3.3, the targets are sequences of binary random variables, Y := (y1, . . . , ym), that encode occurrence of an event as follows: for an event that occurred at time t  [ti, ti+1), then yj = 0, j  i and yk = 1, k > i. Note that only m + 1 sequences are valid, i.e., assigned non-zero probability by the model, which
+allows us to write the following linear model:
+
+p(Y = (y1, . . . , ym) | x, ) =
+
+exp
+
+m t=1
+
+ytx
+
+t
+
+m k=0
+
+exp
+
+m t=k+1
+
+x
+
+t
+
+To train the model, Chun-Nam et al. (2011) optimize the following objective:
+
+(39)
+
+m m-1
+
+min C1
+
+t 2 + C2
+
+t+1 - t 2 - log L(Y, X; )
+
+
+
+t=1 t=1
+
+(40)
+
+where the first two terms are regularization and the last term is the log-likelihood which as:
+
+L(Y, X; ) = p(T = ti | xi, ) + p(T > tj | xj, )
+
+iNC
+
+jC
+
+(41)
+
+where NC is the set of non-censored instances (for which we know the outcome times, ti) and C is the set of censored inputs (for which only know the censorship times, tj). Expressions for the likelihoods of censored and non-censored inputs are the same as given in Section 3.3.
+
+Finally, CENs additionally take the context variables, C, as inputs and generate t for each time step using a recurrent encoder. In our experiments, we considered datasets where the context was represented by a vector or regularly sampled time series. Architectures for CENs used in our experiments are given in Figure 8. We used encoders suitable for the data type of the context variables available for each dataset. Each t was generated using a constrained deterministic encoder with a global dictionary, D of size 16. For details on parametrization of our architectures see tables in Appendix F.
+
+Importantly, CEN-CRF architectures are trainable end-to-end (as all other CEN architectures considered in this paper), and we optimized the objective using stochastic gradient method. For each mini-batch, depending on which instances were censored and which were non-censored, we constructed the objective function accordingly (to implement this in TensorFlow we used masking and the standard control flow primitives for selecting between parts of the objective for censored and non-censored inputs).
+
+F EXPERIMENTAL DETAILS
+This section provides details on the experimental setups including architectures, training protocols and procedures, etc. Additionally, we include complete dictionary visualizations learned by CENs.
+
+19
+
+Under review as a conference paper at ICLR 2018
+
+Correct
+
+3
+
+6
+
+9 Probabilities
+
+Misclassified
+
+2
+
+3
+
+7 Probabilities
+
+Adversarial
+
+3
+
+5
+
+8 Probabilities
+
+396
+
+631
+
+975
+
+0 8 16 24 32
+
+0 8 16 24 32
+
+0 8 16 24 32
+
+Figure 9: Visualization of the top 3 prediction rationalizations provided by the CENpxl model for correctly classified (left), misclassified (middle), and adversarial (right) digits. Adversarial examples were generated using the fast gradient sign method (FGSM) (Papernot et al., 2016).
+
+F.1 ADDITIONAL DETAILS ON THE DATASETS AND EXPERIMENT SETUPS
+MNIST. We used the classical split of the dataset into 50k training, 10k validation, and 10k testing points. All models were trained for 100 epochs using the Adam optimizer with the learning rate of 10-3. No data augmentation was used in any of our experiments. HOG representations were computed using 3 × 3 blocks.
+CIFAR10. For this set of experiments, we followed the setup given Zagoruyko (2015), reimplemented in Keras with TensorFlow backend. The input images were global contrast normalized (a.k.a. GCN whitened) while the rescaled image representations were simply standardized. Again, HOG representations were computed using 3×3 blocks. No data augmentation was used in our experiments.
+IMDB. We considered the labeled part of the data only (50,000 reviews total). The data were split into 20,000 train, 5,000 validation, and 25,000 test points. The vocabulary was limited to All models were trained with the Adam optimizers with 10-2 learning rate. The models were initialized randomly; no pre-training or any other unsupervised/semi-supervised technique was used.
+Satellite. As described in the main text, we used a pre-trained VGG-16network9 to extract features from the satellite imagery. Further, we added one fully connected layer network with 128 hidden units used as the context encoder. For the VCEN model, we used dictionary-based encoding with Dirichlet prior and logistic normal distribution as the output of the inference network. For the decoder, we used an MLP of the same architecture as the encoder network. All models were trained with Adam optimizer with 0.05 learning rate. The results were obtained by 5-fold cross-validation.
+Medical data. We have used minimal pre-processing of both SUPPORT2 and PhysioNet datasets limited to standardization and missing-value filling. We found that denoting missing values with negative entries (-1) often led a slightly improved performance compared to any other NA-filling techniques. PhysioNet time series data was irregularly sampled across the time, so we had to resample temporal sequences at regular intervals of 30 min (consequently, this has created quite a few missing values for some of the measurements). All models were trained using Adam optimizer with 10-2 learning rate.
+F.2 MODEL ARCHITECTURES
+Architectures of the model used in our experiments are summarized in Tables 3, 4, 5.
+F.3 DICTIONARIES LEARNED BY CENS
+We visualize the full dictionaries learned by CENs on MNIST, IMDB, and Satellite tasks (see Figures 9, 11, 12, 10, 13a) and additional correlation plots between the selected models and the survey variable values (Figure 13b).
+
+9The model was taken form https://github.com/nealjean/predicting-poverty. 20
+
+Under review as a conference paper at ICLR 2018
+
+Convolutional Block
+
+Table 3: Top-performing architectures used in our experiments on MNIST and IMDB datasets.
+
+(a) MNIST
+
+(b) IMDB
+
+Convolutional Encoder
+
+Contextual Explanations
+
+Squential Encoder
+
+Contextual Explanations
+
+layer # filters kernel size strides padding activation
+layer # filters kernel size strides padding activation
+layer pooling size dropout
+layer units dropout
+
+Conv2D model
+
+Logistic regr. layer
+
+32 features
+
+HOG (3, 3) vocabulary
+
+3 × 3 # of features
+
+729 dimension
+
+1 × 1 standardized valid dictionary ReLU l1 penalty
+Conv2D l2 penalty
+
+Yes layer
+256 5 · 10-5 bidirectional 1 · 10-6 units
+max length
+
+32 model
+
+Logistic reg. dropout
+
+3 × 3 features
+
+Pixels (20, 20) rec. dropout
+
+1 × 1 # of features valid standardized
+
+400 layer
+Yes
+
+ReLU dictionary MaxPoo2D l1 penalty
+2 × 2 l2 penalty
+
+64 # params 5 · 10-5
+1 · 10-6
+
+0.25 Contextual VAE
+
+Dense prior 128 sampler 0.50
+
+Dir(0.2) LogisticNormal
+
+Embedding model
+
+20k features
+
+1024 # of features
+
+Dictionary
+
+LSTM Yes
+
+l1 penalty
+
+256 l2 penalty
+
+200 model
+
+0.25 features
+
+0.25 # of features
+
+Dictionary MaxPool1D
+l1 penalty
+
+23.1M l2 penalty
+
+Logistic reg. BoW 20k 32
+5 · 10-5 1 · 10-6
+Logistic reg. Topics 50 16
+1 · 10-6 1 · 10-8
+
+Contextual VAE
+
+Prior Sampler
+
+Dir(0.1) LogisticNormal
+
+# of blocks # params
+
+1 1.2M
+
+Table 4: Top-performing architectures used in our experiments on CIFAR10 and Satellite datasets. VGG-16architecture for CIFAR10 was taken from https://github.com/szagoruyko/cifar. torch but implemented in Keras with TensorFlow backend. Weights of the pre-trained VGG-Fmodel for the Satellite experiments were taken from https://github.com/nealjean/predicting-poverty.
+
+VGG-16
+
+(a) CIFAR10
+
+(b) Satellite
+
+Convolutional Encoder
+
+Contextual Explanations
+
+model pretrained fixed weights
+reference
+layer pretrained fixed weights units dropout activation
+
+VGG-16 model
+No features
+No # of features
+dictionary Zagoruyko, l1 penalty
+2015 l2 penalty
+
+Logistic reg.
+HOG (3, 3)
+1024
+16 1 · 10-5 1 · 10-6
+
+Dense
+
+Contextual VAE
+
+No
+
+No prior
+
+Dir(0.2)
+
+16 sampler
+
+LogisticNormal
+
+0.25
+
+ReLU
+
+# params
+
+20.0M
+
+MLP
+
+VGG-F
+
+Convolutional Encoder
+
+Contextual Explanations
+
+model pretrained fixed weights
+reference
+layer pretrained fixed weights units dropout activation
+
+VGG-F model
+
+Logistic reg.
+
+Yes features
+
+Survey
+
+Yes # of features
+
+64
+
+Jean et al., dictionary 2016 l1 penalty
+Dense l2 penalty No # params
+
+16 1 · 10-3 1 · 10-4
+
+No Contextual VAE
+
+128 0.25 prior ReLU sampler
+
+Dir(0.2) LogisticNormal
+
+# trainable params
+
+0.5M
+
+MLP
+
+Table 5: Top-performing architectures used in our experiments on SUPPORT2 and PhysioNet 2012 datasets.
+
+(a) SUPPORT2
+
+MLP Encoder
+
+Contextual Explanations
+
+layer pretrained fixed weights units dropout activation
+
+Dense No No 64
+0.50 ReLU
+
+model features # of features dictionary l1 penalty l2 penalty
+
+Linear CRF
+Measurements
+50
+16 1 · 10-3 1 · 10-4
+
+LSTM
+
+(b) PhysioNet Challenge 2012
+
+Sequential Encoder
+
+Contextual Explanations
+
+layer bidirectional units max length dropout rec. dropout
+
+LSTM No 32 150
+0.25 0.25
+
+model features # of features dictionary l1 penalty l2 penalty
+
+Linear CRF
+Statistics
+111
+16 1 · 10-3 1 · 10-4
+
+MLP
+
+21
+
+Under review as a conference paper at ICLR 2018
+
+Bad acting/plot: ['script', 'acting', 'bad', 'plot', 'film']
+
+Great story/performance: ['great', 'story', 'film', 'brilliant']
+
+A movie one has seen: ['just', 'movie', 'watched', 'good']
+
+103
+
+102
+
+-5 0
+
+5
+
+Bollywood movies: ['bollywood', 'indian', 'action', 'kumar']
+
+-5 0
+
+5
+
+Soap operas: ['italian', 'soap', 'russian', 'opera']
+
+103
+
+-5 0
+
+5
+
+Art/nature movies: ['art', 'earth', 'nature', 'jungle']
+
+101
+
+0.000
+
+0.001 0.000
+
+0.001
+
+0.002 -0.0005 0.0000 0.0005
+
+Figure 10: Histograms of test weights assigned by CEN to 6 topics: Acting- and plot-related topics (upper charts), genre topics (bottom charts). Note that acting-related topics are often bi-modal, i.e., contributing either positive, negative, or zero weight to the sentiment prediction in different contexts. Genre topics almost always have negligible contributions. This allows us to conclude that the learned model does not have any particular biases towards or against any a given genre.
+
+22
+
+Under review as a conference paper at ICLR 2018
+0123456789
+Figure 11: Visualization of the model dictionary learned by CEN on MNIST. Each row corresponds to a dictionary element, and each column corresponds to the weights of the model voting for each class of digits. Images visualize the weights of the models. Red corresponds to high positive values, dark gray to high negative values, and white to values that are close to 0.
+23
+
+Under review as a conference paper at ICLR 2018
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
+[students, version, branagh, high, shakespeare, school, play] 1 0.0 0.0 0.0 -0.2 -0.2 0.0 0.3 -0.2 -0.2 0.0 0.0 -0.2 0.0 0.0 0.0 0.0 [jackie, chinese, japanese, dog, just, action, scene] 2 -0.3 0.2 0.0 0.1 0.3 0.0 0.0 0.0 -0.3 0.2 0.0 0.2 0.2 0.0 0.1 0.0 [don, man, t, stewart, u, western, s] 3 0.1 0.0 -0.2 -0.2 0.3 0.0 0.2 -0.2 -0.1 0.0 0.0 0.1 0.1 0.0 0.3 -0.1 [luke, adaptation, version, jane, read, novel, book] 4 0.0 0.0 0.3 -0.1 -0.2 0.0 0.2 -0.2 -0.2 -0.2 0.0 0.0 0.1 0.0 0.0 0.2
+[elvis, brando, stephen, jackson, chris, king, michael] 5 0.0 0.1 0.0 0.0 0.0 0.0 0.2 -0.2 0.2 -0.2 -0.2 -0.2 0.2 0.0 0.0 0.2 [budget, scary, zombie, effects, film, gore, horror] 6 0.0 0.0 0.0 -0.1 -0.2 0.3 -0.2 -0.2 -0.2 0.3 -0.3 0.2 0.3 0.0 0.1 -0.3 [oh, loved, li, totally, oliver, wow, !] 7 0.0 0.1 0.0 -0.2 0.0 0.2 0.0 0.3 0.2 0.1 0.2 -0.3 -0.2 0.0 0.1 -0.1 [cole, british, virus, time, bush, irish, james] 8 -0.1 0.0 0.2 0.0 0.0 -0.2 -0.2 0.0 -0.2 0.2 0.0 0.0 -0.2 0.1 -0.2 -0.1 [film, welles, noir, city, new, joe, york] 9 0.1 0.0 -0.2 -0.3 -0.1 0.2 0.1 0.2 -0.1 -0.2 0.3 -0.2 0.0 0.0 0.2 0.2 [kate, caine, performance, alan, cast, role, peter] 10 0.0 0.1 0.2 -0.2 -0.2 0.1 0.0 -0.2 -0.1 -0.2 0.3 -0.2 0.1 0.1 0.0 -0.2 [script, characters, just, acting, bad, plot, film] 11 -0.5 -0.6 0.0 0.0 -0.2 0.0 -0.1 -0.4 0.0 0.0 -0.4 -0.4 0.2 -0.5 0.2 -0.6 [camp, arts, martial, fight, action, lee, game] 12 0.0 0.2 0.0 0.0 0.3 -0.2 -0.2 0.0 -0.2 0.2 -0.2 0.2 -0.3 0.1 0.2 -0.2 [kid, child, little, disney, family, children, kids] 13 0.0 0.0 0.0 0.1 0.3 0.0 0.0 -0.1 -0.2 0.2 -0.2 0.1 -0.2 0.0 0.0 0.1 [robert, bank, roy, pacino, rob, mary, al] 14 0.0 -0.1 0.2 0.1 0.0 0.0 0.3 0.3 0.2 -0.2 0.0 0.0 0.0 0.0 0.0 0.0
+[rose, hardy, sutherland, titanic, steve, jack, george] 15 -0.1 0.2 0.2 0.0 0.1 0.0 -0.4 0.0 0.1 0.2 0.0 -0.2 0.3 0.0 -0.1 0.0 [really, don't, ?, just, like, bad, movie] 16 -0.7 -0.5 0.2 -0.2 -0.2 -0.4 -0.3 -0.3 0.0 0.0 -0.3 0.0 0.1 -0.6 0.2 -0.3
+[films, beautiful, love, characters, great, story, film] 17 0.4 0.3 -0.2 -0.2 0.0 -0.1 0.3 0.0 -0.2 0.0 0.0 0.3 0.1 0.6 0.0 0.5 [man, racist, like, film, american, white, black] 18 -0.2 0.0 0.0 0.2 -0.2 0.0 0.0 -0.2 -0.2 -0.3 -0.2 0.0 0.1 0.0 -0.1 0.0
+[great, soundtrack, band, songs, song, rock, music] 19 0.1 0.0 0.0 -0.2 0.2 -0.3 0.0 0.0 -0.2 0.3 0.0 0.2 -0.1 0.1 0.0 0.0 [clark, street, africa, nightmare, south, freddy, superman] 20 0.0 0.0 -0.2 0.0 0.3 0.0 0.0 0.3 0.0 0.2 0.0 -0.2 -0.2 0.0 -0.2 0.0
+[john, tv, sam, candy, murphy, eddie, night] 21 -0.2 0.0 0.0 0.3 0.0 0.0 0.2 0.0 -0.1 0.0 -0.2 0.0 0.3 -0.1 -0.2 0.2 [sky, ship, trek, richard, captain, star, scott] 22 0.1 0.0 0.2 0.2 0.0 0.1 0.0 0.0 -0.2 0.0 0.0 0.2 0.0 0.0 -0.2 0.0 [maria, new, london, mr, young, movie, ford] 23 0.0 0.2 0.2 -0.2 -0.1 0.0 0.3 0.3 0.3 0.0 0.2 0.2 0.0 0.0 0.0 0.0 [music, astaire, rogers, ted, fred, dancing, dance] 24 0.0 0.0 -0.1 0.2 0.0 0.1 0.0 -0.2 0.2 0.1 0.0 -0.1 0.2 0.0 -0.1 0.0
+[think, just, really, good, like, films, film] 25 0.0 0.0 -0.1 0.2 0.2 0.4 -0.1 0.0 0.3 -0.2 0.3 -0.1 -0.2 0.1 0.0 0.2 [seagal, steven, bollywood, jeff, sandler, adam, indian] 26 0.0 0.0 0.1 0.0 0.0 0.0 0.0 0.0 -0.3 0.0 0.0 0.3 0.1 0.0 0.3 0.0
+[human, like, world, way, film, life, people] 27 0.2 0.3 -0.2 0.0 -0.2 0.3 0.1 0.0 0.3 -0.3 0.3 0.2 0.0 0.1 0.0 0.0 [mr, hudson, emma, italian, soap, russian, opera] 28 0.0 0.0 -0.1 0.0 0.0 0.1 0.2 0.0 0.2 -0.1 0.0 0.1 -0.1 -0.1 -0.3 0.0 [man, released, video, release, version, film, dvd] 29 0.1 0.1 0.3 0.2 0.2 0.0 0.3 -0.2 0.0 0.3 -0.1 0.3 0.0 0.1 0.2 -0.1 [scene, women, sexual, scenes, violence, nudity, sex] 30 0.0 0.0 0.0 0.0 -0.2 -0.1 0.0 0.0 0.0 0.0 0.2 0.0 0.1 0.0 -0.1 0.0 [charlie, batman, animated, cartoon, original, animation, like] 31 0.1 0.1 0.1 -0.3 0.1 0.0 -0.2 0.0 0.0 -0.2 0.0 -0.1 0.3 0.0 0.0 0.1 [baseball, team, williams, santa, ben, match, christmas] 32 -0.1 0.0 0.0 0.1 -0.2 0.2 0.0 0.0 0.3 0.0 0.2 0.0 0.3 0.1 -0.1 0.2 [football, city, segment, world, paris, men, women] 33 0.0 0.0 0.0 0.2 -0.1 0.3 0.3 -0.2 -0.3 0.0 0.0 0.2 0.0 0.0 -0.3 0.2
+[watch, movies, really, good, like, just, movie] 34 0.0 0.3 -0.1 0.0 -0.2 0.0 0.3 0.3 0.0 0.0 0.0 -0.2 -0.2 0.1 -0.3 0.0 [beautiful, earth, time, film, art, french, tarzan] 35 0.0 0.1 -0.2 0.2 0.0 0.2 0.2 0.0 -0.1 0.2 0.2 0.3 0.0 0.2 0.3 0.0 [wife, gets, murder, horror, man, house, killer] 36 0.1 -0.2 -0.3 0.0 -0.3 0.0 0.0 0.0 0.0 -0.3 0.0 -0.2 0.2 0.0 0.1 -0.2
+[question, think, don't, does, know, did, ?] 37 -0.1 0.0 0.2 -0.2 -0.2 0.0 0.2 -0.3 0.1 -0.3 0.2 0.2 -0.1 0.0 0.0 -0.2 [man, young, woman, father, family, life, love] 38 0.0 0.2 0.0 0.3 -0.1 0.1 0.0 0.0 0.1 0.0 0.3 0.0 0.3 0.0 -0.2 0.4 [school, religious, jesus, movie, church, christian, god] 39 0.0 -0.1 -0.2 -0.1 0.0 0.0 -0.2 0.1 0.0 0.0 -0.2 -0.3 -0.1 0.0 0.0 -0.2 [won, award, actor, role, oscar, performance, best] 40 0.0 0.0 0.1 0.0 0.0 -0.2 0.1 0.0 0.3 0.0 0.0 0.2 -0.3 0.1 0.2 0.0 [time, shows, season, episodes, tv, episode, series] 41 0.2 0.1 -0.1 0.0 -0.2 -0.2 -0.2 0.2 0.2 0.0 0.2 0.1 -0.3 0.1 0.0 0.2 [laughs, hilarious, laugh, jokes, humor, funny, comedy] 42 0.2 0.2 0.0 0.0 0.2 0.0 -0.1 -0.1 0.0 0.1 0.0 -0.2 0.2 0.1 0.0 0.0 [best, great, role, hollywood, arthur, kelly, musical] 43 -0.1 0.2 -0.1 0.0 -0.3 0.1 -0.3 0.1 0.0 0.2 -0.2 -0.2 -0.2 0.1 0.2 0.0 [school, girl, teenage, family, dad, house, girls] 44 0.1 0.0 0.2 0.0 0.2 0.0 0.2 -0.3 0.2 0.2 -0.2 -0.2 0.1 0.1 0.2 0.0 [flynn, detective, jim, murder, anne, marie, powell] 45 0.1 0.0 -0.2 0.2 0.0 0.2 0.0 -0.1 0.2 0.0 0.2 0.1 -0.1 0.0 0.0 0.2
+[elvira, money, j, cast, danny, alex, tony] 46 0.2 0.0 0.0 -0.1 -0.2 0.0 0.2 0.2 0.0 0.2 0.2 0.2 -0.1 0.0 0.3 -0.1 [van, nancy, check, julia, drew, vampires, vampire] 47 0.0 0.1 0.2 0.3 0.3 -0.2 0.0 0.0 0.0 0.2 -0.1 -0.2 -0.2 -0.1 -0.3 0.0 [action, really, story, like, character, good, movie] 48 0.0 0.0 0.2 0.2 0.0 -0.2 0.0 0.0 0.1 0.1 0.0 -0.2 0.0 0.1 -0.2 0.0 [director, page, shot, new, festival, documentary, film] 49 0.0 0.2 0.2 0.1 -0.2 0.0 0.0 0.2 -0.2 0.0 -0.2 0.3 0.2 0.0 0.0 0.0 [japanese, military, soldiers, history, world, american, war] 50 -0.1 0.0 0.0 0.0 0.0 0.0 0.2 0.0 0.2 -0.1 0.0 0.0 -0.3 0.1 0.0 0.0
+Figure 12: The full dictionary learned by CENtpc model: rows correspond to topics and columns correspond to dictionary atoms. Very small values were thresholded for visualization clarity. Different atoms capture different prediction patterns; for example, atom 5 assigns a highly positive weight to the [kid, child, disney, family] topic and down-weighs [sexual, violence, nudity, sex], while atom 11 acts in an opposite manner. Given the context of the review, CEN combines just a few atoms to make a prediction.
+24
+
+Under review as a conference paper at ICLR 2018
+
+-0.7 -0.7 01 Nightlight intensity
+
+0.3 0.5 17 HH type: Hut
+
+-0.6 -0.7 33 Walls: Brick w/ cement 0.4 0.2 49 Water src: Bore-hole
+
+-0.0 -0.6 02 Is urban
+
+-0.4 -0.7 18 HH type: Private apt -0.3 -0.3 34 Walls: Brick w/ mud
+
+0.7 0.8 50 Water src: Gravity flow
+
+-0.2 -0.8 03 Has electricity
+
+-0.2 -0.3 19 HH type: Private house -0.7 -1.0 35 Walls: Cement blocks -0.8 -0.8 51 Water src: Other
+
+-0.1 0.1 04 Has generator
+
+-0.5 -0.6 20 HH type: Other
+
+0.3 0.4 36 Walls: Mud, poles
+
+-1.1 -1.0 52 Water src: Private tap
+
+-0.0 -0.1 05 Avg. temperature
+
+-0.6 -0.7 21 HH type: Shared house -0.1 0.1 37 Walls: Other
+
+-0.1 -0.1 53 Water src: Protected well
+
+-0.2 0.3 06 Avg. percipitation
+
+-0.6 -0.6 22 HH type: Tenement
+
+-0.2 0.4 38 Walls: Thatch, Straw -0.6 -1.2 54 Water src: Public tap
+
+-0.1 0.4 07 Vegetation
+
+-0.0 -0.0 23 HH type: Uniport
+
+0.0 -0.9 39 Walls: Timber
+
+-0.8 -0.9 55 Water src: Rain water
+
+-0.4 -0.2 08 Avg. vegetation inc.
+
+-0.1 -0.3 24 Roof: Asbestos
+
+0.3 -0.2 40 Walls: Unburnt bricks -0.7 0.2 56 Water src: River/lake/pond
+
+0.1 0.2 09 Avg. vegetation dec.
+
+-0.5 -0.3 25 Roof: Concrete
+
+-0.3 0.6 41 Walls: Stone
+
+0.1 0.3 57 Water src: Unprotected well
+
+0.1 0.0 10 Avg. dist. to market
+
+-0.5 -0.4 26 Roof: Iron sheets
+
+-0.0 0.0 42 Floor: Bricks
+
+-0.9 -0.3 58 Water src: Vendor truck
+
+0.4 0.4 11 Avg. dist. to road
+
+0.6 0.5 27 Roof: Mud
+
+-0.8 -0.8 43 Floor: Cement
+
+0.0 0.2 59 Water: Far away
+
+-0.3 -0.1 12 Num. of rooms
+
+0.3 0.5 28 Roof: Other
+
+0.3 -0.1 44 Floor: Earth
+
+-0.6 -0.3 60 Water: Long queues
+
+0.3 0.4 13 Dist. to water src.
+
+0.5 0.2 29 Roof: Thatch, Straw
+
+0.3 0.4 45 Floor: Cow dung
+
+-0.5 0.2 61 Water: Unprotect. OK
+
+-0.1 0.1 14 Water usage p/ day
+
+-0.6 -0.3 30 Roof: Tiles
+
+-0.9 -0.9 46 Floor: Mosaic/tiles
+
+-0.9 -0.4 62 Water: Bad taste
+
+-0.3 -0.3 15 Is water payed
+
+-0.2 0.0 31 Roof: Tin
+
+-0.5 -0.5 47 Floor: Other
+
+0.3 -0.9 63 Water: Contribution
+
+-0.9 -0.7 16 HH type: BQ M1 M2
+
+-0.7 -0.4 32 Roof: Wood, Planks M1 M2
+
+-0.9 -1.1 48 Floor: Stone M1 M2
+
+0.9 -0.4 64 Water: Unreliable M1 M2
+
+(a) Full visualization of models M1 and M2 learned by CEN on Satellite data.
+0.1 0.1
+
+0.8 0.4 0.0 -0.4 -0.8
+
+Correlation
+
+0.0
+
+0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 0.10
+
+0.05
+
+0.00
+
+-0.05 32
+
+33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64
+
+Feature number
+
+-0.1
+
+(b) Correlation between the selected model and the value of a particular survey variable.
+
+Figure 13: Additional visualizations for CENs trained on the Satellite data.
+
+25
+
+Correlation
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Jiang, Wenxin & Martin A Tanner (1999). "Hierarchical mixtures-of-experts for exponential family regression models: approximation and maximum likelihood estimation". In: Annals of Statistics, pp. 987­1011.
+Ribeiro, Marco Tulio, Sameer Singh & Carlos Guestrin (2016). "Why Should I Trust You?: Explaining the Predictions of Any Classifier". In: Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining. ACM, pp. 1135­1144.
+Tropp, Joel A (2012). "User-friendly tail bounds for sums of random matrices". In: Foundations of computational mathematics 12.4, pp. 389­434.
+Negahban, Sahand, Bin Yu, Martin J Wainwright & Pradeep K Ravikumar (2009). "A unified framework for high-dimensional analysis of m-estimators with decomposable regularizers". In: Advances in Neural Information Processing Systems, pp. 1348­1356.
+Kingma, Diederik P & Max Welling (2013). "Auto-encoding variational bayes". In: arXiv preprint arXiv:1312.6114.
+Aalen, O.O. (1989). "A linear regression model for the analysis of life time". In: Statistics in Medicine, 8(8):907­925.
+Cox, DR (1972). "Regression Models and Life-Tables". In: Journal of the Royal Statistical Society. Series B (Methodological), pp. 187­220.
+Chun-Nam, J Yu, Russell Greiner, Hsiu-Chin Lin & Vickie Baracos (2011). "Learning patientspecific cancer survival distributions as a sequence of dependent regressors". In: Advances in Neural Information Processing Systems, pp. 1845­1853.
+Efron, Bradley (1988). "Logistic regression, survival analysis, and the Kaplan-Meier curve". In: Journal of the American statistical Association 83.402, pp. 414­425.
+Zagoruyko, Sergey (2015). 92.45% on CIFAR-10 in Torch. http://torch.ch/blog/2015/ 07/30/cifar.html. Blog.
+Jean, Neal, Marshall Burke, Michael Xie, W Matthew Davis, David B Lobell & Stefano Ermon (2016). "Combining satellite imagery and machine learning to predict poverty". In: Science 353.6301, pp. 790­794.
+Papernot, Nicolas, Patrick McDaniel, Ian Goodfellow, Somesh Jha, Z Berkay Celik & Ananthram Swami (2016). "Practical Black-Box Attacks against Deep Learning Systems using Adversarial Examples". In: arXiv preprint arXiv:1602.02697.
+26
+
+

@@ -1,0 +1,1759 @@
+Under review as a conference paper at ICLR 2018
+KRONECKER-FACTORED CURVATURE APPROXIMATIONS FOR RECURRENT NEURAL NETWORKS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Kronecker-factor Approximate Curvature (Martens & Grosse, 2015) (K-FAC) is a 2nd-order optimization method which has been shown to give state-of-the-art performance on large-scale neural network optimization tasks (Ba et al., 2017). It is based on an approximation to the Fisher information matrix (FIM) that makes assumptions about the particular structure of the network and the way it is parameterized. The original K-FAC method was applicable only to fully-connected networks, although it has been recently extended by Grosse & Martens (2016) to handle convolutional networks as well. In this work we extend the method to handle RNNs by introducing a novel approximation to the FIM for RNNs. This approximation works by modelling the covariance structure between the gradient contributions at different time-steps using a chain-structured linear Gaussian graphical model, summing the various cross-covariances, and computing the inverse in closed form. We demonstrate in experiments that our method significantly outperforms general purpose state-of-the-art optimizers like SGD with momentum and Adam on several challenging RNN training tasks.
+1 INTRODUCTION
+As neural networks have become ubiquitous in both research and applications the need to efficiently train has never been greater. The main workhorses for neural net optimization are stochastic gradient descent (SGD) with momentum and various 2nd-order optimizers that use diagonal curvature-matrix approximations, such as RMSprop (Tieleman & Hinton, 2012) and Adam (Ba & Kingma, 2015). While the latter are typically easier to tune and work better out of the box, they unfortunately only offer marginal performance improvements over well-tuned SGD on most problems.
+Because modern neural networks have many millions of parameters it is computationally too expensive to compute and invert an entire curvature matrix and so approximations are required. While early work on non-diagonal curvature matrix approximations such as TONGA (Le Roux et al., 2008) and the Hessian-free (HF) approach (Martens, 2010; Martens & Sutskever, 2011; 2012; Desjardins et al., 2013; Sainath et al., 2013) demonstrated the potential of such methods, they never achieved wide adoption due to issues of scalability (to large models in the case of the former, and large datasets in the case of the latter).
+Motivated in part by these older results and by the more recent success of centering and normalization methods (e.g. Schraudolph, 1998; Vatanen et al., 2013; Ioffe & Szegedy, 2015) a new family of methods has emerged that are based on non-diagonal curvature matrix approximations the rely on the special structure of neural networks. Such methods, which include Kronecker-factored approximated curvature (K-FAC) (Martens & Grosse, 2015), Natural Neural Nets (Desjardins et al., 2015), Practical Riemannian Neural Networks (Marceau-Caron & Ollivier, 2016), and others (Povey et al., 2015), have achieved state-of-the-art optimization performance on various challenging neural network training tasks and benchmarks.
+While the original K-FAC method is applicable only to standard feed-forward networks with fully connected layers, it has recently been extended to handle convolutional networks (Grosse & Martens, 2016) through the introduction of the "Kronecker Factors for Convolution" (KFC) approximation. Ba et al. (2017) later developed a distributed asynchronous version which proposed additional approximations to handle very large hidden layers.
+1
+
+Under review as a conference paper at ICLR 2018
+
+In this work we develop a new family curvature matrix approximations for recurrent neural networks (RNNs) within the same design space. As in the original K-FAC-approximation and the KFC approximation, we focus on the Fisher information matrix (a popular choice of curvature matrix), and show how it can be approximated in different ways through the adoption of various approximating assumptions on the statistics of the network's gradients. Our main novel technical contribution is an approximation which uses a chain-structured linear Gaussian graphical model to describe the covariance between gradient contributions coming from different time-steps. Somewhat remarkably it is possible to sum these cross covariances to obtain a Fisher approximations which has enough special algebraic structure that it can still be efficiently inverted. In experiments we demonstrate the usefulness of our approximations on several challenging RNN training tasks.
+
+2 NOTATION AND BACKGROUND
+
+2.1 NETWORK, LOSS, AND OBJECTIVE FUNCTION
+
+We denote by f (x, ) the neural network function associated evaluated on input x, where  are the parameters. We will assume a loss function of the form L(y, z) = - log r(y|z), where r is is the density function associated with a predictive distribution R. The loss associated with a single training case is then given by - log p(y|x, ) = - log r(y|f (x, )) = L(y, f (x, )). Throughout the
+rest of this document we will use the following special notation for derivatives of single-case loss:
+
+DV
+
+=
+
+dL(y, f (x, )) dV
+
+=
+
+-
+
+d
+
+log
+
+p(y|x, dV
+
+)
+
+.
+
+EThe objective function which we wish to minimize is the expected loss h() = Q[L(y, f (x, ))]
+over the training distribution Q on x and y.
+
+2.2 THE FISHER, THE NATURAL GRADIENT, AND 2ND-ORDER OPTIMIZATION
+The Fisher information matrix (aka "the Fisher") associated with the model's predictive distribution Py|x() is given by
+EF = [DD ] = cov(D, D).
+
+Note that here, and for the remainder of this paper, all variables are taken to be distributed according to the model's predictive distribution Py|x() on y and not the training distribution. All expectations and covariances are defined accordingly. This is done because the expectation that defines the Fisher information matrix uses Py|x(). If we were to instead use the training distribution Qy|x on y, we would essentiallybe computing to the "empirical Fisher" (or approximations thereof), which as argued by Martens (2014) is a less appropriate choice for a curvature matrix than the true Fisher.
+The natural gradient is defined as F -1h, and is the update direction used in natural gradient descent. As argued by Amari (1998), natural gradient descent has the two key advantages: it is invariant to the parameterization of the model, and has "Fisher efficient" convergence1. However, as shown by Martens (2014) these two facts have several important caveats. First, the parameterization invariance only holds approximately in practice when non-infinitesimal step-sizes are used. Second, Fisher efficiency is actually a weak property possessed by simpler methods like SGD with Polyak/parameter averaging (Polyak & Juditsky, 1992), and even then will only be achieved when the method converges to a global minimizer and the model is capable of perfectly capturing the true distribution of y given x.
+
+An alternative explanation for the empirical success of the natural gradient method is that it is a 2nd-
+order method, whose update minimizes the following local quadratic approximation to the objective h( + ):
+
+1 2
+
+
+
+F  + h()
+
+ + h().
+
+(1)
+
+1Roughly speaking, this means that it converges at the asymptotically optimal rate (with optimal constant) for arbitrary statistical estimation procedures (as a function of the amount of samples from Q observed).
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+This is similar to the 2nd-order Taylor series approximation of h( + ), but with the Fisher substituted in for the Hessian. This substitution can be justified by the observation that the Fisher is a kind of PSD approximation to the Hessian (Pascanu & Bengio, 2014; Martens, 2014). And as argued by Martens (2014), while stochastic 2nd-order methods like natural gradient descent cannot beat the asymptotically optimal Fisher efficient convergence achieved by SGD with Polyak averaging, they can enjoy better pre-asymptotic convergence rates. Moreover, insofar as gradient noise can be mitigated through the use of large mini-batches ­ so that stochastic optimization starts to resemble deterministic optimization ­ the theoretical advantages of 2nd-order methods become further pronounced, which agrees with the empirical observation that the use of large-minibatches speeds up 2nd-methods much more than 1st-order methods (Martens & Grosse, 2015; Ba et al., 2017).
+In addition to providing an arguably better theoretical argument for the success of natural gradient methods, their interpretation as 2nd-order methods also justifies the common practice of computing the natural gradient as (F + I)h instead of F -1h. In particular, this practice can be viewed as a type of "update damping/regularization", where one encourages  to lie within some region around  = 0 where eqn. 1 remains a trustworthy approximation (e.g. Nocedal & Wright, 2006; Martens & Sutskever, 2012).
+
+2.3 KRONECKER-FACTORED APPROXIMATE CURVATURE (K-FAC)
+
+Because modern neural network have millions (or even billions) of parameters it is computationally too expensive to compute and invert the Fisher. To address this problem, the K-FAC method of Martens & Grosse (2015) uses a block-diagonal approximation of the Fisher (where the blocks correspond to entire layers/weight matrices), and where the blocks are further approximated as Kronecker products between much smaller matrices. The details of this approximation are given in the brief derivation below.
+Let W be a weight matrix in the network which computes the mapping
+
+s = W a,
+
+where a and s are vector-valued inputs and outputs respectively and denote
+
+g = Ds.
+
+As in the original K-FAC paper we will assume that a includes a homogeneous coordinate with value 1 so that the bias vector may be folded into the matrix W .
+Here and throughout the rest of this document, F will refer to the block of the Fisher corresponding to this particular weight-matrix W .
+The Kronecker product of matrices B and C, denoted by B  C for matrices B  Rm×n and C of arbitrary dimensions, is a block matrix defined by
+
+ [B]1,1C · · · [B]1,nC 
+
+BC  
+
+...
+
+...
+
+...
+
+ 
+
+[B]m,1C · · · [B]m,nC
+
+Note that the Kronecker product has many convenient properties that we will make use of in this paper. (See Van Loan (2000) for a good discussion of the Kronecker product and its properties.)
+A simple application of the chain rule gives DW = ga . If we approximate g and a as statistically independent, we can write F as
+E EF = cov(vec(DW ), vec(DW )) = [vec(ga ) vec(ga ) ] = [(a  g)(a  g) ] E E E= [(aa )  (gg )] = [aa ]  [gg ] = A  G,
+
+where we have defined
+E EA = [aa ] and G = [gg ] = cov(g, g).
+
+The matrices A and G can be estimated using simple Monte Carlo methods, and averaged over lots of data by taking an exponentially decaying average across mini-batches.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+This is the basic Kronecker factored approximation (Heskes, 2000; Martens & Grosse, 2015; Povey et al., 2015), which is related to the approximation made in the Natural Neural Nets approach (Desjardins et al., 2015). To see why this approximation is useful, we observe that inversion and multiplication of a vector by F amounts to inverting the factor matrices A and G and performing matrixmatrix multiplications with them, due to the following two basic identities:
+
+(B  C)-1 = B-1  C-1 and (B  C) vec(X) = vec(CXB ).
+
+(2)
+
+The required inversion and matrix multiplication operations are usually computational feasible because the factor matrices have dimensions equal to the size of the layers, which is typically just a few thousand. And when they are not, additional approximations can be applied, such as approximate/iterative inversion (Povey et al., 2015), or additional Kronecker-factorization applied to either A or G (Ba et al., 2017). Moreover, the computation of the inverses can be amortized across iterations of the optimizer at the cost of introducing some staleness into the estimates.
+
+3 APPROXIMATING F FOR RNNS
+The basic Kronecker-factored approximation to the Fisher block F described in the previous section assumed that the weight matrix W was used to compute a single mapping of the form s = W a. When W is used to compute multiple such mappings, as is often the case for RNNs, or a mapping of a different flavor, as is the case for convolutional networks (CNNs), the approximation is not applicable, strictly speaking.
+Grosse & Martens (2016) recently showed that by making additional approximating assumptions, the basic Kronecker-factored approximation can be extended to convolutional layers. This new approximation, called "KFC", is derived by assuming that gradient contributions coming from different spatial locations are uncorrelated, and that their intra and inter-location statistics are spatially homogeneous, in the sense that they look the same from all reference locations. These assumptions are referred to "spatially uncorrelated derivatives" and "spatial homogeneity," respectively.
+In this section we give the main technical contribution of this paper, which is a family of Kroneckerbased approximations of F that can be applied to RNNs. To build this we will apply various combinations of the approximating assumptions used to derive the original K-FAC and KFC approaches, along with several new ones, including an approximation which works by modelling the covariance structure between the gradient contributions from time-steps using a chain-structured linear Gaussian graphical model.
+
+3.1 PRELIMINARIES
+
+Let W be some weight matrix which is used at T different time-steps (or positions) to compute the
+
+mapping
+
+st = W at,
+
+where t indexes the time-step. T is allowed to vary between different training cases.
+
+Defining gt = Dst, the gradient of the single-case loss with respect to W can be written as
+
+TT
+DW = gtat = DtW,
+t=1 t=1
+
+where DtW = gtat denotes the contribution to the gradient from time-step t. When it is more convenient to work with the vector-representations of the matrix-valued variables DtW we will use the notation
+wt = vec(DtW ),
+
+so that vec(DW ) =
+
+T t=1
+
+wt.
+
+Let FT denote the conditional covariance of DW for a particular value of T . We have
+
+FT = cov(vec(DW ), vec(DW )|T ) = cov
+
+TT
+wt, wt T
+t=1 t=1
+
+TT
+= cov(wt, ws|T ). (3)
+t=1 s=1
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+EObserve that F can be computed from FT via F = T [FT ].
+To proceed with our goal of obtaining a tractable approximation to F we will make several approximating assumptions, as discussed in the next section.
+
+3.2 BASIC INITIAL APPROXIMATIONS
+
+3.2.1 INDEPENDENCE OF T
+
+One simplifying approximation we will make immediately is that T is independent of the wt's, so that cov(wt, ws|T ) = cov(wt, ws). In this case eqn. 3 can be written as
+
+TT
+
+TT
+
+FT =
+
+cov(wt, ws) =
+
+Vt,s,
+
+(4)
+
+t=1 s=1
+
+t=1 s=1
+
+where we have defined Vt,s = cov(wt, ws).
+
+3.2.2 ASSUMING TEMPORAL HOMOGENEITY
+
+Another convenient and natural approximating assumption we will make is that the wt's are temporally homogeneous, which is to say that the statistical relationship between any wt and ws depends only on their distance in time (d = t - s). This is analogous to the "spatial homogeneity" as-
+sumption of KFC. Under this assumption the following single-subscript notation is well-defined:
+Vt-s = cov(wt, ws). We note that V-d = Vd .
+
+Applying this notation to eqn. 4 we have
+
+TT
+
+T
+
+TT
+
+FT =
+
+Vt,s =
+
+(T - |d|)Vd = (T - d)Vd + (T - d)Vd - T I, (5)
+
+t=1 s=1
+
+d=-T
+
+d=0
+
+d=0
+
+where we have used the fact that there are T - |d| ways to write d as t - s for t, s  {1, 2, . . . , T }.
+
+3.2.3 ASSUMING INDEPENDENCE BETWEEN THE at'S AND THE gt'S
+If we have that at and gs are independent for each t and s, then following a similar derivation to the one from Section 2.3 we have that the covariances factor as Kronecker products as follows:
+E EVt,s = cov(wt, ws) = [wtws ] = [(atas )  (gtgs )] = At,s  Gt,s
+where we have defined
+E EAt,s = [atas ] and Gt,s = [gtgs ] = cov(gt, gs).
+Extending our temporal homogeneity assumption from the wt's to the at's and gt's (which is natural to do since wt = vec(gtat )), the following notation becomes well-defined:
+At-s = At,s and Gt-s = Gt,s, which allows us to write
+Vd = Ad  Gd.
+
+3.3 AN INITIAL ATTEMPT TO OBTAIN A TRACTABLE FISHER APPROXIMATION
+
+Given the approximating assumptions made in the previous subsections we have
+
+TT
+
+FT =
+
+(T - |d|)Vd =
+
+(T - |d|)(Ad  Gd).
+
+d=-T
+
+d=-T
+
+Assuming for the moment that all of the training sequences have the same length, so that F = FT0 for some T0, we have that F will be the sum of 2T0 + 1 Kronecker products.
+
+Without assuming any additional structure, such as a relationship between the various Ad's or Gd's, there doesn't appear to be any efficient way to invert such a sum. One can use the elementary identity (BC)-1 = B-1C-1 to invert a single Kronecker product, and there exists decomposition-based methods to efficiently invert sums of two Kronecker products (see Martens & Grosse (2015)), how-
+ever there is no known efficient algorithm for inverting sums of three or more Kronecker products.
+Thus is appears that we must make additional approximating assumptions in order to proceed.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+3.4 ASSUMING INDEPENDENCE OF THE wt'S ACROSS TIME
+
+If we assume that the contributions to the gradient (the wt's) are independent across time, or at least uncorrelated, this means that Vd = 0 for d = 0. This is analogous to the "spatially uncorrelated
+derivatives" assumption of KFC.
+
+In this case eqn. 5 simplifies to
+
+T
+
+FT =
+
+(T - |d|)Vd = (T - 0)V0 = T V0,
+
+d=-T
+
+so that
+
+E E EF = T [FT ] = T [T V0] = T [T ]V0.
+
+Using the identities in eqn. 2, and the symmetry of A0 and G0, we can thus efficiently multiply F -1 by a vector z = vec(Z) using the formula
+
+EF -1z =
+
+1 T [T
+
+]
+
+vec(G0-1 Z A0-1 ).
+
+(6)
+
+EThis is, up to normalization by T [T ], identical to the inverse multiplication formula used in the
+original K-FAC approximation for fully-connected layers.
+
+EWe note that T [T ] = i iTi, where Ti are the different values of T , and i 0 are normalized
+weights (with i i = 1) that measure their proportions in the training set.
+
+3.5 MODELING THE RELATIONSHIPS BETWEEN THE wt'S USING AN LGGM
+As we saw in Section 3.3, the approximation assumptions made in Section 3.2 (independence of T , temporal homogeneity, and independence between the at's and the gt's), aren't sufficient to yield a tractable formula for F -1. And while additionally assuming independence across time of the wt's is sufficient (as shown in Section 3.4), it seems like an overly severe approximation to make.
+In this section we consider a less severe approximation which we will show still produces a tractable F -1. In particular, we will assume that the statistical relationship of the wt's is described by a simple linear Gaussian graphical model (LGGM) with a compact parameterization (whose size is independent of T ). Such an approach to computing a tractable Fisher approximations was first explored by Grosse & Salakhutdinov (2015) for RBMs, although our use of it here is substantially different, and requires additional mathematical machinery.
+The model we will use is a fairly natural one. It is a linear Gaussian graphical model with a onedimensional chain structure corresponding to time. The graphical structure of our model is given by the following picture:
+
+t 1 t t+1
+
+... wt 1
+
+wt
+
+wt+1
+
+...
+
+Variables in the model evolve forward in time according to the following equation:
+wt = wt-1 + t where  is a square matrix and t are i.i.d. from N (0, ) for some positive definite matrix  (which is the conditional covariance of wt given wt-1). Due to the well-known equivalence between directed and undirected Gaussian graphical models for tree-structured graphs like this one, the decision of whether to make the edges directed or undirected, or in what direction they point, is irrelevant from a modeling perspective (and thus to the Fisher approximation we eventually compute). However, it will turn out to be mathematically convenient to
+6
+
+Under review as a conference paper at ICLR 2018
+
+use a directed representation. The decision to make them go forward in time is meanwhile completely arbitrary, and all the subsequent derivations could just as easily be done using the opposite representation.
+We will assume that our model extends infinitely in both directions, with indices in the range (-, ), so that the wt's are all in their stationary distribution (with respect to time). For this to yield a well-defined model we require that  has spectral radius < 1.
+The intuition behind this model structure is clear. The correlations between gradient contributions (the wt's) at two different time-steps should be reasonably well explained by the gradient contributions made at time-steps between them. In other words, they should be approximately Markovian.
+We know that the gradient computations are generated by a process, Back-prop Through Time (BPTT), where information flows only between consecutive time-steps (forwards through time during the "forward pass", and backwards during the "backwards pass"). This process involves temporal quantities which are external to the wt's, such as the inputs x and activations for other layers, which essentially act as "hidden variables". The evolution of these external quantities may be described by their own separate temporal dynamics (e.g. the unknown process which generates the true x's), and thus the wt's won't be Markovian in general. But insofar as the wt's (or equivalently the at's and gt's) encode the relevant information contained in these external variables, they should be approximately Markovian.
+A similar approximation across consecutive layers was made in the "block-tridiagonal" version of the original K-FAC approach. It was shown by Martens & Grosse (2015) that this approximation was a pretty reasonable one. The linear-Gaussian assumption meanwhile is a more severe one to make, but it seems necessary for there to be any hope that the required expectations remain tractable.
+
+3.5.1 INITIAL COMPUTATIONS Define the following "transformed" versions of FT and :
+F^T = V01/2FT V01/2 and ^ = V^1 = V0-1/2V01/2.
+
+As shown in Section A.1 of the appendix we have
+
+TT
+
+F^T = (T - d)^ d +
+
+(T - d)^ d
+
+d=0
+
+d=0
+
+= T (^ ) + T (^ ) - T I
+
+-TI
+
+(7)
+
+where
+
+T
+
+(x)
+
+=
+
+T
+
+(1
+
+-
+
+x) (1
+
+- -
+
+x(1 x)2
+
+-
+
+xT
+
+).
+
+(Note that rational functions can be evaluated with matrix arguments in this way, as discussed in Section A.1.)
+Our goal is to compute F^-1, from which we can recover F -1 via the simple relation F -1 = V0-1/2F-1V0-1/2.
+Unfortunately it doesn't appear to be possible to simplify this formula sufficiently enough to allow
+Efor the efficient computation of F^-1 = T [F^T ]-1 when ^ is a Kronecker product (which it will be
+when V0 and V1 are). The difficulty is due to both the appearance of ^ and its transpose (which are not codiagonalizable/commutative in general), and various higher powers of ^ .
+To proceed from this point and obtain a formula which can be efficiently evaluated when ^ is a Kronecker product, we will make one of two simplifying assumptions/approximations, which we call "Option 1" and "Option 2" respectively. These are explained in the next two subsections.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+3.5.2 OPTION 1: V1 IS SYMMETRIC
+
+If V1 (the cross-covariance over time) is symmetric, this implies that ^ = V^1 = V0-1/2V1V0-1/2 is also symmetric. Thus by eqn. 7 we have
+
+F^T = T (^ ) + T (^ ) - T I = T (^ ),
+
+where
+
+T (x) = 2T (x) - T
+
+=
+
+2(T (1 - x) - x(1 - xT )) (1 - x)2
+
+-T
+
+=
+
+T
+
+(1
+
+-
+
+x2) (1
+
+- -
+
+2x(1 x)2
+
+-
+
+xT
+
+)
+
+.
+
+Let U diag(^)U = ^ be the eigen-decomposition of ^ . By the above expression for F^T we have that F^T = U diag(T (^))U , where f (b) denotes the component-wise evaluation of a function f for each component of the vector b, i.e. [f (b)]i = f ([b]i). We thus have
+E E EF^ = T [F^T ] = T [U diag(T (^))U ] = U diag( T [T (^)])U .
+
+Inverting both sides of this yields
+
+F^-1 = U diag((^))U
+
+(8)
+
+Ewhere we have defined (x) = 1/ T [T (x)].
+
+This expression can be efficiently evaluated when ^ is a Kronecker product since the eigendecom-
+position of a Kronecker product can be easily obtained from the eigendecomposition of the factors. Evaluation of (^) is done component-wise (i.e. [(^)]i = ([^]i)) and is thus easy to perform. See Section 3.5.5 for further details.
+
+Note that the observed/measured V1 may or may not be exactly symmetric up to numerical precision, even if it well approximated as symmetric. For these calculations to make sense it must be exactly
+symmetric, and so even if it turns out to be approximately symmetric one should ensure that it is exactly so by using the symmetrized version (V1 + V1 )/2.
+
+3.5.3 OPTION 2: COMPUTING THE LIMITING VALUE INSTEAD
+
+If V1 is not well approximated as symmetric, another option is to approximate
+EF^ = T [F^T()] E(instead of F^ = T [F^T ]), where we define
+
+F^T()
+
+
+
+lim
+T 
+
+T T
+
+F^T
+
+.
+
+This is essentially equivalent to the assumption that the training sequences are all infinitely long,
+
+which may be a reasonable one to make in practice.
+
+We re-scale by the factor
+
+T T
+
+to achieve the
+
+proper scaling characteristics of F^T , and to ensure that the limit actually exists.
+
+As shown in Section A.2 of the appendix this yields the following remarkably simple expression for
+
+F^-1:
+
+EF^-1 =
+
+1 T [T
+
+] (I
+
+-
+
+^ )(I
+
+-
+
+^
+
+^ )-1(I - ^
+
+).
+
+(9)
+
+Despite the fact that it includes both ^ and ^ , this formula can be efficiently evaluated when ^ is a Kronecker product due to the existance of decomposition-based techniques for inverting matrices of the form A  B + C  D. See Section 3.5.5 for further details.
+
+This approximation can break down if some of the linear components of w^t have temporal autocorrelations close to 1 (i.e. [^]i  1 for some i) and T is relatively small. In such a case we will have that [^]Ti is large for some i (despite being raised to the T -th power) so that F^T() may essentially "overcount" the amount of temporal correlation that contributes to the sum.
+
+8
+
+Under review as a conference paper at ICLR 2018
+
+This can be made more concrete by noting that the approximation is essentially equivalent to taking
+
+T (x)  limT
+
+
+
+T T
+
+T
+
+(x)  (x) for each x = [^]i.
+
+We can express the error of this as
+
+|(x) - T (x)| =
+
+1
+
+T -
+
+x
+
+-
+
+T
+
+(1
+
+-
+
+x) (1
+
+- -
+
+x(1 x)2
+
+-
+
+xT
+
+)
+
+=
+
+x(1 - xT ) (1 - x)2
+
+.
+
+It is easy to see how this expression, when evaluated at x = [^]i, might be large when [^]i is close to 1, and T is relatively small.
+
+3.5.4 ESTIMATING ^
+
+The formulae for F^-1 from the previous section depends on the quantity ^ = V^1 = V0-1/2V01/2 and so it remains to compute . We observe that V1 = V1,0 = cov(w1, w0) = cov(w1+ d, w0) =  cov(w1, w0)+cov( 1, w0) = V1+0 = V1. Right-multiplying both sides by V0 yields  = V1V0-1. Thus, given estimates of V0 and V1, we may compute an estimate of ^ as
+^ = V0-1/2V1V0-1/2.
+
+In practice we estimate V0 and V1 by forming estimates of their Kronecker factors and taking the product. The factors themselves are estimated using exponentially decayed averages over mini-batch
+estimates. And the mini-batch estimates are in turn computed by averaging over cases and summing
+across time-steps, before divide by the expected number of time-steps.
+
+For
+
+example,
+
+for
+
+A0
+
+and
+
+A1
+
+these
+
+the
+
+mini-batch
+
+estimates
+
+are
+
+averages
+
+of
+
+E1 T [T ]
+
+T t=1
+
+atat
+
+and
+
+E1 T [T ]
+
+T -1 t=1
+
+at+1at
+
+,
+
+respectively.
+
+Note that as long as V0 is actually the covariance measured
+
+between some empirical data and itself, and V1 is actually the covariance between that same data and
+
+a temporally shifted version, the spectral radius of ^ = V0-1/2V1V0-1/2 (and similarly  = V1V0-1)
+
+will indeed be less than or equal to 1, as we prove in Section B.2 of the appendix. This is a necessary
+
+condition for our infinite chain-structured Gaussian graphical model to be well-defined, and for our
+
+calculations to make sense.
+
+The sufficient condition that the spectral radius is actually less than 1 will most often be satisfied too,
+except in the unlikely event that some eigen component remains perfectly constant across time. But
+even if this somehow happens, the inclusion within the given V0 of some damping/regularization term such as I (which we will be adding for other reasons) will naturally deal with this problem.
+
+3.5.5 EFFICIENT IMPLEMENTATION ASSUMING KRONECKER-FACTORED COVARIANCES
+It remains to show that the approximations developed in Section 3.5 can be combined with the Kronecker-factored approximations for V0 and V1 from Section 3.2.3 to yield an efficient algorithm for computing F -1z for an arbitrary vector z = vec(Z). This is a straightforward although very long computation which we leave to Section C of the appendix.
+Full pseudo-code for the resulting algorithms is given in Section C.3. As they only involve symmetric eigen-decomposition and matrix-matrix products with matrices the size of A0 and G0 they are only several times more expensive to compute than eqn. 6. This extra overhead will often be negligible since the gradient computation via BPTT, whose costs scales with the sequence length T , tends to dominate all the other costs.
+
+4 EXPERIMENTS
+To demonstrate the benefit of our novel curvature matrix approximations for RNNs, we empirically evaluated them within the standard "distributed K-FAC" framework (Ba et al., 2017) on two different RNN training tasks.
+The 2nd-order statistics (i.e. the Kronecker factors A0, A1, G0, and G1) are accumulated through an exponential moving average during training. When computing our approximate inverse Fisher, factored Tikhonov damping (Martens & Grosse, 2015) was applied to V0 = G0  A0.
+
+9
+
+Under review as a conference paper at ICLR 2018
+Figure 1: Optimization performance of our method compared to the baselines in perplexity-perword on length-35 word sequences from Penn-TreeBank. batchsize indicates the mini-batch size used to train the baseline methods (our method always used a mini-batch size of 200). K-FAC indep. uses the update in eqn. 6, K-FAC option1 uses eqn. 8, and K-FAC option2 uses eqn. 9. (left) Training perplexity v.s. the number of updates. Dashed lines denote the training curves for RNNs with 1024 LSTM units and solid lines denote the training curves for RNNs with 650 LSTM units. (right) Training perplexity v.s. the wall-clock time.
+We used a single machine with 16 CPU cores and a Nvidia K40 GPU for all the experiments. The additional computations required to get the approximate Fisher inverse from these statistics (i.e. the "pre-processing steps" described in Section C.3) are performed asynchronously on the CPUs, while the GPU is used for the usual forward evaluation and back-propagation to compute the gradient. Updates are computed using the most recently computed values of these (which are allowed to be stale), so there is minimal per-iteration computational overhead compared SGD. We adopted the step-size selection technique described in Section 5 of Ba et al. (2017), as we found it let us use larger learning rates without compromising the stability of the optimization. The hyperparameters of our approach, which include the max learning rate and trust-region size for the aforementioned step-size selection procedure, as well as the momentum, damping constants, and the decay-rate for the second-order statistics, as well as the hyper-parameters of the baseline methods, were tuned using a grid search.
+4.1 LANGUAGE MODELING WITH LONG SHORT-TERM MEMORY UNITS
+Word-level language model: We start by applying our method to a two-layer RNN based on the well-studied Long Short-Term Memory (LSTM) architecture (Hochreiter & Schmidhuber, 1997) for a word-level language modeling task on the Penn-TreeBank (PTB) dataset (Marcus et al., 1993) following the experimental setup in Zaremba et al. (2014). The gradients are computed using a fixed sequence length truncated back-propagation scheme in which the initial states of the recurrent hidden units are inherited from the final state of the preceding sequence. The truncation length used in the experiments is 35 timesteps. The learning rate is given by a carefully tuned decaying schedule (whose base value we tune along with the other hyperparamters). In our experiments we simply substitute their optimizer with our modified distributed K-FAC optimizer that uses our proposed RNN Fisher approximations. We performed experiments on two different sizes of the same architecture, which use two-layer 650 and 1024 LSTM units respectively. LSTMs have 4 groups of internal units: input gates, output gates, forget gates, and update candidates. We treat the 4 weight matrices that compute the pre-activations to each of these as distinct for the purposes of defining Fisher blocks (whereas many LSTM implementations treat them as one big matrix). This results in smaller Kronecker factors that are cheaper to compute and invert. Because the typical vocabulary size used for PTB is 10,000, the Fisher blocks for the input embedding layer and output layer (computing the logits to the softmax) each contain a 10,000 by 10,000 sizes Kronecker factor, which is too large to be inverted with any reasonable frequency. Given that the input vector uses a one-hot encoding it is easy to see its associated factor is actually diagonal, and so we can store and invert it as such. Meanwhile the large factor associated with the output isn't diagonal, but we nonetheless approximate it as such for the sake of efficiency. In our experiments we found that each parameter update of our method required about 80% more wall-clock time than an SGD update (using mini-batch size of 200) although the updates made more much progress.
+10
+
+Under review as a conference paper at ICLR 2018
+Figure 2: Optimization performance in bit-per-character on length-100 character sequences from Penn-TreeBank. batchsize indicates the mini-batch size used to train the baseline methods (our method always used a mini-batch size of 200). K-FAC indep. uses the update in eqn. 6, K-FAC option1 uses eqn. 8, and K-FAC option2 uses eqn. 9. (left) Training perplexity v.s. the number of updates. (right) Training perplexity v.s. the wall-clock time.
+Figure 3: Optimization performance for differentiable Neural Computers (DNC) on a repeated copy task. K-FAC indep. uses the update in eqn. 6, K-FAC option1 uses eqn. 8, and K-FAC option2 uses eqn. 9. (left) Training cross entropy loss v.s. the number of updates. (right) Training cross entropy loss v.s. the wall-clock time.
+In Figure 1, we plot the training progress as a function of the number of parameter updates. Our results demonstrate that our more advanced Fisher approximations, which model the relationships between gradient contributions from different time-steps, allow the optimizer to make faster progress than the ones which assume the contributions are independent. Character-level model: To further investigate the optimization performance of our proposed Fisher approximation, we use a small two layer LSTM with 128 units to model the character sequences on the Penn-TreeBank (PTB) dataset (Marcus et al., 1993). We employ the same data partition in Mikolov et al. (2012). We plotted the bits-per-character vs the number of parameter updates and the wall-clock times in Figure 2. The K-FAC updates were roughly twice as time-consuming to compute as the Adam updates in our implementation. Despite this, our results demonstrate that K-FAC has a significant advantage over the Adam baseline in terms of wall-clock time.
+4.2 LEARNING DIFFERENTIABLE NEURAL COMPUTERS
+To further investigate the potential benefits of using our approach over existing methods, we applied it to the Differentiable Neural Computer (DNC) model (Graves et al., 2016) for learning simple algorithmic programs. Recently, there have been several attempts (Weston et al., 2014; Graves et al., 2016) to extend the existing RNN models to incorporate more long-term memory storage devices in order to help solve problems beyond simple sequence prediction tasks. Although these extended RNNs could potentially be more powerful than simple LSTMs, they often require thousands of parameter updates to learn simple copy tasks (Graves et al., 2016). Both the complexity of these models and the difficulty of the learning tasks have posed a significant challenge to commonly used optimization methods. The DNC model is designed to solve structured algorithmic tasks by using an LSTM to control an external read-write memory. We applied the Fisher-based precondition to compute the updates for both the weights in the LSTM controller and the read-write weight matrices used to interface with the memory. We trained the model on a simple repeated copy task in which the DNC needs to recreate a series of two random binary sequences after they are presented as inputs. The total length of the sequence is fixed to 22 time-steps. From Figure 3, we see that our method significantly outperforms
+11
+
+Under review as a conference paper at ICLR 2018
+the Adam baseline in terms of update count, although only provides a modest improvement in wallclock time. This gap is explained by the fact that the iterations were significantly more time-consuming to compute relative to the gradient computations than they were in previous two experiments on language models. This is likely due to a different trade-off in terms of the gradient computation vs the overheads specific to our method owing to smallness of the model and dataset. With more careful engineering to reduce the communication costs, and/or a larger model and dataset, we would expect to see a bigger improvement in wall-clock time.
+REFERENCES
+Shun-Ichi Amari. Natural gradient works efficiently in learning. Neural Computation, 10(2):251­ 276, 1998.
+Jimmy Ba and Diederik Kingma. Adam: A method for stochastic optimization. In ICLR, 2015.
+Jimmy Ba, Roger Grosse, and James Martens. Distributed second-order optimization using kronecker-factored approximations. In International Conference on Learning Representations (ICLR'2017), 2017.
+Guillaume Desjardins, Razvan Pascanu, Aaron Courville, and Yoshua Bengio. Metric-free natural gradient for joint-training of boltzmann machines. In International Conference on Learning Representations (ICLR'2013), 2013.
+Guillaume Desjardins, Karen Simonyan, Razvan Pascanu, and Koray Kavukcuoglu. Natural neural networks. In Advances in Neural Information Processing Systems, pp. 2071­2079, 2015.
+Alex Graves, Greg Wayne, Malcolm Reynolds, Tim Harley, Ivo Danihelka, Agnieszka GrabskaBarwin´ska, Sergio Go´mez Colmenarejo, Edward Grefenstette, Tiago Ramalho, John Agapiou, et al. Hybrid computing using a neural network with dynamic external memory. Nature, 538 (7626):471­476, 2016.
+Roger Grosse and James Martens. A kronecker-factored approximate fisher matrix for convolution layers. In Proceedings of the 33rd International Conference on Machine Learning (ICML-16), 2016.
+Roger Grosse and Ruslan Salakhutdinov. Scaling up natural gradient by factorizing fisher information. In Proceedings of the 32nd International Conference on Machine Learning (ICML), 2015.
+Tom Heskes. On "natural" learning and pruning in multilayered perceptrons. Neural Computation, 12(4):881­901, 2000.
+S. Hochreiter and J. Schmidhuber. Long short-term memory. Neural Computation, 9(8):1735­1780, 1997.
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training by reducing internal covariate shift. In Proceedings of The 32nd International Conference on Machine Learning, pp. 448­456, 2015.
+Nicolas Le Roux, Pierre-antoine Manzagol, and Yoshua Bengio. Topmoumoute online natural gradient algorithm. In Advances in Neural Information Processing Systems 20, pp. 849­856. MIT Press, 2008.
+Gae´tan Marceau-Caron and Yann Ollivier. Practical riemannian neural networks. 2016.
+Mitchell P Marcus, Mary Ann Marcinkiewicz, and Beatrice Santorini. Building a large annotated corpus of english: The penn treebank. Computational linguistics, 19(2):313­330, 1993.
+J. Martens. Deep learning via Hessian-free optimization. In Proceedings of the 27th International Conference on Machine Learning (ICML), 2010.
+12
+
+Under review as a conference paper at ICLR 2018
+J. Martens and I. Sutskever. Learning recurrent neural networks with Hessian-free optimization. In Proceedings of the 28th International Conference on Machine Learning (ICML), pp. 1033­1040, 2011.
+J. Martens and I. Sutskever. Training deep and recurrent networks with Hessian-free optimization. In Neural Networks: Tricks of the Trade, pp. 479­535. Springer, 2012.
+James Martens. New insights and perspectives on the natural gradient method. 2014. James Martens and Roger Grosse. Optimizing neural networks with kronecker-factored approximate
+curvature. In Proceedings of the 32nd International Conference on Machine Learning (ICML-15), pp. 2408­2417, 2015. Toma´s Mikolov, Ilya Sutskever, Anoop Deoras, Hai-Son Le, and Stefan Kombrink. Subword language modeling with neural networks. 2012. Jorge Nocedal and Stephen J. Wright. Numerical optimization. Springer, 2. ed. edition, 2006. Razvan Pascanu and Yoshua Bengio. Revisiting natural gradient for deep networks. In International Conference on Learning Representations (ICLR), 2014. B. T. Polyak and A. B. Juditsky. Acceleration of stochastic approximation by averaging. SIAM J. Control Optim., 30(4), July 1992. Daniel Povey, Xiaohui Zhang, and Sanjeev Khudanpur. Parallel training of DNNs with natural gradient and parameter averaging. In International Conference on Learning Representations: Workshop track, 2015. Tara N. Sainath, Lior Horesh, Brian Kingsbury, Aleksandr Y. Aravkin, and Bhuvana Ramabhadran. Accelerating Hessian-free optimization for deep neural networks by implicit preconditioning and sampling. In IEEE Workshop on Automatic Speech Recognition and Understanding (ASRU), 2013, pp. 303­308, 2013. Nicol N. Schraudolph. Centering neural network gradient factors. In Genevieve B. Orr and KlausRobert Mu¨ller (eds.), Neural Networks: Tricks of the Trade, volume 1524 of Lecture Notes in Computer Science, pp. 207­226. Springer Verlag, Berlin, 1998. T. Tieleman and G. Hinton. Lecture 6.5--RmsProp: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural Networks for Machine Learning, 2012. Charles F Van Loan. The ubiquitous kronecker product. Journal of computational and applied mathematics, 123(1):85­100, 2000. Tommi Vatanen, Tapani Raiko, Harri Valpola, and Yann LeCun. Pushing stochastic gradient towards second-order methods ­ backpropagation learning with transformations in nonlinearities. 2013. Jason Weston, Sumit Chopra, and Antoine Bordes. Memory networks. arXiv preprint arXiv:1410.3916, 2014. Wojciech Zaremba, Ilya Sutskever, and Oriol Vinyals. Recurrent neural network regularization. arXiv preprint arXiv:1409.2329, 2014. Fuzhen Zhang. The Schur complement and its applications, volume 4. Springer Science & Business Media, 2006.
+13
+
+Under review as a conference paper at ICLR 2018
+
+A SUPPLEMENTARY COMPUTATIONS
+
+A.1 PROOFS FOR SECTION 3.5.1
+
+Proposition 1 Given F^T = V01/2FT V01/2 and
+
+^ = V^1 = V0-1/2V01/2.
+
+we have where
+
+F^T = T (^ ) + T (^ ) - T I
+
+T
+
+(x)
+
+=
+
+T
+
+(1
+
+-
+
+x) (1
+
+- -
+
+x(1 x)2
+
+-
+
+xT
+
+).
+
+Proof
+
+For d > 0 we have that Vd = Vd-1, which can be seen as follows:
+
+Vd = Vd,0 = cov(wd, w0) = cov(wd-1 + d, w0) =  cov(wd-1, w0) + cov( d, w0) = Vd-1 + 0 = Vd-1.
+
+Applying Vd = Vd-1 recursively yields
+
+Vd = dV0 for d 0.
+
+And using V-d = Vd it also follows that Vd = V0(d)
+
+for d 0.
+
+Setting d = 1 and multiplying both sides by V0 (which is assumed to be invertible) one can also derive the following simple formula for :
+
+ = V1V0-1.
+
+(10)
+
+To proceed from here we deifne a "transformed" version of the original chain-structured linearGaussian graphical model whose variables are w^t = V0-1/2wt. (Here we assume that V0 is invertible ­ it is symmetric by definition.) All quantities related to the original model have their analogues in the transformed model, which we indicate with the hat symbol ^·.
+In the transformed models the covariances of the w^t's are given by
+V^d = cov(V0-1/2wd, V0-1/2w0) = V0-1/2 cov(wd, w0)V0-1/2 = V0-1/2VdV0-1/2.
+We observe that V^0 = I.
+Analogously to the original model, the transformed version obeys
+w^t = ^ w^t-1 + ^t,
+with ^t = V0-1/2 t and ^ = V^1V^0-1 = V^1 (using V^0 = I). This can be seen by noting that
+w^t = V0-1/2wt = V0-1/2(wt-1 + t) = V0-1/2V1V0-1wt-1 + V0-1/2 t = (V0-1/2V1V0-1/2)(V0-1/2wt-1) + ^t = V^1w^t-1 + ^t.
+It also remains true that the spectral radius of ^ is less than 1, which can be seen in at least one of two ways: by noticing that the transformed model is well-defined in the infinite limit if and only if
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+the original one is, or that ^ = V^1 = V0-1/2V01/2 is a similar matrix to  (in the technical sense) and hence has the same eigenvalues.
+
+As the transformed model is isomorphic to the original one, all of the previously derived relation-
+ships which held for it also hold here, simply by replacing each quantity with its transformed version (denoted by the hat symbol ^·).
+
+Given these relations (included the transformed analogue of equation 5) we can express F^T as
+
+TT
+
+F^T = (T - d)^ d +
+
+(T - d)^ d
+
+d=0
+
+d=0
+
+- T I.
+
+It is a well-known fact that one can evaluate rational functions, and functions that are the limiting values of sequences of rational functions, with matrix arguments. This is done by replacing scalar multiplication with matrix multiplication, division with matrix inversion, and scalar constants with scalar multiples of the identity matrix, etc. Note that because sums of powers and inverses of matrices are co-diagonalizable/commutative when the matrices themselves are, there is no issue of ambiguity caused by mixing commutative and non-commutative algebra in this way.
+
+Moreover, the value of some such function f (x), given a matrix argument B, is
+
+f (B) = V diag(f (b))V -1,
+where V diag(b)V -1 = B is eigendecomposition of B, and where f (b) denotes the componentwise evaluation of f for each component of the vector b, i.e. [f (b)]i = f ([b]i). Note that if [f (b)]i is undefined from some i, either because of a division by zero, or because the limit which defines f (x) doesn't converge for x = [b]i, then f (B) doesn't exist for that particular B (and otherwise it does).
+
+We observe that our above expression for FT can be rewritten as
+
+F^T = T (^ ) + T (^ ) - T I,
+
+where T (x) = Td=0(T - d)xd. By Proposition 3 in Appendix B.1, we have for x = 1 that
+
+T
+
+(x)
+
+=
+
+T
+
+(1
+
+-
+
+x) (1
+
+- -
+
+x(1 x)2
+
+-
+
+xT
+
+).
+
+Let U diag(^)U -1 = ^ be the eigendecomposition of ^ . Because ^ has a spectral radius less than 1, we have |[^]i| < 1 for each i (so that in particular [^]i = 1), and thus we can evaluate T (^ ) and T (^ ) according to the above formula for T (x).
+
+A.2 PROOFS FOR SECTION 3.5.3
+
+EProposition 2 Suppose we approximate F^ = T [F^T()], where we have defined
+
+F^T()
+
+
+
+lim
+T 
+
+T T
+
+F^T
+
+.
+
+Then we have
+
+EF^-1 =
+
+1 T [T
+
+] (I
+
+-
+
+^ )(I
+
+-
+
+^
+
+^ )-1(I - ^
+
+).
+
+Proof
+
+From eqn. 7 we have that
+
+F^T()
+
+=
+
+T
+
+lim
+T 
+
+T
+
+(T
+
+(^ ) + T
+
+(^
+
+)-T
+
+I)
+
+=
+
+T
+
+lim
+T 
+
+T
+
+T
+
+(^ )
+
++
+
+lim
+T 
+
+T T
+
+T
+
+(^
+
+T
+
+)
+
+-
+
+T
+
+lim
+
+
+T
+
+T
+
+I.
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+To evaluate this we first term note that
+
+TT
+
+lim
+T 
+
+T
+
+T
+
+I =TI
+
+and
+
+lim
+T 
+
+T
+
+T
+
+(A) = (A),
+
+where we have defined
+
+T
+
+(x)
+
+=
+
+T
+
+lim
+
+
+T
+
+T
+
+(x).
+
+For |x| < 1 we have that limT  xT = 0, from which it follows that
+
+T
+
+(x)
+
+=
+
+lim
+T 
+
+T
+
+T (1 - x) - x(1 - xT ) (1 - x)2
+
+=
+
+T
+
+lim
+T 
+
+T
+
+TT
+
+1
+
+-
+
+x
+
+-
+
+lim
+T 
+
+T
+
+x(1 - xT ) (1 - x)2
+
+=
+
+lim
+T 
+
+1
+
+T -
+
+x
+
+-
+
+lim
+T 
+
+T T
+
+T
+
+lim
+
+
+x(1 (1
+
+- -
+
+xT x)2
+
+)
+
+=
+
+1
+
+T -
+
+x
+
+-
+
+lim
+T 
+
+T T
+
+x(1 - 0) (1 - x)2
+
+T = 1 - x.
+
+Let U diag(^)U -1 = ^ be the eigendecomposition of ^ . Using the fact that |[^]i| < 1 (as established in Section A.1) we can use the above expression to evaluate (x) at both x = ^ and x = ^ , which yields
+F^T() = (^ ) + (^ ) = T ((I - ^ )-1 + (I - ^ )-1 - I).
+Pre-multiplying both sides by I - ^ , and post-multiplying both sides by I - ^ , we have
+
+(I - ^ )F^T()(I - ^ ) = T ((I - ^ ) + (I - ^ ) - (I - ^ )(I - ^ )) = T (I - ^ + I - ^ - I + ^ + ^ - ^ ^ )
+= T (I - ^ ^ ).
+
+Then applying the reverse operation gives
+
+()
+FT
+
+=
+
+T
+
+(I
+
+-
+
+^
+
+)-1(I - ^
+
+^ )(I - ^ )-1.
+
+Taking the expectation over T gives
+
+E EF^ = T [F^T()] = T [T ](I - ^ )-1(I - ^ ^ )(I - ^ )-1.
+
+Finally, inverting both sides yields
+
+EF^-1 =
+
+1 T [T
+
+] (I
+
+-
+
+^ )(I
+
+-
+
+^
+
+^ )-1(I - ^
+
+).
+
+B ADDITIONAL TECHNICAL PROOFS
+
+B.1
+CProposition 3 Suppose x  , x = 0, and T is a non-negative integer. We have
+
+T
+
+(T
+
+-
+
+i)xi
+
+=
+
+T
+
+(1
+
+-
+
+x) - (1 -
+
+x(1 x)2
+
+-
+
+xT
+
+).
+
+i=0
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+Proof Observe that
+
+xd
+
+T i=0
+
+xi
+
+dx
+
+=x
+
+T
+
+dxi dx
+
+=x
+
+T
+
+ixi-1 =
+
+T
+
+ixi.
+
+i=0 i=0 i=0
+
+Another way to express this is to use the geometric series formula
+
+T i=0
+
+xi
+
+=
+
+1-xT +1 1-x
+
+(which holds
+
+for x = 0) before computing the derivative. This gives
+
+xd
+
+T i=0
+
+xi
+
+d =x
+
+1-xT +1 1-x
+
+dx dx
+
+=x
+
+- (1 + T )xT 1-x
+
++
+
+1 - xT +1 (1 - x)2
+
+=
+
+x(1 - xT +1
+
+- (1 + T (1 - x)2
+
+)(1 - x)xT ) .
+
+Thus we have And so
+
+T
+
+ixi
+
+=
+
+x(1
+
+-
+
+xT +1
+
+- (1 + T (1 - x)2
+
+)(1
+
+-
+
+x)xT
+
+).
+
+i=0
+
+T TT
+(T - i)xi = T xi - ixi
+
+i=0 i=0 i=0
+
+=
+
+T
+
+(1 - xT 1-x
+
++1)
+
+-
+
+x(1
+
+-
+
+xT
+
++1
+
+- (1 + T (1 - x)2
+
+)(1
+
+-
+
+x)xT
+
+)
+
+=
+
+T (1 - x)(1 - xT +1) - x(1 - xT +1 - (1 + T )(1 - x)xT ) (1 - x)2
+
+=
+
+T - T x - T xT +1 + T xT +2 - x + xT +2 + xT +1(1 - x + T - T x) (1 - x)2
+
+=
+
+T - T x - T xT +1 + T xT +2 - x + xT +2 + xT +1 - xT +2 + T xT +1 - T xT +2 (1 - x)2
+
+=
+
+T - (T + 1)x + xT +1 (1 - x)2
+
+=
+
+T (1 - x) - x(1 - xT ) (1 - x)2
+
+where we have again used the geometric series formula
+
+T i=0
+
+xi
+
+=
+
+1-xT +1 1-x
+
+on the second line.
+
+B.2 SPECTRAL BOUND FOR ESTIMATE OF ^
+
+In what follows all quantities are computed using their defining formulae, starting from the estimated values of A0, A1, G0, and G1.
+First we observe that since ^ = V^1 = V0-1/2V01/2 is similar to  (in the technical sense of the word), they share the same eigenvalues. Thus it suffices bound to the spectral radius of  = V1V0-1.
+Next we observe that V0 = A0  G0 and V1 = A1  G1, so that V1V0-1 = (A1  G1)(A0  G0)-1 = (A1A-0 1)  (G1G-0 1).
+
+Because the eigendecomposition of a Kronecker product is the Kronecker product of the decompositions of the factors we have that (V1V0-1) = (A1A-0 1)(G1G-0 1), where (X) denotes the spectral radius of a matrix X.
+
+Thus it suffices to show that (A1A0-1)  1 and (G1G-0 1)  1 for Ai and Gi as computed by the
+
+estimation scheme outlined in Section 3.5.4. Recall that this is the exponentially decayed average of
+
+mini-batch
+
+averages
+
+of
+
+estimators
+
+of
+
+the
+
+form
+
+E1 T [T
+
+]
+
+ET
+t=1
+
+at
+
+at
+
+and
+
+1 T [T ]
+
+T -1 t=1
+
+at+1at
+
+.
+
+In the remainder of this section we will show that (A1A0-1)  1. The argument to show that (G1G-0 1)  1 is identical.
+
+17
+
+Under review as a conference paper at ICLR 2018
+
+Define
+
+M0 = [0 a1 a2 · · · aT ]
+
+and
+
+M1 = [a1 a2 · · · aT 0]
+
+We observe that M0M0 = M1M1 =
+
+T t=1
+
+at
+
+at
+
+and M1M0
+
+=
+
+T -1 t=1
+
+at+1at
+
+.
+
+EProvided that the exponentially decayed averages for A0 and A1 are computed in the same way and
+use the same normalizers (i.e. 1/(m T [T ])) we thus have that the matrix
+
+A=
+
+A0 A1
+
+A1 A0
+
+is a positively-weighted linear combination of terms of the form
+
+M1 M1 M0 M0
+
+0
+
+where It thus
+
+the various at's follows that A
+
+are computed on different data 0. The inequality (A1A-0 1)
+
+using current and  1 now follows
+
+previous from the
+
+model parameters. following lemma.
+
+Lemma 1 Consider a real, symmetric, positive semi-definite block matrix
+
+BC CT B
+
+0.
+
+(11)
+
+If B is invertible then we have (CB-1)  1, and further if the block matrix is positive definite we have (CB-1) < 1.
+
+Proof Because similarity transformations preserve eigenvalues, the statement is equivalent to
+
+(B
+
+-
+
+1 2
+
+C
+
+B
+
+-
+
+1 2
+
+)
+
+
+
+1.
+
+Define X
+
+B
+
+-
+
+1 2
+
+C
+
+B
+
+-
+
+1 2
+
+.
+
+Because any induced matrix norm is an upper-
+
+bound on the spectral radius, it suffices to show X 2 = max(X)  1, where max(X) denotes the
+
+largest singular value of X.
+
+By taking Schur complements of the block matrix (11) we have
+
+0
+
+B
+
+-
+
+C B -1 C T
+
+=
+
+B
+
+1 2
+
+(I
+
+-
+
+(B
+
+-
+
+1 2
+
+C
+
+B
+
+-
+
+1 2
+
+)(B
+
+-
+
+1 2
+
+C
+
+B
+
+-
+
+1 2
+
+))B
+
+1 2
+
+=
+
+B
+
+1 2
+
+(I
+
+-
+
+X X T )B
+
+1 2
+
+.
+
+Note that the Schur complement is PSD because the original block matrix itself is (e.g. Zhang, 2006).
+
+Using the fact that Z
+
+
+
+B
+
+1 2
+
+Z
+
+B
+
+1 2
+
+maps positive semidefinite matrices to positive semidefinite
+
+matrices, this implies
+
+0
+
+I - XXT  XXT
+
+I
+
+X
+
+2 2
+
+
+
+1
+
+
+
+(X )
+
+
+
+1.
+
+When the block matrix is positive definite, the inequalities become strict.
+
+C EFFICIENT IMPLEMENTATION ASSUMING KRONECKER-FACTORED
+COVARIANCES
+The ultimate goal of our calculations is to efficiently compute the matrix-vector product of some arbitrary vector z (which will often be the gradient vec(DW )) with our inverse Fisher approximation F -1. That is, we wish to compute F -1z. It will be convenient to assume that z is given as a matrix Z (with the same dimensions as DW ) so that z = vec(Z). Multiplying the vector z by F -1 = V0-1/2F^-1V0-1/2 amounts to first multiplying by V0-1/2, then by F^-1, and then by V0-1/2 again.
+18
+
+Under review as a conference paper at ICLR 2018
+
+We will suppose that we are given A0, A1, G0, and G1 such that
+
+V0 = A0  G0 and V1 = A1  G1.
+
+We then have
+
+V0-1/2 = A0-1/2  G0-1/2
+
+and thus to multiply by V0-1/2 we can use the identity (C  B) vec(X) = vec(B XC ), giving
+
+V0-1/2z = vec(G-0 1/2ZA-0 1/2).
+
+In matrix form this is simply G0-1/2ZA0-1/2. Note that A-0 1/2 and G0-1/2 can be computed using the eigendecompositions of A0 and G0, for example.
+
+The procedure to efficiently multiply a vector z by F^-1 is more involved and depends on which
+approximation "option" we are using. However one immediate useful insight we can make before specializing to Option 1 or Option 2 is that ^ can be written as a Kronecker product as follows:
+
+^ = V0-1/2V1V0-1/2 = (A0  G0)-1/2(A1  G1)(A0  G0)-1/2 = (A0-1/2  G-0 1/2)(A1  G1)(A-0 1/2  G-0 1/2) = (A0-1/2A1A0-1/2)  (G-0 1/2G1G0-1/2) = ^ A  ^ G.
+where we have defined ^ A = A-0 1/2A1A0-1/2 and ^ G = G-0 1/2G1G0-1/2.
+
+C.1 OPTION 1
+For Option 1 we assume that V1, and hence ^ = V^1 = V0-1/2V1V0-1/2, is symmetric. We note that V1 = A1  G1 will be symmetric if and only if both A1 and G1 are.
+Our task is to compute the matrix-vector product
+F^-1z = U diag((^))U z
+where U diag(^)U is the eigendecomposition of ^ , and (x) is defined as in Section 3.5.3, eqn. 8. To do this we first multiply the vector by U , then by diag((^)), and then finally by U .
+The eigendecomposition of ^ can be computed efficiently using its Kronecker product structure. In particular, we compute the eigendecompositions of each factor as
+UA diag(^A)UA = ^ A and UG diag(^G)UG = ^ G, from which we can write the eigendecomposition U diag(^)U -1 of ^ as
+^ = ^ A  ^ G = (UA diag(^A)UA )  (UG diag(^G)UG ) = (UA  UG)(diag(^A)  diag(^G))(UA  UG ) = (UA  UG) diag(vec(^G^A ))(UA  UG ).
+In other words, we have U = UA  UG and ^ = vec(^G^A ).
+To multiply z by U = UA  UG we use the identity (C  B) vec(X) = vec(B XC ) which gives
+U z = (UA  UG ) vec(Z) = vec(UG ZUA). Similarly, the multiplication of z by U = UA  UG can be computed as vec(UGZUA ). Finally, multiplying z by diag((^)) = diag((vec(^G^A ))) corresponds to entry-wise multiplication of Z by a matrix Y , where vec(Y ) = (vec(^G^A )), or in other words [Y ]i,j = ([^G^A ]i,j) = ([^G]i[^A]j). Thus we have
+diag((^))z = diag(vec(Y )) vec(Z) = vec(Z Y ),
+
+19
+
+Under review as a conference paper at ICLR 2018
+
+where denotes entry-wise multiplication of matrices. In summary we have that F^-1z can be computed in matrix form as
+UG((UG ZUA) Y )UA
+for Y s.t. [Y ]i,j = ([^G]i[^A]j). We note that computing ([^G]i[^A]j) is trivial since it is just a scalar evaluation of the rational function (x).
+
+C.2 OPTION 2
+
+For Option 2 we must compute the matrix-vector product
+
+F^-1z =
+
+1 i iTi
+
+(I
+
+-
+
+^ )(I
+
+-
+
+^
+
+^ )-1(I - ^
+
+)v.
+
+To do this we will first multiply by I - ^ , then by (I - ^ ^ )-1, and then by I - ^ , before finally dividing the result by i iTi.
+To compute the matrix-vector product (I - ^ )z we use the identity (C  B) vec(X) = vec(B XC ) while noting that ^ = (^ A  ^ G) = ^ A  ^ G. This gives
+(I - ^ ) vec(Z) = vec(Z) - (^ A  ^ G) vec(Z) = vec(Z) - vec(^ GZ^ A).
+
+The matrix form of this is simply Z - ^ GZ^ A. We may similarly compute (I - ^ )z in matrix form as Z - ^ GZ^ A. The harder task is to compute (I - ^ ^ )-1z, which is what we tackle next.
+
+We first observe that
+
+I - ^ ^ = I  I - (^ A  ^ G)(^ A  ^ G) = I  I - (^ A^ A)  (^ G^ G)  I  I - MA  MG.
+
+Given the eigendecompositions EA diag(mA)EA = MA and EG diag(mG)EG = MG we can thus compute the larger eigendecomposition as
+
+I  I - MA  MG = = =
+lwhere is the vector of ones.
+
+(EA  EG)(I  I - diag(mA)  diag(mG))(EA  EG )
+l l(EA  EG) diag(  - mA  mG)(EA  EG ) ll(EA  EG) diag(vec( - mGmA))(EA  EG ),
+
+Using the eigendecomposition the inverse can then be easily computed as
+
+ll(I  I - MA  MG)-1 = (EA  EG) diag(vec( - mGmA))-1(EA  EG ). llThus (I - ^ ^ )-1z may be computed by first multiplying by (EA  EG ), then by diag(vec( - llmGmA))-1 (which in matrix form corresponds to element-wise division by - mGmA), and
+then by EA  EG. The matrix form of this is
+llEG((EG ZEA) ( - mGmA))EA ,
+
+where B C denotes element-wise division of the matrix B by the matrix C.
+
+20
+
+Under review as a conference paper at ICLR 2018
+
+C.3 PSEUDO-CODE FOR THE COMPUTATION OF F -1z
+
+Given A0, A1, G0, and G1 such that V0 = A0  G0 and V1 = A1  G1, the procedure to compute F -1z for an arbitrary vector z = vec(Z) is as follows. Pre-processing for Option 1 only:
+
+· Ensure that A1 and G1 are exactly symmetric, and if not, symmertrize them via:
+
+A1
+
+
+
+A1
+
++ 2
+
+A1
+
+and
+
+G1
+
+
+
+G1
+
++ 2
+
+G1
+
+Pre-processing steps (both options):
+
+· Compute the matrix square roots of the factors of V0 (e.g. using eigendecompositions): A0-1/2 and G0-1/2
+· Compute the factors of the transformed transition matrix ^ : ^ A = A0-1/2A1A-0 1/2 and ^ G = G0-1/2G1G-0 1/2
+Pre-processing for Option 1 only:
+
+· Compute the eigendecompositions of the factors of ^
+
+UA diag(^A)UA = ^ A and UG diag(^G)UG = ^ G
+
+· Sum across the temporal correlations and then invert by performing the element-wise computation in eigenspace:
+
+[Y ]i,j = ([^G]i[^A]j) where (x) =
+
+(1 - x)2 i i(Ti(1 - x2) - 2x(1 - xTi ))
+
+Pre-processing for Option 2 only:
+
+· Compute the eigendecompositions of the factors of ^ ^ (or equivalently the SVD's of ^ A and ^ G): EA diag(mA)EA = ^ A^ A and EG diag(mG)EG = ^ G^ G
+z-dependent calculations for Option 1:
+
+· Multiply the input vector z = vec(Z) by V0-1/2: Z0 = G-0 1/2ZA-0 1/2
+· Multiply by F^-1 using its eigendecomposition:
+Z1 = UG((UG Z0UA) Y )UA where B C denotes the element-wise product between matrices B and C. · Multiply the result by V0-1/2 and express as a vector:
+Z2 = G0-1/2Z1A0-1/2 and F -1z = vec(Z2)
+z-dependent calculations for Option 2:
+
+· Multiply the input vector z = vec(Z) by V0-1/2: Z0 = G0-1/2ZA-0 1/2
+
+21
+
+Under review as a conference paper at ICLR 2018
+
+· Multiply the result by I - ^ :
+
+Z1 = Z0 - ^ GZ0^ A
+
+· Multiply the previous result by (I - ^ ^ )-1 using its eigendecomposition:
+llZ2 = EG((EG Z1EA) ( - mGmA))EA
+
+· Multiply the result by I - ^
+
+Z3 = Z2 - ^ GZ2^ A
+
+E· Normalize the result by T [T ] = i iTi (for Ti and i as defined at the bottom of
+
+Section 3.4):
+
+Z4 =
+
+i
+
+1 i
+
+Ti
+
+Z3
+
+· Multiply the result by V0-1/2 and express as a vector:
+
+Z5 = G0-1/2Z4A-0 1/2 and F -1z = vec(Z5)
+
+22
+
+

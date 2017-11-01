@@ -1,0 +1,581 @@
+Under review as a conference paper at ICLR 2018
+TRUST-PCL: AN OFF-POLICY TRUST REGION METHOD FOR CONTINUOUS CONTROL
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Trust region methods, such as TRPO, are often used to stabilize policy optimization algorithms in reinforcement learning (RL). While current trust region strategies are effective for continuous control, they typically require a large amount of on-policy interaction with the environment. To address this problem, we propose an off-policy trust region method, Trust-PCL, which exploits an observation that the optimal policy and state values of a maximum reward objective with a relative-entropy regularizer satisfy a set of multi-step pathwise consistencies along any path. The introduction of relative entropy regularization allows Trust-PCL to maintain optimization stability while exploiting off-policy data to improve sample efficiency. When evaluated on a number of continuous control tasks, Trust-PCL significantly improves the solution quality and sample efficiency of TRPO.1
+1 INTRODUCTION
+The goal of model-free reinforcement learning (RL) is to optimize an agent's behavior policy through trial and error interaction with a black box environment. Value-based RL algorithms such as Q-learning (Watkins, 1989) and policy-based algorithms such as actor-critic (Konda & Tsitsiklis, 2000) have achieved well-known successes in environments with enumerable action spaces and predictable but possibly complex dynamics, e.g., as in Atari games (Mnih et al., 2013; Van Hasselt et al., 2016; Mnih et al., 2016). However, when applied to environments with more sophisticated action spaces and dynamics (e.g., continuous control and robotics), success has been far more limited.
+In an attempt to improve the applicability of Q-learning to continuous control, Silver et al. (2014) and Lillicrap et al. (2015) developed an off-policy algorithm DDPG, leading to promising results on continuous control environments. That said, current off-policy methods including DDPG often improve data efficiency at the cost of optimization stability. The behaviour of DDPG is known to be highly dependent on hyperparameter selection and initialization (Metz et al., 2017); even when using optimal hyperparameters, individual training runs can display highly varying outcomes.
+On the other hand, in an attempt to improve the stability and convergence speed of policy-based RL methods, Kakade (2002) developed a natural policy gradient algorithm based on Amari (1998), which subsequently led to the development of trust region policy optimization (TRPO) (Schulman et al., 2015). TRPO has shown strong empirical performance on difficult continuous control tasks often outperforming value-based methods like DDPG. However, a major drawback is that such methods are not able to exploit off-policy data and thus require a large amount of on-policy interaction with the environment, making them impractical for solving challenging real-world problems.
+Efforts at combining the stability of trust region policy-based methods with the sample efficiency of value-based methods have focused on using off-policy data to better train a value estimate, which can be used as a control variate for variance reduction (Gu et al., 2017a;b).
+In this paper, we investigate an alternative approach to improving the sample efficiency of trust region policy-based RL methods. We exploit the key fact that, under entropy regularization, the optimal policy and value function satisfy a set of pathwise consistency properties along any sampled path (Nachum et al., 2017), which allows both on and off-policy data to be incorporated in an actor-critic algorithm, PCL. The original PCL algorithm optimized an entropy regularized max-
+1An implementation of Trust-PCL has been open-sourced. We omit the URL to maintain anonymity.
+1
+
+Under review as a conference paper at ICLR 2018
+
+imum reward objective and was evaluated on relatively simple tasks. Here we extend the ideas of PCL to achieve strong results on standard, challenging continuous control benchmarks. The main observation is that by alternatively augmenting the maximum reward objective with a relative entropy regularizer, the optimal policy and values still satisfy a certain set of pathwise consistencies along any sampled trajectory. The resulting objective is equivalent to maximizing expected reward subject to a penalty-based constraint on divergence from a reference (i.e., previous) policy.
+We exploit this observation to propose a new off-policy trust region algorithm, Trust-PCL, that is able to exploit off-policy data to train policy and value estimates. Moreover, we present a simple method for determining the coefficient on the relative entropy regularizer to remain agnostic to reward scale, hence ameliorating the task of hyperparameter tuning. We find that the incorporation of a relative entropy regularizer is crucial for good and stable performance. We evaluate TrustPCL against TRPO, and observe that Trust-PCL is able to solve difficult continuous control tasks, while improving the performance of TRPO both in terms of the final reward achieved as well as sample-efficiency.
+
+2 RELATED WORK
+
+Trust Region Methods. Gradient descent is the predominant optimization method for neural networks. A gradient descent step is equivalent to solving a trust region constrained optimization,
+
+minimize ( + d)  () +  ()Td s. t. dTd  ,
+
+(1)
+
+
+
+which yields the locally optimal update d = - () such that  = /  () ; hence by
+
+considering a Euclidean ball, gradient descent assumes the parameters lie in a Euclidean space.
+
+However, in machine learning, particularly in the context of multi-layer neural network training,
+
+Euclidean geometry is not necessarily the best way to characterize proximity in parameter space.
+
+It is often more effective to define an appropriate Riemannian metric that respects the loss surface
+
+(Amari, 2012), which allows much steeper descent directions to be identified within a local neigh-
+
+borhood (e.g., Amari (1998); Martens & Grosse (2015)). Whenever the loss is defined in terms of a Bregman divergence between an (unknown) optimal parameter  and model parameter , i.e., ()  DF(, ), it is natural to use the same divergence to form the trust region:
+
+minimize DF(,  + d) s. t. DF(,  + d)  .
+
+(2)
+
+The natural gradient (Amari, 1998) is a generalization of gradient descent where the Fisher information matrix F () is used to define the local geometry of the parameter space around . If a parameter update is constrained by dTF ()d  , a descent direction of d  -F ()-1 () is obtained. This geometry is especially effective for optimizing the log-likelihood of a conditional probabilistic model, where the objective is in fact the KL divergence DKL(, ). The local optimization is,
+
+minimize DKL(,  + d) s. t. DKL(,  + d)  dTF ()d  .
+
+(3)
+
+Thus, natural gradient approximates the trust region by DKL(a, b)  (a - b)TF (a)(a - b), which is accurate up to a second order Taylor approximation. Previous work (Kakade, 2002; Bagnell &
+Schneider, 2003; Peters & Schaal, 2008; Schulman et al., 2015) has applied natural gradient to policy optimization, locally improving expected reward subject to variants of dTF ()d  . Recently,
+TRPO (Schulman et al., 2015; 2016) has achieved state-of-the-art results in continuous control by
+adding several approximations to the natural gradient to make nonlinear policy optimization feasible.
+
+Another approach to trust region optimization is given by proximal gradient methods (Parikh et al., 2014). The class of proximal gradient methods most similar to our work are those that replace the hard constraint in (2) with a penalty added to the objective. These techniques have recently become popular in RL (Wang et al., 2016; Heess et al., 2017; Schulman et al., 2017b), although in terms of final reward performance on continuous control benchmarks, TRPO is still considered to be the state-of-the-art.
+
+Norouzi et al. (2016) make the observation that entropy regularized expected reward may be expressed as a reversed KL divergence DKL(, ), which suggests that an alternative to the constraint in (3) should be used when such regularization is present:
+minimize DKL( + d, ) s. t. DKL( + d, )  dTF ( + d)d  . (4)
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Unfortunately, this update requires computing the Fisher matrix at the endpoint of the update. The use of F () in previous work can be considered to be an approximation when entropy regularization is present, but it is not ideal, particularly if d is large. In this paper, by contrast, we demonstrate that the optimal d under the reverse KL constraint DKL( + d, )  can indeed be characterized. Defining the constraint in this way appears to be more natural and effective than that of TRPO.
+Softmax Consistency. To comply with the information geometry over policy parameters, previous work has used the relative entropy (i.e., KL divergence) to regularize policy optimization; resulting in a softmax relationship between the optimal policy and state values (Peters et al., 2010; Azar et al., 2012; 2011; Fox et al., 2016; Rawlik et al., 2013) under single-step rollouts. Our work is unique in that we leverage consistencies over multi-step rollouts.
+The existence of multi-step softmax consistencies has been noted by prior work--first by Nachum et al. (2017) in the presence of entropy regularization. The existence of the same consistencies with relative entropy has been noted by Schulman et al. (2017a). Our work presents multi-step consistency relations for a hybrid relative entropy plus entropy regularized expected reward objective, interpreting relative entropy regularization as a trust region constraint. This work is also distinct from prior work in that the coefficient of relative entropy can be automatically determined, which we have found to be especially crucial in cases where the reward distribution changes dramatically during training.
+Most previous work on softmax consistency (e.g., Fox et al. (2016); Azar et al. (2012); Nachum et al. (2017)) have only been evaluated on relatively simple tasks, including grid-world and discrete algorithmic environments. Rawlik et al. (2013) conducted evaluations on simple variants of the CartPole and Pendulum continuous control tasks. More recently, Haarnoja et al. (2017) showed that soft Qlearning (a single-step special case of PCL) can succeed on more challenging environments, such as a variant of the Swimmer task we consider below. By contrast, this paper presents a successful application of the softmax consistency concept to difficult and standard continuous-control benchmarks, resulting in performance that is competitive with and in some cases beats the state-of-the-art.
+
+3 NOTATION & BACKGROUND
+
+We model an agent's behavior by a policy distribution (a | s) over a set of actions (possibly discrete
+or continuous). At iteration t, the agent encounters a state st and performs an action at sampled from (a | st). The environment then returns a scalar reward rt  r(st, at) and transitions to the next state st+1  (st, at). When formulating expectations over actions, rewards, and state transitions we will often omit the sampling distributions, , r, and , respectively.
+
+Maximizing Expected Reward. The standard objective in RL is to maximize expected future discounted reward. We formulate this objective on a per-state basis recursively as
+
+OER(s, ) = Ea,r,s [r + OER(s , )] .
+
+(5)
+
+The overall, state-agnostic objective is the expected per-state objective when states are sampled from interactions with the environment:
+
+OER() = Es[OER(s, )].
+
+(6)
+
+Most policy-based algorithms, including REINFORCE (Williams & Peng, 1991) and actorcritic (Konda & Tsitsiklis, 2000), aim to optimize OER given a parameterized policy.
+Path Consistency Learning (PCL). Inspired by Williams & Peng (1991), Nachum et al. (2017) augment the objective OER in (5) with a discounted entropy regularizer to derive an objective,
+
+OENT(s, ) = OER(s, ) +  H(s, ) ,
+
+(7)
+
+where   0 is a user-specified temperature parameter that controls the degree of entropy regularization, and the discounted entropy H(s, ) is recursively defined as
+
+H(s, ) = Ea,s [- log (a | s) + H(s , )] .
+
+(8)
+
+Note that the objective OENT(s, ) can then be re-expressed recursively as, OENT(s, ) = Ea,r,s [r -  log (a | s) + OENT(s , )] .
+
+(9)
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Nachum et al. (2017) show that the optimal policy  for OENT and V (s) = OENT(s, ) mutually satisfy a softmax temporal consistency constraint along any sequence of states s0, . . . , sd starting at s0 and a corresponding sequence of actions a0, . . . , ad-1:
+
+d-1
+V (s0) = E dV (sd) + i(ri -  log (ai|si)) .
+ri ,si i=0
+
+(10)
+
+This observation led to the development of the PCL algorithm, which attempts to minimize squared error between the LHS and RHS of (10) to simultaneously optimize parameterized  and V. Importantly, PCL is applicable to both on-policy and off-policy trajectories.
+
+Trust Region Policy Optimization (TRPO). As noted, standard policy-based algorithms for max-
+imizing OER can be unstable and require small learning rates for training. To alleviate this issue, Schulman et al. (2015) proposed to perform an iterative trust region optimization to maximize OER. At each step, a prior policy ~ is used to sample a large batch of trajectories, then  is subsequently
+optimized to maximize OER while remaining within a constraint defined by the average per-state KL-divergence with ~. That is, at each iteration TRPO solves the constrained optimization problem,
+
+maximize
+
+
+OER()
+
+s. t.
+
+Es~,[ KL (~(-|s) (-|s)) ]  .
+
+The prior policy is then replaced with the new policy , and the process is repeated.
+
+(11)
+
+4 METHOD
+
+To enable more stable training and better exploit the natural information geometry of the parameter
+space, we propose to augment the entropy regularized expected reward objective OENT in (7) with a discounted relative entropy trust region around a prior policy ~,
+
+maximize
+
+
+Es[OENT(
+
+)]
+
+s. t.
+
+Es[G(s, , ~)]  ,
+
+where the discounted relative entropy is recursively defined as
+
+(12)
+
+G(s, , ~) = Ea,s [log (a|s) - log ~(a|s) + G(s , , ~)] .
+
+(13)
+
+This objective attempts to maximize entropy regularized expected reward while maintaining natural proximity to the previous policy. Although previous work has separately proposed to use relative entropy and entropy regularization, we find that the two components serve different purposes, each of which is beneficial: entropy regularization helps improve exploration, while the relative entropy improves stability and allows for a faster learning rate. This combination is a key novelty.
+
+Using the method of Lagrange multipliers, we cast the constrained optimization problem in (13) into maximization of the following objective,
+
+ORELENT(s, ) = OENT(s, ) - G(s, , ~) .
+
+(14)
+
+Again, the environment-wide objective is the expected per-state objective when states are sampled from interactions with the environment,
+
+ORELENT() = Es[ORELENT(s, )].
+
+(15)
+
+4.1 PATH CONSISTENCY WITH RELATIVE ENTROPY
+
+A key technical observation is that the ORELENT objective has a similar decomposition structure to OENT, and one can cast ORELENT as an entropy regularized expected reward objective with a set of transformed rewards, i.e.,
+
+
+ORELENT(s, ) = OER(s, ) + ( + )H(s, ),
+
+(16)
+
+
+where OER(s, ) is an expected reward objective on a transformed reward distribution function r~(s, a) = r(s, a) +  log ~(a|s). Thus, in what follows, we derive a corresponding form of the
+multi-step path consistency in (10).
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Let V (s) denote the optimal value of a state s, which is given by V (s) = max ORELENT(s, ), and let  denote the optimal policy, defined as  = argmax ORELENT(). As in PCL, this optimal
+
+policy and its optimal value function satisfy a softmax temporal consistency constraint along any sequence of states defined by a starting state s0 and a sequence of actions a0, . . . , ad-1:
+
+d-1
+V (s0) = E dV (sd) + i (ri - ( + ) log (ai|si) +  log ~(ai|si)) .
+ri ,si i=0
+
+(17)
+
+4.2 TRUST-PCL
+
+We propose to train a parameterized policy  and value estimate V to satisfy the multi-step consistencies in (17). Thus, we define a consistency error for a sequence of states, actions, and rewards st:t+d  (st, at, rt, . . . , st+d-1, at+d-1, rt+d-1, st+d) sampled from the environment as
+
+C(st:t+d, , ) = - V(st) + dV(st+d) +
+d-1
+i rt+i - ( + ) log (at+i|st+i) +  log ~(at+i|st+i)
+i=0
+
+.
+
+(18)
+
+We aim to minimize the squared consistency error on every sub-trajectory of length d. That is, the loss for a given batch of episodes (or sub-episodes) S = {s0(k:T)k }kB=1 is
+
+B Tk-1
+
+L(S, , ) =
+
+C(st(:kt)+d, , )2.
+
+k=1 t=0
+
+(19)
+
+We perform gradient descent on  and  to minimize this loss. In practice, we have found that it is beneficial to learn the parameter  at least as fast as , and accordingly, given a mini-batch of episodes we perform a single gradient update on  and possibly multiple gradient updates on  (see Appendix for details).
+
+In principle, the mini-batch S may be taken from either on-policy or off-policy trajectories. In our
+implementation, we utilized a replay buffer prioritized by recency. As episodes (or sub-episodes)
+are sampled from the environment they are placed in a replay buffer and a priority p(s0:T ) is given to a trajectory s0:T equivalent to the current training step. Then, to sample a batch for training, B episodes are sampled from the replay buffer proportional to exponentiated priority exp{p(s0:T )} for some hyperparameter   0.
+
+For the prior policy ~, we use a lagged geometric mean of the parameters. At each training step, we update ~  ~ + (1 - ). Thus on average our training scheme attempts to maximize entropy regularized expected reward while penalizing divergence from a policy roughly 1/(1 - ) training
+steps in the past.
+
+4.3 AUTOMATIC TUNING OF THE LAGRANGE MULTIPLIER 
+The use of a relative entropy regularizer as a penalty rather than a constraint introduces several difficulties. The hyperparameter  must necessarily adapt to the distribution of rewards. Thus,  must be tuned not only to each environment but also during training on a single environment, since the observed reward distribution changes as the agent's behavior policy improves. Using a constraint form of the regularizer is more desirable, and others have advocated its use in practice (Schulman et al., 2015) specifically to robustly allow larger updates during training.
+To this end, we propose to redirect the hyperparameter tuning from  to . Specifically, we present a method which, given a desired hard constraint on the relative entropy defined by , approximates the equivalent penalty coefficient ( ). This is a key novelty of our work and is distinct from previous attempts at automatically tuning a regularizing coefficient, which iteratively increase and decrease the coefficient based on observed training behavior (Schulman et al., 2017b; Heess et al., 2017).
+We restrict our analysis to the undiscounted setting  = 1 with entropy regularizer  = 0. Additionally, we assume deterministic, finite-horizon environment dynamics. An additional assumption
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+we make is that the expected KL-divergence over states is well-approximated by the KL-divergence
+starting from the unique initial state s0. Although in our experiments these restrictive assumptions are not met, we still found our method to perform well for adapting  during training.
+
+In this setting the optimal policy of (14) is proportional to exponentiated scaled reward. Specifically, for a full episode s0:T = (s0, a0, r0, . . . , sT -1, aT -1, rT -1, sT ), we have
+
+(s0:T )  ~(s0:T ) exp
+
+R(s0:T ) 
+
+,
+
+(20)
+
+where (s0:T ) =
+
+T -1 i=0
+
+(ai|si)
+
+and
+
+R(s0:T
+
+)
+
+=
+
+T -1 i=0
+
+ri.
+
+The
+
+normalization
+
+factor
+
+of
+
+
+
+is
+
+Z = Es0:T ~ exp
+
+R(s0:T ) 
+
+.
+
+(21)
+
+We would like to approximate the trajectory-wide KL-divergence between  and ~. We may ex-
+
+press the KL-divergence analytically:
+
+KL(||~) = Es0:T  log
+
+(s0:T ) ~(s0:T )
+
+(22)
+
+= Es0:T 
+
+R(s0:T ) - log Z 
+
+(23)
+
+= - log Z + Es0:T ~
+
+R(s0:T ) · (s0:T )  ~(s0:T )
+
+(24)
+
+= - log Z + Es0:T ~
+
+R(s0:T 
+
+)
+
+exp{R(s0:T
+
+)/
+
+-
+
+log
+
+Z}
+
+.
+
+(25)
+
+Since all expectations are with respect to ~, this quantity is tractable to approximate given episodes sampled from ~
+
+Therefore, in Trust-PCL, given a set of episodes sampled from the prior policy ~ and a desired maximum divergence , we can perform a simple line search to find a suitable ( ) which yields KL(||~) as close as possible to .
+
+The preceding analysis provided a method to determine ( ) given a desired maximum divergence
+
+. However, there is still a question of whether should change during training. Indeed, as episodes may possibly increase in length, KL(||~) naturally increases when compared to the average perstate KL((-|s)||~(-|s)), and vice versa for decreasing length. Thus, in practice, given an and
+
+a set of sampled episodes S = {s0(k:T)k }kN=1, we approximate the best  which yields a maximum
+
+divergence of N
+
+N k=1
+
+Tk .
+
+This
+
+makes
+
+it
+
+so
+
+that
+
+corresponds more to a constraint on the length-
+
+averaged KL-divergence.
+
+To avoid incurring a prohibitively large number of interactions with the environment for each parameter update, in practice we use the last 100 episodes as the set of sampled episodes S. While this is not exactly the same as sampling episodes from ~, it is not too far off since ~ is a lagged version of the online policy . Moreover, we observed this protocol to work well in practice. A more sophisticated and accurate protocol may be derived by weighting the episodes according to the importance weights corresponding to their true sampling distribution.
+
+5 EXPERIMENTS
+We evaluate Trust-PCL against TRPO on a number of benchmark tasks. We choose TRPO as a baseline since it is a standard algorithm known to achieve state-of-the-art performance on the continuous control tasks we consider (see e.g., leaderboard results on the OpenAI Gym website (Brockman et al., 2016)). We find that Trust-PCL can match or improve upon TRPO's performance in terms of both average reward and sample efficiency.
+5.1 SETUP
+We chose a number of control tasks available from OpenAI Gym (Brockman et al., 2016). The first task, Acrobot, is a discrete-control task, while the remaining tasks (HalfCheetah, Swimmer,
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Domain HalfCheetah
+Swimmer Hopper Walker2d
+Ant
+
+TRPO-GAE 4871.36 137.25 3765.78 6028.73 2918.25
+
+TRPO (rllab) 2889 ­ ­ 1487 1520
+
+TRPO (ours) 4343.6 288.1 3516.7 2838.4 4347.5
+
+Trust-PCL 7057.1 297.0 3804.9 5027.2 6104.2
+
+IPG 4767
+­ ­ 3047 4415
+
+Table 1: Results for best average reward in the first 10M steps of training for our implementations (TRPO (ours) and Trust-PCL) and external implementations. TRPO-GAE are results of Schulman (2017) available on the OpenAI Gym website. TRPO (rllab) and IPG are taken from Gu et al. (2017b). These results are each on different setups with different hyperparameter searches and in some cases different evaluation protocols (e.g.,TRPO (rllab) and IPG were run with a simple linear value network instead of the two-hidden layer network we use). Thus, it is not possible to make any definitive claims based on this data. However, we do conclude that our results are overall competitive with state-of-the-art external implementations.
+
+Hopper, Walker2d, and Ant) are well-known continuous-control tasks utilizing the MuJoCo environment (Todorov et al., 2012).
+For TRPO we trained using batches of Q = 25, 000 steps (12, 500 for Acrobot), which is the approximate batch size used by other implementations (Duan et al., 2016; Schulman, 2017). Thus, at each training iteration, TRPO samples 25, 000 steps using the policy ~ and then takes a single step within a KL-ball to yield a new .
+To evaluate Trust-PCL's performance given a similar rate of accrual of new experience, at each training iteration, we sample P = 1, 000 steps from the environment (500 for Acrobot), and train using a batch of size Q = 25, 000 steps (12, 500 for Acrobot) sampled from the replay buffer ( = 0.1). We set the exponential lag for ~ to  = 0.95. Note that this setup is far from offpolicy. The recency-based replay buffer has such a high weight on recency that very few samples that are truly far from the current policy will be sampled. Thus this setup is referred to as Trust-PCL (on-policy) in the figures.
+While in Trust-PCL (on-policy) we update the policy every P = 1, 000 steps, we can further exploit off-policy data and hopefully induce better sample efficiency by reducing this number along with . Therefore, as an attempt to push on the sample efficiency of Trust-PCL, we also ran the same setup but with P = 10 and a recency weight of  = 0.001 on the replay buffer. To maintain stability we found it necessary to increase  to 0.99 and train on batches of Q = 64 sub-episodes of length P = 10. Additionally, we modified the loss from squared loss to Huber loss on the consistency error. Since our policy is parameterized by a unimodal Gaussian, it is impossible for it to satisfy all path consistencies, and so we found these modifications crucial for stability. We refer to this setup as Trust-PCL (off-policy) in the figures.
+For each of the variants (Trust-PCL (on-policy), Trust-PCL (off-policy), TRPO) and for each environment, we performed a hyperparameter search to find the best hyperparameters. The plots presented here show the reward achieved during training on the best hyperparameters averaged over the best 4 seeds of 5 randomly seeded training runs. Note that this reward is based on greedy actions (rather than random sampling).
+Experiments were performed using Tensorflow (Abadi et al., 2016). Although each training step of Trust-PCL (a simple gradient step) is considerably faster than TRPO, we found that this does not have an overall effect on the run time of our implementation, due to a combination of the fact that each environment step is used in multiple training steps of Trust-PCL and that a majority of the run time is spent interacting with the environment. A detailed description of our implementation and hyperparameter search is available in the Appendix.
+5.2 RESULTS
+We present the reward over training of Trust-PCL (on-policy), Trust-PCL (off-policy), and TRPO in Figure 1. Focusing only on Trust-PCL (on-policy) and TRPO, we see that Trust-PCL can match or beat the performance of TRPO across all the environments, even when accruing experience at roughly the same rate. When decreasing the rate of new experience in Trust-PCL (off-policy),
+7
+
+Under review as a conference paper at ICLR 2018
+
+-70 -80 -90 -100 -110 -120
+0
+3500 3000 2500 2000 1500 1000
+500 0 0
+
+Acrobot
+123 Hopper
+246
+
+HalfCheetah
+
+Swimmer
+
+8000
+
+350
+
+7000
+
+300
+
+6000 5000 4000 3000 2000 1000
+
+250 200 150 100
+50
+
+45
+
+0 0 5 10 15 20 25
+
+0 0 2 4 6 8 10
+
+Walker2d
+
+Ant
+
+5000
+
+4000
+
+3000
+
+2000
+
+1000
+
+8 10
+
+0 0
+
+6000
+
+5000
+
+4000
+
+3000
+
+2000
+
+1000
+
+5 10 15 20 25
+
+0 0
+
+5 10 15 20 25
+
+Trust-PCL (on-policy)
+
+Trust-PCL (off-policy)
+
+TRPO
+
+Figure 1: The results of Trust-PCL (on-policy) and Trust-PCL (off-policy) against a TRPO baseline. Each plot shows average greedy reward with single standard deviation error intervals capped at the min and max across 4 best of 5 randomly seeded training runs after choosing best hyperparameters. The x-axis shows millions of environment steps. We observe that Trust-PCL (on-policy), a hyperparameter setting of Trust-PCL that tries to match TRPO's rate of accrual of new experience, can match or beat TRPO in terms of average reward in all the tasks. When attempting to increase sample efficiency using Trust-PCL (off-policy), we almost consistently see a dramatic improvement in sample efficiency, although in some cases (Hopper, Walker2d) the increased sample efficiency comes with some instability as well.
+
+3500 3000 2500 2000 1500 1000
+500 0 0.0
+
+Hopper
+2.5 5.0 = 0.001
+
+7.5 10.0 = 0.002
+
+5000 4000 3000 2000 1000
+
+Walker2d
+
+0 5 10 = 0.005
+
+15 20 = 0.01
+
+25
+
+Figure 2: The results of Trust-PCL (on-policy) across several values of , defining the size of the trust region. Each plot shows average greedy reward across 4 best of 5 randomly seeded training runs after choosing best hyperparameters. The x-axis shows millions of environment steps. We observe that instability increases with , thus concluding that the use of trust region is crucial.
+
+we see the improvement in terms of sample efficiency can be dramatic, significantly improving sample efficiency with mostly negligible effects on stability. Overall, we find that the Trust-PCL variants can improve upon the TRPO baseline. It is clear that Trust-PCL (off-policy) especially is strictly better than TRPO both in terms of reward and sample efficiency. We also present our results compared to other published results in Table 1. We find that even when comparing across different implementations, Trust-PCL can match or beat the state-of-the-art.
+8
+
+Under review as a conference paper at ICLR 2018
+5.2.1 THE EFFECT OF
+To showcase the effect of the trust region on stability of training, we present the reward during training for several different values of in Figure 2. As increases, instability increases as well, eventually having an adverse effect on the agent's ability to achieve optimal reward. Thus we conclude that the use of trust region is crucial for learning in these environments.
+6 CONCLUSION
+We have presented Trust-PCL, an off-policy algorithm employing a relative-entropy penalty to impose a trust region on a maximum reward objective. We found that Trust-PCL can perform well on a set of standard control tasks, improving upon TRPO both in terms of average reward and sample efficiency. Our best results on Trust-PCL are able to maintain the stability and solution quality of TRPO while approaching the sample-efficiency of value-based methods (see e.g., Metz et al. (2017)). This gives hope that the goal of achieving both stability and sample-efficiency without trading-off one for the other is attainable in a single unifying RL algorithm.
+REFERENCES
+Mart´in Abadi, Paul Barham, Jianmin Chen, Zhifeng Chen, Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat, Geoffrey Irving, Michael Isard, et al. Tensorflow: A system for largescale machine learning. arXiv:1605.08695, 2016.
+Shun-Ichi Amari. Natural gradient works efficiently in learning. Neural Comput., 10, 1998.
+Shun-Ichi Amari. Differential-geometrical methods in statistics, volume 28. Springer Science & Business Media, 2012.
+Mohammad Gheshlaghi Azar, Vicenc¸ Go´mez, and Hilbert J Kappen. Dynamic policy programming with function approximation. AISTATS, 2011.
+Mohammad Gheshlaghi Azar, Vicenc¸ Go´mez, and Hilbert J Kappen. Dynamic policy programming. JMLR, 13, 2012.
+J Andrew Bagnell and Jeff Schneider. Covariant policy search. 2003.
+Greg Brockman, Vicki Cheung, Ludwig Pettersson, Jonas Schneider, John Schulman, Jie Tang, and Wojciech Zaremba. OpenAI Gym. arXiv:1606.01540, 2016.
+Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep reinforcement learning for continuous control. 2016.
+Roy Fox, Ari Pakman, and Naftali Tishby. G-learning: Taming the noise in reinforcement learning via soft updates. Uncertainty in Artifical Intelligence, 2016. URL http://arxiv.org/abs/ 1512.08562.
+Shixiang Gu, Timothy Lillicrap, Zoubin Ghahramani, Richard E Turner, and Sergey Levine. Q-prop: Sample-efficient policy gradient with an off-policy critic. ICLR, 2017a.
+Shixiang Gu, Timothy Lillicrap, Zoubin Ghahramani, Richard E Turner, Bernhard Scho¨lkopf, and Sergey Levine. Interpolated policy gradient: Merging on-policy and off-policy gradient estimation for deep reinforcement learning. arXiv preprint arXiv:1706.00387, 2017b.
+Tuomas Haarnoja, Haoran Tang, Pieter Abbeel, and Sergey Levine. Reinforcement learning with deep energy-based policies. arXiv preprint arXiv:1702.08165, 2017.
+Nicolas Heess, Srinivasan Sriram, Jay Lemmon, Josh Merel, Greg Wayne, Yuval Tassa, Tom Erez, Ziyu Wang, Ali Eslami, Martin Riedmiller, et al. Emergence of locomotion behaviours in rich environments. arXiv preprint arXiv:1707.02286, 2017.
+Sham M Kakade. A natural policy gradient. In NIPS, 2002.
+9
+
+Under review as a conference paper at ICLR 2018
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. ICLR, 2015.
+Vijay R Konda and John N Tsitsiklis. Actor-critic algorithms, 2000.
+Timothy P Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. arXiv preprint arXiv:1509.02971, 2015.
+James Martens and Roger Grosse. Optimizing neural networks with kronecker-factored approximate curvature. In ICML, 2015.
+Luke Metz, Julian Ibarz, Navdeep Jaitly, and James Davidson. Discrete sequential prediction of continuous actions for deep RL. CoRR, abs/1705.05035, 2017. URL http://arxiv.org/ abs/1705.05035.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Alex Graves, Ioannis Antonoglou, Daan Wierstra, and Martin A. Riedmiller. Playing atari with deep reinforcement learning. arXiv:1312.5602, 2013.
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy P Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement learning. ICML, 2016.
+Ofir Nachum, Mohammad Norouzi, Kelvin Xu, and Dale Schuurmans. Bridging the gap between value and policy based reinforcement learning. CoRR, abs/1702.08892, 2017. URL http: //arxiv.org/abs/1702.08892.
+Mohammad Norouzi, Samy Bengio, Zhifeng Chen, Navdeep Jaitly, Mike Schuster, Yonghui Wu, and Dale Schuurmans. Reward augmented maximum likelihood for neural structured prediction. NIPS, 2016.
+Neal Parikh, Stephen Boyd, et al. Proximal algorithms. Foundations and Trends R in Optimization, 1(3):127­239, 2014.
+Jan Peters and Stefan Schaal. Reinforcement learning of motor skills with policy gradients. Neural networks, 21, 2008.
+Jan Peters, Katharina Mulling, and Yasemin Altun. Relative entropy policy search. In AAAI, 2010.
+Konrad Rawlik, Marc Toussaint, and Sethu Vijayakumar. On stochastic optimal control and reinforcement learning by approximate inference. In Twenty-Third International Joint Conference on Artificial Intelligence, 2013.
+John Schulman. Modular rl. http://github.com/joschu/modular_rl, 2017. Accessed: 2017-06-01.
+John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz. Trust region policy optimization. In ICML, 2015.
+John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel. Highdimensional continuous control using generalized advantage estimation. ICLR, 2016.
+John Schulman, Pieter Abbeel, and Xi Chen. Equivalence between policy gradients and soft qlearning. arXiv preprint arXiv:1704.06440, 2017a.
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017b.
+David Silver, Guy Lever, Nicolas Heess, Thomas Degris, Daan Wierstra, and Martin Riedmiller. Deterministic policy gradient algorithms. In Proceedings of the 31st International Conference on Machine Learning (ICML-14), pp. 387­395, 2014.
+Emanuel Todorov, Tom Erez, and Yuval Tassa. Mujoco: A physics engine for model-based control. In Intelligent Robots and Systems (IROS), 2012 IEEE/RSJ International Conference on, pp. 5026­ 5033. IEEE, 2012.
+10
+
+Under review as a conference paper at ICLR 2018 Hado Van Hasselt, Arthur Guez, and David Silver. Deep reinforcement learning with double q-
+learning. AAAI, 2016. Ziyu Wang, Victor Bapst, Nicolas Heess, Volodymyr Mnih, Remi Munos, Koray Kavukcuoglu,
+and Nando de Freitas. Sample efficient actor-critic with experience replay. arXiv preprint arXiv:1611.01224, 2016. Christopher John Cornish Hellaby Watkins. Learning from delayed rewards. PhD thesis, University of Cambridge England, 1989. Ronald J Williams and Jing Peng. Function optimization using connectionist reinforcement learning algorithms. Connection Science, 1991.
+11
+
+Under review as a conference paper at ICLR 2018
+A IMPLEMENTATION BENEFITS OF TRUST-PCL
+We have already highlighted the ability of Trust-PCL to use off-policy data to stably train both a parameterized policy and value estimate, which sets it apart from previous methods. We have also noted the ease with which exploration can be incorporated through the entropy regularizer. We elaborate on several additional benefits of Trust-PCL.
+Compared to TRPO, Trust-PCL is much easier to implement. Standard TRPO implementations perform second-order gradient calculations on the KL-divergence to construct a Fisher information matrix (more specifically a vector product with the inverse Fisher information matrix). This yields a vector direction for which a line search is subsequently employed to find the optimal step. Compare this to Trust-PCL which employs simple gradient descent. This makes implementation much more straightforward and easily realizable within standard deep learning frameworks.
+Even if one replaces the constraint on the average KL-divergence of TRPO with a simple regularization penalty (as in proximal policy gradient methods (Schulman et al., 2017b; Wang et al., 2016)), optimizing the resulting objective requires computing the gradient of the KL-divergence. In Trust-PCL, there is no such necessity. The per-state KL-divergence need not have an analytically computable gradient. In fact, the KL-divergence need not have a closed form at all. The only requirement of Trust-PCL is that the log-density be analytically computable. This opens up the possible policy parameterizations to a much wider class of functions. While continuous control has traditionally used policies parameterized by unimodal Gaussians, with Trust-PCL the policy can be replaced with something much more expressive--for example, mixtures of Gaussians or autoregressive policies as in Metz et al. (2017).
+We have yet to fully explore these additional benefits in this work, but we hope that future investigations can exploit the flexibility and ease of implementation of Trust-PCL to further the progress of RL in continuous control environments.
+B EXPERIMENTAL SETUP
+We describe in detail the experimental setup regarding implementation and hyperparameter search.
+B.1 ENVIRONMENTS
+In Acrobot, episodes were cut-off at step 500. For the remaining environments, episodes were cutoff at step 1, 000.
+Acrobot, HalfCheetah, and Swimmer are all non-terminating environments. Thus, for these environments, each episode had equal length and each batch contained the same number of episodes. Hopper, Walker2d, and Ant are environments that can terminate the agent. Thus, for these environments, the batch size throughout training remained constant in terms of steps but not in terms of episodes.
+There exists an additional common MuJoCo task called Humanoid. We found that neither our implementation of TRPO nor Trust-PCL could make more than negligible headway on this task, and so omit it from the results. We are aware that TRPO with the addition of GAE and enough finetuning can be made to achieve good results on Humanoid (Schulman et al., 2016). We decided to not pursue a GAE implementation to keep a fair comparison between variants. Trust-PCL can also be made to incorporate an analogue to GAE (by maintaining consistencies at varying time scales), but we leave this to future work.
+B.2 IMPLEMENTATION DETAILS
+We use fully-connected feed-forward neural networks to represent both policy and value.
+The policy  is represented by a neural network with two hidden layers of dimension 64 with tanh activations. At time step t, the network is given the observation st. It produces a vector µt, which is combined with a learnable (but t-agnostic) parameter  to parametrize a unimodal Gaussian with mean µt and standard deviation exp(). The next action at is sampled randomly from this Gaussian.
+12
+
+Under review as a conference paper at ICLR 2018
+The value network V is represented by a neural network with two hidden layers of dimension 64 with tanh activations. At time step t the network is given the observation st and the component-wise squared observation st st. It produces a single scalar value. B.2.1 TRPO LEARNING At each training iteration, both the policy and value parameters are updated. The policy is trained by performing a trust region step according to the procedure described in Schulman et al. (2015). The value parameters at each step are solved using an LBFGS optimizer. To avoid instability, the value parameters are solved to fit a mixture of the empirical values and the expected values. That is, we determine  to minimize sbatch(V(s) - V~(s) - (1 - )V^~(s))2, where again ~ is the previous value parameterization. We use  = 0.9. This method for training  is according to that used in Schulman (2017). B.2.2 TRUST-PCL LEARNING At each training iteration, both the policy and value parameters are updated. The specific updates are slightly different between Trust-PCL (on-policy) and Trust-PCL (off-policy). For Trust-PCL (on-policy), the policy is trained by taking a single gradient step using the Adam optimizer (Kingma & Ba, 2015) with learning rate 0.001. The value network update is inspired by that used in TRPO we perform 5 gradients steps with learning rate 0.001, calculated with regards to a mix between the empirical values and the expected values according to the previous ~. We use  = 0.95. For Trust-PCL (off-policy), both the policy and value parameters are updated in a single step using the Adam optimizer with learning rate 0.0001. For this variant, we also utilize a target value network (lagged at the same rate as the target policy network) to replace the value estimate at the final state for each path. We do not mix between empirical and expected values.
+B.3 HYPERPARAMETER SEARCH We found the most crucial hyperparameters for effective learning in both TRPO and TrustPCL to be (the constraint defining the size of the trust region) and d (the rollout determining how to evaluate the empirical value of a state). For TRPO we performed a grid search over  {0.01, 0.02, 0.05, 0.1}, d  {10, 50}. For Trust-PCL we performed a grid search over
+ {0.001, 0.002, 0.005, 0.01}, d  {10, 50}. For Trust-PCL we also experimented with the value of  , either keeping it at a constant 0 (thus, no exploration) or decaying it from 0.1 to 0.0 by a smoothed exponential rate of 0.1 every 2,500 training iterations. We fix the discount to  = 0.995 for all environments.
+13
+
+

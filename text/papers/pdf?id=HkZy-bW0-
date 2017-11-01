@@ -1,0 +1,1198 @@
+Under review as a conference paper at ICLR 2018
+Temporally Efficient Deep Learning with Spikes
+Anonymous authors Paper under double-blind review
+Abstract
+The vast majority of natural sensory data is temporally redundant. For instance, video frames or audio samples which are sampled at nearby points in time tend to have similar values. Typically, deep learning algorithms take no advantage of this redundancy to reduce computations. This can be an obscene waste of energy. We present a variant on backpropagation for neural networks in which computation scales with the rate of change of the data - not the rate at which we process the data. We do this by having neurons communicate a combination of their state, and their temporal change in state. Intriguingly, this simple communication rule give rise to units that resemble biologically-inspired leaky integrate-and-fire neurons, and to a weight-update rule that is equivalent to a form of Spike-Timing Dependent Plasticity (STDP), a synaptic learning rule observed in the brain. We demonstrate that on MNIST, on a temporal variant of MNIST, and on Youtube-BB, a dataset with videos in the wild, our algorithm performs about as well as a standard deep network trained with backpropagation, despite only communicating discrete values between layers.
+1 Introduction
+Currently, most algorithms used in Machine Learning work under the assumption that data points are independent and identically distributed, as this assumption provides good statistical guarantees for convergence. This is very different from the way data enters our brains. Our eyes receive a single, never-ending stream of temporally correlated data. We get to use this data once, and then it's gone. Moreover, most sensors produce sequential, highly overlapping, and redundant streams of data. This can be both a blessing and a curse. From a statistical learning point of view this redundancy may lead to biased estimators and eventually unnecessarily bad predictions. However, this temporal redundancy also implies that intuitively not all computations are necessary.
+Online Learning is the study of how to learn in this domain - where data becomes available in sequential order and is given to the model only once. Given the enormous amount of sequential data, mainly videos, that are being produced nowadays, it seems desirable to develop learning systems that simply consume data on-the-fly as it is being generated, rather than collect it into datasets for offline-training. There is, however a problem of efficiency, which we hope to illustrate with two examples:
+1. CCTV feeds. CCTV Cameras collect an enormous amount of data from mostly-static scenes. The amount of new information in a frame, given the previous frame, tends to be low. That is to say, data tends to be temporally redundant. If we want to train a model from of this data (for example a pedestrian detector), we need process a large amount of mostly-static frames. If the frame rate doubles, so does the amount of computation. Intuitively, it feels that this should not be necessary. It would be nice to still be able to use all this data, but have the amount of computation scale with the amount of new information in each frame, not just the number of frames and dimensions of the data.
+2. Robot perception. Robots have no choice but to learn online - their future input data (e.g. camera frames) are dependent on their previous predictions (i.e. motor
+1
+
+Under review as a conference paper at ICLR 2018
+
+actions). Not only does their data come in nonstationary temporal streams, but it typically comes from several sensor running at different rates. The camera may produce 1MB images at 30 frames/s, while the gyro might produce 1-byte readings 1000 frames/s. It's not obvious, using current methods in deep learning, how we can integrate asynchronous sensory signals into a unified, trainable, latent representation, without undergoing the horribly inefficient process of recomputing the function of the network every time a new signal arrives.
+
+These examples point to the need for a training method where the amount of computation required to update the model scales with the amount of new information in the data, and not just the dimensionality of the data.
+
+There has been a lot of work on increasing the computational efficiency of neural networks
+
+by quantizing neural weights or activations (see Section 4), but comparatively little work on
+
+exploiting redundancies in the data to reduce the amount of computation. O'Connor and
+
+Welling (2016b), set out to exploit the temporal redundancy in video, by having neurons
+
+only send their quantized changes in activation to downstream neurons, and having the
+
+downstream neurons integrate these changes over time. This approach works for efficiently
+
+approximating the function of the network, but fails for training, because when the weights
+
+are changing with time, this approach (take the temporal difference, multiply by weights,
+
+temporally integrate) fails to reconstruct the correct activation for the next layer. In other
+
+words,
+
+t 
+
+=0(x
+
+- x-1) · w
+
+= xt · wt
+
+unless wt
+
+= w0t.
+
+Figure
+
+2
+
+describes
+
+the
+
+problem
+
+visually.
+
+In this paper, we correct for this problem by encoding a mixture of two components of
+the layers activation xt: the proportional component kpxt, and the derivative component kd(xt - xt-1). When we invert this encoding scheme, we get get a decoding scheme which corresponds to taking an exponentially decaying temporal average of past inputs. Interestingly,
+the resulting neurons begin to resemble models of biological spiking neurons, whose membrane
+potentials can approximately be modeled as an exponentially decaying temporal average of
+past inputs.
+
+In this work, we present a scheme wherein the temporal redundancy of input data is used to reduce the computation required to train a neural network. We demonstrate this on the MNIST and Youtube-BB datasets. To our knowledge we are the first to create a neural network training algorithm which uses less computation as data becomes more temporally redundant.
+
+2 Methods
+We propose a coding scheme where neurons can represent their activations as a temporally sparse series of impulses. The impulses from a given neuron encode a combination of the value and the rate of change of the neuron's activation.
+While our algorithm is designed to work efficiently with temporal data, we do not aim to learn temporal sequences in this work. We aim to efficiently approximate a function yt = f (xt), where the current target yt is solely a function of the current input xt, and not previous inputs x0...xt-1. The temporal redundancy between neighbouring inputs xt-1, xt will however be used to make our approximate computation of this function more efficient.
+2.1 Preliminary
+Throughout this paper we will use the notation (f3  f2  f1)(x) = f3(f2(f1(x))) to denote function composition. We slightly abuse the notion of functions by allowing them to have an internal state which persists between calls. For example, we define the  function in Equation 1 as being the difference between the inputs in two consecutive calls (where persistent variable xlast is initialized to 0). The  function, defined in Equation 2, returns a running sum of the inputs over calls. So we can write, for example, that when our composition of functions (  ) is called with a sequence of input variables x :  = [1..t], then (  )(xt) = xt, because y0 + (x1 - x0) + (x2 - x1) + ... + (xt - xt-1)|x0=0,y0=0 = xt.
+2
+
+Under review as a conference paper at ICLR 2018
+
+In general, when we write yt = f (xt), where f is a function with persistent state, it will be implied that we have previously called f (x ) for   [1, .., t - 1] in sequence. Variable
+definitions that are used later will be highlighted in blue.
+
+2.2 PD Encoding
+
+Suppose a neuron has time-varying activation x :   [1..t]. Taking inspiration from Proportional-Integral-Derivative (PID) controllers, we can "encode" this activation at each time step as a combination of its current activation and change in activation as
+at enc(xt) = kpxt + kd(xt - xt-1), (see Equation 4). The parameters kp and kd determine what portion of our encoding represents the value of the activation and the rate of change of that value, respectively. In Section D, we will discuss the effect our choices for these parameters have on the network.
+
+To get our decoding formula, we can sim-
+
+ply solve for
+
+xt
+
+as xt
+
+=
+
+at +kd xt-1 kp +kd
+
+(Equa-
+
+tion 5), such that (dec  enc)(xt) = xt.
+
+Notice that Equation 5 corresponds to de-
+
+caying the previous decoder state by some
+
+constant kd/(kp + kd) and then adding the input at/(kp + kd). We can expand this recursively to see that this corresponds
+
+to a temporal convolution a   where
+
+
+
+is
+
+a
+
+causal
+
+exponential
+
+
+kernel
+
+
+
+=
+
+1 kd kp+kd kd+kp
+
+if   0 otherwise 0 .
+
+ :x  y; Persistent: xlast  0 y  x - xlast xlast  x
+
+(1)
+
+ :x  y; Persistent: y  0 y  y+x
+
+(2)
+
+Q :x  y; Persistent:   0  +x y  round( )  -y
+
+(3)
+
+enc :x  y; Persistent: xlast  0 y  kpx + kd(x - xlast) xlast  x
+
+(4)
+
+dec :x  y; Persistent: y  0 y  x + kdy kp + kd
+
+(5)
+
+R :x  round(x)
+
+(6)
+
+2.3 Quantization
+Our motivation for the aforementioned encoding scheme is that we want a sparse signal which can be quantized into a low-bitrate discrete signal. This will later be used to reduce computation. We can quantize our signal at into a sparse, integer signal st Q(at), where the quantizer Q is defined in Equation 3. Equation 3 implements a form of Sigma-Delta modulation, a method widely used in signal processing to approximately communicate signals at low bit-rates (Candy and Temes, 1962). We can show that that Q(xt) = (  R  )(xt) (See Supplementary Material Section A), where   R   indicates applying a temporal summation, a rounding, and a temporal difference, in series. If xt is temporally redundant, then |at| 1t, and we can expect st to consist of mostly zeros with a few 1's and -1's.
+We can now approximately reconstruct our original signal xt as x^t dec(st) by applying our decoder, as defined in Equation 5. As our coefficients kp, kd become larger, our reconstructed signal x^t should become closer to the original signal xt. We illustrate examples of encoded signals and their reconstructions for different kp, kd in Figure 1.
+
+2.3.1 Special cases
+We can compactly write the entire reconstruction function as x^ = (dec    R    enc)(xt). kp = 0: When kp = 0, we get dec(xt) = (kd-1  )(xt) and enc(xt) = (kd  )(xt), so our reconstruction reduces to x^ = (kd-1      R    kd  )(xt). Because   kd   all
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+kp = 2.0
+
+kp = 0.1
+
+xt st xt 2
+
+0 2 |xt xt| t = 0.16, N = 1031 2
+
+|xt xt| t = 0.09, N = 1033
+
+|xt xt| t = 0.042, N = 1039
+
+0 22 |xt xt| t = 1.6, N = 52
+
+|xt xt| t = 0.2, N = 53
+
+|xt xt| t = 0.056, N = 69
+
+0 2 |xt xt| t = 1.8, N = 5 2
+
+|xt xt| t = 0.24, N = 10
+
+|xt xt| t = 0.065, N = 40
+
+0
+
+2 0 |xt
+
+xt| t = nan, 100 200
+
+N=0 300
+
+400
+
+|xt xt| t = 0.26, N = 12 500 0 100 200 300 400
+
+|xt xt| t = 0.057, N = 37 500 0 100 200 300 400
+
+500
+
+kd = 0
+
+kd = 1.0
+
+kd = 4.0
+
+kp = 0.01
+
+kp = 0.0
+
+Figure 1: An example signal xt (blue), encoded with kp varying across rows and kd varying across columns. st (black) is the quantized signal produced by the successive application of encoding (Equation 4) and quantization (Equation 3. x^t (orange) is the reconstruction of xt produced by applying Equation 5 to st. One might, after a careful look at this figure, ask why we bother with the proportional (kp) term at all? Figure 2 anticipates this question and answers it visually.
+
+kp = 0.1 kp = 0.01 kp = 0
+
+In all plots, kd = 1.0
+
+2.5 0.0 2.5
+
+2.5 0 0.0 2.5
+
+250
+
+2.5 0 0.0 2.5
+
+250
+
+2.5 0 0.0 2.5
+
+250
+
+0 250
+
+500 500 500 500
+
+xt wt zt = xt wt zt = deckpkd(Q(enckpkd(xt)) wt)
+750 1000 1250 1500 1750 2000 750 1000 1250 1500 1750 2000 750 1000 1250 1500 1750 2000 750 1000 1250 1500 1750 2000
+t
+
+Figure 2: The problem with only sending changes in activation (i.e. kp = 0) is that during training, weights change over time. In this example we generate random signals for a single
+scalar activation xt and scalar weight wt. We efficiently approximate zt with z^t, as described in Section 2.4. As the wt changes over time, our estimate z^ diverges from the correct value. Introducing kp allows us to bring our reconstruction back in line with the correct signal.
+
+commute with one another, we can simplify this to x^t = (kd-1  R  kd)(xt). so our decoded signal is x^t = round(xt · kd)/kd, with no dependence on xt-1. This is visible in the bottom row of Figure 1. This was the encoding scheme used in O'Connor and Welling (2016b).
+kd = 0: In this case, dec(xt) = kp-1xt and enc(xt) = kpxt so our encoding-decoding process becomes x^ = (kp-1    R    kp)(xt). In this case neither our encoder nor our decoder have any memory, and we take not advantage of temporal redundancy.
+
+2.4 Sparse Communication Between Layers The purpose of our encoding scheme is to reduce computation by sparsifying communication between layers of a neural network. Suppose we are trying to compute the pre-nonlinearity
+4
+
+Under review as a conference paper at ICLR 2018
+
+activation of the first hidden layer, zt  Rdout , given the input activation, xt  Rdin . We approximate zt as:
+
+zt xt · wt  x^t · wt dec(Q(enc(xt))) · wt dec(st) · wt  dec(st · wt) z^t where: xt, x^t  Rdin ; st  Idin ; w  R ;din×dout zt, z^t  Rdout
+
+(7)
+
+The first approximation comes from the quantization (Q) of the encoded signal, and the second from the fact that the weights change over time, as explained in Figure 2. The effects of these approximations are further explored in Section B of the Supplementary Material.
+
+Computing zt takes din · dout multiplications and (din - 1) · dout additions. The cost of
+
+computing z^t, on the other hand, depends on the contents of st. If the data is temporally
+
+redundant, st  Idin should be sparse, with total magnitude S
+
+i |st,i|. st can be
+
+decomposed into a sum of one-hot vectors st =
+
+S n=1
+
+sig
+
+n(st,in
+
+)in
+
+:
+
+in
+
+
+
+[1..din]
+
+where
+
+in  Idin is a onehot vector with element in = 1. The matrix product st · w can then be
+
+decomposed into a series of row additions:
+
+st · w =
+
+N
+sign(st,in ) · in
+n=1
+
+NN
+
+· w = sign(st,in )in · w = sign(st,in ) · win,·
+
+n=1
+
+n=1
+
+(8)
+
+If we include the encoding, quantization, and decoding operations, our matrix product takes a total of 2din + 2dout multiplications, and n |st,n| · dout + 3din + dout additions. Assuming the n |st,n| · dout term dominates, we can say that the relative cost of computing z^t vs zt is:
+
+cost(z^) 
+
+n |st,n| · cost(add)
+
+cost(z) din · (cost(add) + cost(mult))
+
+(9)
+
+2.5 A Neural Network
+
+We can implement this encoding scheme on every layer of a neural network. Given a standard neural net fnn consisting of alternating linear (·wl) and nonlinear (hl) operations, our network function fpdnn can then be written as:
+
+fnn(x) = (hL  ·wL  ...  h1  w1)(x) fpdnn(x) = (hL  wL  QL  encL  ...  h1  dec1  ·w1  Q1  enc1)(x)
+
+(10) (11)
+
+We can use the same approach to approximately calculate our gradients to use in training. If
+we define our layer activations as z^l (dec  ·wl  Q  enc)(x) if l = 1 otherwise (dec  ·wl  Q  enc)(z^l-1), and L (fpdnn(x), y), where is some loss function and y is a target, we can backpropagate the approximate gradients as:
+
+L =
+z^l
+
+L zL
+
+if l = L
+
+hl(z^l)  dec  ·wlT+1  Q  enc
+
+(
+
+
+
+L z^l+1
+
+)
+
+otherwise
+
+(12)
+
+On every layer of the forward and backward pass, our quantization scheme corrupts the signals that are being sent between layers. Nevertheless we find experimentally that this does not matter much to the performance of the network.
+
+2.6 Parameter Updates
+There's no use having an efficient backward pass if the parameter updates aren't also efficient. In a normal neural network trained with backpropagation and simple stochastic gradient
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+x x x
+e e e
+wt = xtet wt = xtet
+
+w t, past w t, future
+
+t
+
+spike
+
+Figure 3: A visualization of our efficient update schemes from Section 2.6. Top: A scalar
+
+signal representing a presynaptic neuron activation xt = hl-1(zl - 1), its quantized version,
+
+x¯t = (Qenc)(xt), and its reconstruction x^t = dec(x¯t). Middle: Another signal, representing
+
+the
+
+postsynaptic
+
+gradient
+
+of
+
+the
+
+error
+
+e
+
+=
+
+L zl
+
+,
+
+along
+
+with
+
+its
+
+quantized
+
+(e¯)
+
+and
+
+reconstructed
+
+(e^)
+
+variants.
+
+Bottom:
+
+The
+
+true
+
+weight
+
+gradient
+
+L wt
+
+,
+
+the
+
+reconstruction
+
+gradient
+
+^L
+wt
+
+.
+
+At
+
+the time of the spike in e¯t, we have two schemes for efficiently computing the weight gradient
+
+that will be used to increment weight (see Section 2.6). The past scheme computes the area
+
+under x^ · e^ since the last spike, and the future scheme computes the total future additional
+
+area due to the current spike.
+
+descent,
+
+the
+
+parameter
+
+update
+
+for
+
+weight
+
+matrix
+
+w
+
+has
+
+the
+
+form
+
+w
+
+
+
+w
+
+-
+
+
+
+L w
+
+where
+
+
+
+is
+
+the
+
+learning
+
+rate.
+
+If
+
+w
+
+connects
+
+layer
+
+l-1
+
+to
+
+layer
+
+l,
+
+we
+
+can
+
+write
+
+L w
+
+=
+
+xt
+
+ et
+
+where
+
+xt
+
+hl-1(zl-1,t)  Rdin is the presynaptic activation, et
+
+L  zl,t
+
+ Rdout
+
+is
+
+the
+
+postsynaptic
+
+(pre-nonlinearity) activation and  is the outer product. So we pay din · dout multiplications
+
+to update the parameters for each sample.
+
+We want a more efficient way to compute this product, which takes advantage of the sparsity
+
+of our encoded signals to reduce computation. We can start by applying our encoding-
+
+quantizing-decoding scheme to our input and error signals as x¯t (Q  enc)(xt)  Idin and
+
+e¯t
+
+(Q  enc)(et)
+
+
+
+Idout ,
+
+and
+
+approximate
+
+our
+
+true
+
+update
+
+update
+
+as
+
+L w recon,t
+
+x^t  e^t
+
+where x^t dec(x¯t) and e^t dec(e¯t). This doesn't do any good by itself, because the update rule still is not sparse. But, we can exactly compute the sum of this value over time using
+
+one of two sparse update schemes - past updates and future updates - which are depicted in
+
+Figure 3.
+
+Past Updates: For a given synapse wi,j, if either the presynaptic neuron spikes (x¯ti = 0) or the postsynaptic neuron spikes (e¯ti = 0), we increment the wi,j by the total area under x^,ie^,j since the last spike. We can do this efficiently because between the current time and
+
+the time of the previous spike, x^,ie^,j is a geometric sequence. Given a known initial value
+
+u,
+
+final
+
+value
+
+v,
+
+and
+
+decay
+
+rate
+
+r,
+
+a
+
+geometric
+
+sequence
+
+sums
+
+to
+
+u-v 1-r
+
+.
+
+The
+
+area
+
+calculated
+
+is shown in pink on the bottom row of Figure 3, and one algorithm to calculate it is in
+
+Equation 15.
+
+Future Updates: Another approach is to calculate the Present Value of the future area under the integral from the current spike. This is depicted in the blue-gray area in Figure 3, and the formula is in Equation 16.
+
+We give the formula for the Past and Future update rules in Appendix C.
+
+Finally, because the magnitude of our gradient varies greatly over training, we create a
+scheme for adaptively tuning k to match the running magnitude of the data. This is described in detail in Appendix D.
+
+6
+
+Under review as a conference paper at ICLR 2018 sign(xt) = sign(et) sign(xt) sign(et) Classic STDP Rule
+
+w
+
+tpost tpre
+
+tpost tpre
+
+tpost tpre
+
+Figure 4: Left: Our STDP rule, when both the input and error spikes have the same sign. Middle: Our STDP rule, when the input and error spikes have opposite signs. Right: The classic STDP rule Markram et al. (2012), where the weight update is positive when a presynaptic spike preceeds a postsynaptic spike, and negative otherwise.
+
+2.7 Relation to STDP
+An extremely attentive reader might have noted that Equation 16 has the form of an online implementation of Spike-Timing Dependent Plasticity (STDP). STDP (Markram et al., 2012) emerged from neuroscience, where it was observed that synaptic weight changes appeared to be functions of the relative timing of pre- and post-synaptic spikes. The empirically observed function usually has the double-exponential form seen on the rightmost plot of Figure 4.
+Using the quantized input signal x¯ and error signal e¯, and their reconstructions x^t and e^t as defined in the last section, we define a causal convolutional kernel t =
+k (k)t if t  0 otherwise 0 and gt = {t if t  0 otherwise -t} = k(k)|t| where t  I. The middle plot of Figure 4 is a plot of g. We define our STDP update rule as:
+
+L =
+w t,ST DP
+
+
+x¯t- g
+ =-
+
+ e¯t
+
+(13)
+
+We note that while our version of STDP has the same double-exponential form as the classic STDP rule observed in neuroscience (Markram et al., 2012), we do not have the property that sign of the weight change depends on whether the presynaptic spike preceded the postsynaptic spike.
+
+In Section C in the supplementary material we show experimentally that while Equations
+
+L w
+
+recon
+
+,
+
+L w
+
+past
+
+,
+
+L w
+
+f
+
+uture
+
+,
+
+L w stdp
+
+may
+
+all
+
+result
+
+in
+
+different
+
+updates
+
+at
+
+different
+
+times,
+
+the
+
+rules are equivalent in that for a given set of pre/post-synaptic spikes x¯, e¯, the cumulative
+
+sum of their updates over time converges exactly.
+
+3 Experiments
+3.1 Temporal MNIST
+To evaluate our network's ability to learn, we run it on the standard MNIST dataset, as well as a variant we created called "Temporal MNIST". Temporal MNIST is simply a reshuffling of the MNIST dataset so that so that similar inputs (in terms of L2-pixel distance), are put together. Figure 6 shows several snippets of consecutive frames in the temporal MNIST dataset. We compare our Proportional-Derivative Net against a conventional Multi-Layer Perceptron with the same architecture (one hidden layer of 200 ReLU hidden units and a softmax output). The results are shown in Figure 5. Somewhat surprisingly, our predictor slightly outperformed the MLP, getting 98.36% on the test set vs 98.25% for the MLP. We assume this improvement is due to the regularizing effect of the quantization. On Temporal MNIST, our network was able to converge with less computation than it required for MNIST (It used 32 · 1012 operations for MNIST vs 15 · 1012 for Temporal MNIST), but ended up with a slightly worse test score when compared with the MLP (the PDNN got 97.99% vs 98.28% for the MLP).
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+% SMcNoIrSeTon
+
+Te%mpSocroarleMoNnIST
+
+MLP:Training 100 98 96 94 92 100 98 96 94 92
+100 101 Epoch
+
+MLP:Test 101
+
+PDNN:Training
+
+PDNN:Test
+
+102 103 101
+
+103
+
+GOps Energies (mJ)
+
+Figure 5: Top Row: Results on MNIST. Bottom Row: Results on Temporal MNIST. Left Column: the training and test scores as a function of epoch. Middle: We now put the number of computational operations on the xaxis. We see that as a result our PDNN shifts to the left. Right: Because our network computes primarily with additions rather than multiplications. When we multiply our operation counts with the estimates of Horowitz (2014) for the computational costs of arithmethic operations (0.1pJ for 32-bit fixed-point addition vs 32pJ for multiplication), we can see that our algorithm would be at an advantage on any hardware where arithmetic operations were the computational bottleneck.
+
+Figure 6: Some samples from the TemporalMNIST dataset. Each column shows a snippet of adjacent frames.
+
+3.2 YouTube Video Dataset
+Next, we want to simulate the setting of CCTV cameras, discussed in 1, where we have a lot of data with only a small amount of new information per frame. In the absence of large enough public CCTV video datasets, we investigate the surrogate task of frame-based object classification on wild YouTube videos from the large, recently released Youtube-BB dataset Real et al. (2017). Our subset consists of 358 Training Videos and 89 Test videos with 758,033 frames in total. Each video is labeled with an object in one of 24 categories.
+We start from a VGG19 network (Simonyan and Zisserman, 2014): a 19-layer convolutional network pre-trained on imagenet. We replace the top three layer with three of our own randomly initialized layers, and train the network both as a spiking network, and as a regular network with backpropagation. While training the entire spiking network end-to-end works, we choose to only train the top layers, in order to speed up our training time.
+We compare our training scores and computation between a spiking and non-spiking implementation. Figure 7 shows that our spiking network performs comparably to a non-spiking network, and Figure 8 shows how the computation per frame of our spiking network decreases as we increase the frame rate (i.e. as the input data becomes more temporally redundant). Because our spiking network uses only additions, while a regular deep network does multiplyadds, we use the estimated energy-costs per op of Horowitz (2014) to compare computations to a single scale, which estimates the amount of energy required to do multiplies and adds in fixed-point arithmetic.
+4 Related Work
+There has been sparse but interesting work on merging the notions of spiking neural networks and deep learning. Diehl et al. (2015) found a way to efficiently map a trained neural
+8
+
+Under review as a conference paper at ICLR 2018
+
+Test Score
+J / Frame
+
+40
+
+35
+
+30
+
+25
+
+20
+
+15
+
+10
+
+5
+
+Spiking Non-Spiking
+
+0 1T0ra0i0ning Ite2r0a0ti0ons 30000 Cum2u5la0tive5T0r0ainin7g5E0nerg1y00(m0 J)
+
+1.50 1.25 1.00 0.75 0.50 0.25 0.00 0
+
+Spiking Convnet Convnet 5 10 15 20 25 30 Frames / s
+
+Figure 7: Left: Learning Curves on the Youtube Dataset. Right: Learning curves with respect to computational energy using the conversion of Horowitz (2014). The spiking network slightly outperforms the non-spiking baseline - we suspect that this is because the added noise of spiking acts as a regularizer.
+
+Figure 8: We simulate different frame-rates by selecting every n'th frame. This plot shows our network's total computation averaged over several snippets of video, at varying frame rates. As our frame rate increases, the computation per-frame of our spiking network goes down, while with a normal network it remains fixed.
+
+network onto a spiking network. Lee et al. (2016) devised a method for training spiking of integrate-and-fire spiking neurons with backpropagation - though their neurons did not send a temporal difference of their activations. O'Connor and Welling (2016a) created a method for training event-based neural networks - but their method took no advantage of temporal redundancy in the data. Binas et al. (2016) and (O'Connor and Welling, 2016b) both took the approach of sending quantized temporal changes reduce computation on temporally redundant data, but their schemes could not be used to train a neural network. Bohte et al. (2000) showed how could apply backpropagation for training spiking neural networks, but it was not obvious how to apply the method to non-spiking data. Zambrano and Bohte (2016) developed a spiking network with an adaptive scale of quantization (which bears some resemblance to our tuning scheme described in Section D), and show that the spiking mechanism is a form of Sigma-Delta modulation, which we also use here. Similarly, Yoon (2017) found standard spiking neuron models actually implement a form of Sigma-Delta modulation. Courbariaux et al. (2015) showed that neural networks could be trained with binary weights and activations (we just quantize activations). Bengio et al. (2015) found a connection between the classic STDP rule (Figure 4, right) and optimizing a dynamical neural network, although the way they arrived at an STDP-like rule was quite different from ours.
+5 Discussion
+We set out with the objective of reducing the computation in deep networks by taking advantage of temporal redundancy in data. We described a simple rule (Equation 4) for sparsifying the communication between layers of a neural network by having our neurons communicate a combination of their temporal change in activation, and the current value of their activation. We show that it follows from this scheme that neurons should behave as leaky integrators (Equation 5). When we quantize our neural activations with Sigma-Delta modulation, a common quantization scheme in signal processing, we get something resembling a leaky integrate-and-fire neuron. We derive efficient update rules for the weights of our network, and show these to be equivalent to a form of STDP - a learning rule first observed in neuroscience. Finally, we train our network, verify that it does indeed compute more efficiently on temporal data, and show that it performs about as well as a traditional deep network of the same architecture, but with significantly reduced computation. Finally, we show that our network can train on real video data.
+9
+
+Under review as a conference paper at ICLR 2018 The efficiency of our approach hinges on the temporal redundancy of our input data and neural activations. There is an interesting synergy here with the concept of slow-features (Wiskott, 1999). Slow-Feature learning aims to discover latent objects that persist over time. If the hidden units were to specifically learn to respond to slowly-varying features of the input, the layers in a spiking implementation of such a network would have to communicate less often. In such a network, the tasks of feature-learning and reducing inter-layer communication may be one and the same.
+10
+
+Under review as a conference paper at ICLR 2018
+References
+Yoshua Bengio, Thomas Mesnard, Asja Fischer, Saizheng Zhang, and Yuhai Wu. An objective function for stdp. arXiv preprint arXiv:1509.05936, 2015.
+Jonathan Binas, Giacomo Indiveri, and Michael Pfeiffer. Deep counter networks for asynchronous event-based processing. CoRR, abs/1611.00710, 2016. URL http://arxiv.org/ abs/1611.00710.
+Sander M Bohte, Joost N Kok, and Johannes A La Poutré. Spikeprop: backpropagation for networks of spiking neurons. In ESANN, pages 419­424, 2000.
+James C Candy and Gabor C Temes. Oversampling delta-sigma data converters: theory, design, and simulation. University of Texas Press, 1962.
+Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre David. Binaryconnect: Training deep neural networks with binary weights during propagations. CoRR, abs/1511.00363, 2015. URL http://arxiv.org/abs/1511.00363.
+Peter U Diehl, Daniel Neil, Jonathan Binas, Matthew Cook, Shih-Chii Liu, and Michael Pfeiffer. Fast-classifying, high-accuracy spiking deep networks through weight and threshold balancing. In 2015 International Joint Conference on Neural Networks (IJCNN), pages 1­8. IEEE, 2015.
+Mark Horowitz. 1.1 computing's energy problem (and what we can do about it). In 2014 IEEE International Solid-State Circuits Conference Digest of Technical Papers (ISSCC), pages 10­14. IEEE, 2014.
+Jun Haeng Lee, Tobi Delbruck, and Michael Pfeiffer. Training deep spiking neural networks using backpropagation. arXiv preprint arXiv:1608.08782, 2016.
+Henry Markram, Wulfram Gerstner, and Per Jesper Sjöström. Spike-timing-dependent plasticity: a comprehensive overview. Frontiers in synaptic neuroscience, 4, 2012.
+Peter O'Connor and Max Welling. Deep spiking networks. arXiv preprint arXiv:1602.08323, 2016a.
+Peter O'Connor and Max Welling. Sigma delta quantized networks. arXiv preprint arXiv:1611.02024, 2016b.
+Esteban Real, Jonathon Shlens, Stefano Mazzocchi, Xin Pan, and Vincent Vanhoucke. Youtube-boundingboxes: A large high-precision human-annotated data set for object detection in video. arXiv preprint arXiv:1702.00824, 2017.
+Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. arXiv preprint arXiv:1409.1556, 2014.
+Laurenz Wiskott. Learning invariance manifolds. Neurocomputing, 26:925­932, 1999. Young C Yoon. Lif and simplified srm neurons encode signals into spikes via a form of
+asynchronous pulse sigma­delta modulation. IEEE transactions on neural networks and learning systems, 28(5):1192­1205, 2017. Davide Zambrano and Sander M Bohte. Fast and efficient asynchronous neural computation with adapting spiking neural networks. arXiv preprint arXiv:1609.02053, 2016.
+11
+
+Under review as a conference paper at ICLR 2018
+A Sigma-Delta Unwrapping
+Here we show that Q =   R  , where Q, , R,  are defined in Equations 3, 2, 6, 1, respectively. From Equation 3 (Q) we can see that
+yt  round(xt + t-1)  I t  t-1 + xt - yt  R
+Now we can unroll for yt and observe use the fact that if s  I then round(a+s) = round(a)+s, to say:
+
+yt = round(xt + t-1)
+
+= round(xt + t-2 + xt-1 - yt-1)
+
+= round(xt + xt-1 + t-2) - yt-1
+
+= round(xt + xt-1 + t-2) - round(xt-1 + t-2)
+
+t 0 t-2
+
+t-1 0 t-2
+
+= round( x +   0) - y - round( x +   0) - y
+
+ =1
+
+ =0
+
+ =1
+
+ =0
+
+t t-1
+
+= round( x ) - round( x )
+
+ =1
+
+ =1
+
+(14)
+
+At which point it is clear that Q is identical to a successive application of a temporal summation, a rounding, and a temporal difference. That is why we say Q =   R  .
+B Scanning the K-space
+Equation 7 shows how we make two approximations when approximating zt = xt · wt with z^t = (dec  w  Q  enc)(xt). The first is the "nonstationary weight" approximation - arising from the fact that w changes in time, the second is the "quantization" approximation, arising from the quantization of x. Here do a small experiment in which we multiply a time-varying scalar signal xt with a time-varying weight wt for many different values of kp, kd to understand the effects of kp, kd on our approximation error.
+12
+
+Under review as a conference paper at ICLR 2018
+
+2 0 2 4
+
+Example: kp = 0.01, kd = 1.0
+wQxt(tenc(xt))
+
+S0C.1(x
+0.023 0.0044 0.001
+
+w, dec(enc(x)
+
+w)1).0
+0.9 0.8 0.7 0.6 0.5 0.4
+
+SC(x w, dec(Q(enc(x))) 1w.0)
+0.9 0.8 0.7 0.6 0.5 0.4
+
+kp kp kp
+
+5
+
+SC0(x.1
+
+w, dec(Q(enc(x))
+
+w1.)0)
+0.9
+
+0 5 19500
+
+19600
+
+19700
+
+0.023
+
+19800
+
+ddxteeccw((eQt n(ecn(xct()xtw))t) wt) 19900 20000
+
+0.0044 0.0010.1
+
+0.44
+
+2.3
+
+0.8 0.7 0.6 0.5 0.4 10
+
+t kd
+
+log10(Nops)
+33322221........0072755205055050 0.1 0.44 2.3 10
+kd
+
+Figure 9: Top Left: A time varying signal xt, the quantized signal Q(enc(xt)), and the timevarying "weight" wt. Bottom Left: Compare the true product of these signals xt · wt with the dec(enc(xt)·wt), which shows the effects of the non-stationary weight approximation, and dec(Q(enc(xt)) · w) which shows both approximations. Top Middle: The Cosine distance between the "true" signal x w and the approximation due to the nonstationary w, scanned
+over a grid of kp, kd values. Top Right: The cosine distance between the "true" signal and the approximation due to the quantization of x. Bottom Middle: The Cosine Distance
+between the "true" signal and the full approximation described in Equation 7. This shows
+why we need both kp and kd to be nonzero. Bottom Right: The Number of weight-lookups required for the to compute the full approximation. dec(Q(enc(x)) w).
+
+C Update Algorithms
+
+In Section 2.6, we visually describe what we call the "Past" and "Future" parameters updates. Here we give the algorithms for implementing these schemes.
+
+To simplify our expressions in the update algorithms, we re-parametrize our kp, kd coefficients
+
+as k
+
+=
+
+,kd
+kp +kd
+
+k
+
+kp
+
+1 +kd
+
+.
+
+13
+
+Under review as a conference paper at ICLR 2018
+
+PreSsiygnnaalptic
+
+xt xt
+
+PostSisgynnaalptic
+
+et et
+recon STDP past future t
+
+w
+
+t =0
+
+Figure 10: A comparison of our different update methods. Top: A randomly generated
+
+presynaptic quantized signal x¯, along with its reconstruction x^. Middle: A randomly
+
+generated postsynaptic quantized error signal e¯, along with its reconstruction e^. Bottom:
+
+The cumulative weight update arising from our four updates methods. "recon" is just
+
+t 
+
+=1
+
+x^
+
+e^
+
+,
+
+" past "
+
+and
+
+" future "
+
+are
+
+described
+
+in
+
+Section
+
+2.6
+
+and
+
+"STDP "
+
+is
+
+described
+
+in
+
+Section 2.7
+
+In Section 2.6 and 2.7, we described 4 different update rules, and stated that while they do not necessarily produce the same updates at the same times, they produce the same result in the end. Here we demonstrate this empirically. We generate two random spike-trains representing the input and the error signal to a single synapse. The plot on the bottom shows our weight as a function of time as it drifts from its initial value.
+
+past
+
+:
+
+(x¯
+
+
+
+Idin , e¯ 
+
+Idout )
+
+
+
+L w past
+
+Persistent: w, u  R ,din×dout
+
+x^  0din , e^  0dout
+
+i  x¯ = 0, j  e¯ = 0
+
+x^  kx^ , e^  ke^ v  x^i  e^j  R i [x¯i =0]× j [e¯j =0]
+
+L w past,i,j
+
+
+
+ui,j - v 1 - k2
+
+x^  x^ + kx¯, e^  e^ + ke¯
+
+ui,j  v
+
+(15)
+
+f uture
+
+:
+
+(x¯
+
+
+
+Idin , e¯ 
+
+Idout )
+
+
+
+L w f uture
+
+Persistent: w  R ,din×dout
+
+x^  0din , e^  0dout
+
+x^  kx^ e^  ke^ + ke¯
+
+L  x¯  e^ + x^  e¯
+
+w f uture
+
+k2 - 1
+
+x^  x^ + kx¯
+
+(16)
+
+14
+
+Under review as a conference paper at ICLR 2018
+D Tuning kp, kd
+
+The smaller the magnitude of a signal, the more severely distorted it is by our quantization-
+
+reconstruction scheme. We can see that scaling a signal by K has the same effect on the
+
+quantized version of the signal, st, as scaling kp and kd by K: st = (Q  enckp,kd )(Kxt) = Q(kpKxt + kd(Kxt - Kxt-1)) = Q(Kkpxt + Kkd(xt - xt-1)) = (Q  encKkp,Kkd )(xt). The fact that the reconstruction quality depends on the signal magnitude presents a problem when
+
+training our network, because the error gradients tend to change in magnitude throughout
+
+training (they start large, and become smaller as the network learns). To keep our signal
+
+within the useful dynamic range of the quantizer, we apply simple scheme to heuristically
+
+adjust kp and kd for the forward and backward passes separately, for each layer of the
+
+network. Instead of directly setting kp, kd as hyperparameters, we fix the ratio k
+
+,kd
+kp +kd
+
+and adapt the scale k
+
+1 kp +kd
+
+to
+
+the magnitude of
+
+the
+
+signal.
+
+Our update rule for
+
+k
+
+is:
+
+µt = (1 - k)µt-1 + k · |xt|L1 k = k + k(krel · µt - k)
+
+(17)
+
+Where k is the scale-adaptation learning rate, µt is a rolling average of the L1 magnitude of signal xt, and krel defines how coarse our quantization should be relative to the signal magnitude (higher means coarser). We can recover kp, kd for use in the encoders and decoders as kp = (1 - k)/k and kd = k/k. In our experiments, we choose k = 0.001, krel = 0.91, kalpha = 0.91, and initialize µ0 = 1.
+15
+
+Under review as a conference paper at ICLR 2018
+E The Youtube Dataset
+
+person bird bicycle boat
+
+bus bear cow cat
+
+giraffe
+
+potted plant
+
+horse
+
+motorcycle
+
+knife
+
+airplane
+
+skateboard
+
+train
+
+Figure 11: 16 Frames from the Youtube-BB dataset. The dataset consists videos, with each video annotated as having one of 24 objects in it. It also comes with annotated bounding-boxes, which we do not use in this study.
+
+F Instability in Neural Network Representations
+
+Figure 8 seems to show that computation doesn't quite approach zero as our frame-rate increases, but flat-lines at a certain point. We think this may have to do with the fact that hidden layer activations are not necessarily smoother in time than the input.
+
+We demonstrate this with a figure, which, using 5 video snippets from the Youtube-BB
+
+dataset, measures how much the average relative change in layer activation:
+
+|at -at-1 | 2(|at |+|at-1 |)
+
+varies as we increase our frame-rate. (Note that we vary our frame-rate artificially by
+
+sub-sampling frames).
+
+16
+
+Under review as a conference paper at ICLR 2018
+
+Relative Change in Layer Activation
+
+2.00 input
+
+1.75
+
+relu1_2 relu2_2
+
+1.50
+
+relu3_2 relu3_4
+
+relu4_2
+
+1.25 relu4_4
+
+conv5_1
+
+1.00 conv5_3
+
+0.75
+
+0.50
+
+0.25
+
+0.00 100 101 Frames/s
+
+Figure 12: The average relative change in layer activation between frames, as frame-rate increases. For increasing network depth (red=shallow, violet=deep)
+
+17
+
+

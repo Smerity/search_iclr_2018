@@ -1,0 +1,469 @@
+Under review as a conference paper at ICLR 2018
+LEARNING A GENERATIVE MODEL FOR VALIDITY IN
+COMPLEX DISCRETE STRUCTURES
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Deep generative models have been successfully used to learn representations for high-dimensional discrete spaces by representing discrete objects as sequences, for which powerful sequence-based deep models can be employed. Unfortunately, these techniques are significantly hindered by the fact that these generative models often produce invalid sequences: sequences which do not represent any underlying discrete structure. As a step towards solving this problem, we propose to learn a deep recurrent validator model, which can estimate whether a partial sequence can function as the beginning of a full, valid sequence. This model not only discriminates between valid and invalid sequences, but also provides insight as to how individual sequence elements influence the validity of discrete objects. To learn this model we propose a reinforcement learning approach, where an oracle which can evaluate validity of complete sequences provides a sparse reward signal. We believe this is a key step toward learning generative models that faithfully produce valid discrete objects, and demonstrate its effectiveness in evaluating the validity of Python 3 source code for mathematical expressions, and generating SMILES string representations of molecules.
+1 INTRODUCTION
+Deep generative modeling has seen many successful recent developments, such as producing realistic images from noise (Radford et al., 2015) and creating artwork (Gatys et al., 2016). We find particularly promising the opportunity to leverage deep generative models for search in high-dimensional discrete spaces (Go´mez-Bombarelli et al., 2016b; Kusner et al., 2017). Discrete search is at the heart of problems in drug discovery (Go´mez-Bombarelli et al., 2016a), natural language processing (Bowman et al., 2016; Guimaraes et al., 2017), and symbolic regression (Kusner et al., 2017).
+This approach to attacking these discrete search problems works by `lifting' the search from discrete space to continuous space, via an autoencoder (Rumelhart et al., 1985). An autoencoder learns two mappings: 1) a mapping from discrete space to continuous space called an encoder; and 2) a reverse mapping from continuous space back to discrete space called a decoder. The discrete space is presented to the autoencoder in as a sequence in some formal language -- for example, in Go´mezBombarelli et al. (2016b) molecules are encoded as SMILES strings -- powerful sequential models (e.g., LSTMs (Hochreiter & Schmidhuber, 1997) GRUs (Cho et al., 2014), DCNNs (Kalchbrenner et al., 2014)) can then be applied to the string representation. Unfortunately, most sequences using the same characters as those in a valid SMILES string are not themselves actually valid SMILES: the string does not actually represent any real molecule structure. When employing these models as encoders and decoders, generation of invalid sequences is still possible, and currently this happens frequently. Kusner et al. (2017) aimed to fix this by using a context-free grammar to rule out generating syntactically invalid sequences. However, the grammar only describes syntactic constraints and cannot enforce semantic constraints, so certain invalid sequences can still be generated.
+In this paper, we propose a generative approach to modeling validity that can learn the validity constraints of a given discrete space. In section 2, we show how concepts from reinforcement learning may be used to define a suitable generative model and how this generative model can be approximated using Bayesian recurrent neural networks (Gal & Ghahramani, 2016). As the length of sequences grows, as well as the number of possible elements, it quickly becomes impossible to observe more than a vanishingly small subset of all possible sequences during training. To circumvent this, in
+1
+
+Under review as a conference paper at ICLR 2018
+
+0.5 ... 0.6
+LSTM cell
+
+0.6 0.3 ... ... 0.8 0.7
+LSTM cell
+embedding
+CC
+
+0.1 ... 0.9
+1
+
+0.1 ]
+
+0.4 [
+
+0.2 )
+
+0.1 (
+0.2 \ Figure 1: The LSTM model used to approxi-
+
+0.4 / 0.2 #
+
+mate the Q-function. A hypothetical logistic
+
+0.2 = function activation is shown for each char-
+
+0.2 + ... ...
+
+acter in C. Here the set of characters is the
+
+0.9 n SMILES alphabet and we use the first 3 char-
+
+0.9 c 0.9 I
+
+acters of the molecule in figure 3 as the input
+
+0.8 F example. The initial character is predicted
+0.9 P
+0.9 S from the first hidden state, and the LSTM
+
+0.9 O continues until the end of the sequence.
+0.9 N
+
+0.9 C
+
+0.9 B
+
+section 3 we describe methods for proposing high-quality candidate training sequences, including a novel approach to active learning for sequential tasks inspired by classic mutual-informationbased approaches (Houlsby et al., 2011; Herna´ndez-Lobato et al., 2014), and a data augmentation process based on applying minimal perturbations to known-valid sequences. This allows us to learn the proposed complex generative model with only a minimal number of examples. We test the quality of the the learned validity models by a series of experiments where we learn to discriminate syntactically and semantically valid sequences in two domains: mathematical expressions in the Python programming language, and the SMILES string representation of molecules.
+
+2 A MODEL FOR SEQUENCE VALIDITY
+
+To formalise the problem we denote the set of discrete sequences of length T by X = {(x1, . . . , xT ) : xt  C}, where C = {1, . . . , C} is an alphabet of size C, individual sequences in X are denoted x1:T . We assume the availability of a validator v : X  {0, 1}, an oracle which can tell us whether a given sequence is valid. Here, it is important to note that such a validator gives very sparse feedback: it can only be evaluated on a complete sequence. Examples of such validators are compilers for programming languages (which can identify syntax and type errors), or chemoinformatics software for parsing SMILES strings (which identify violations of valence constraints). Running the standard validity checker v(x1:T ) on a partial sequence or subsequence (e.g., the first t < T characters of a computer program) does not in general provide any indication as to whether the final complete program of length T is also valid.
+We aim to obtain a generative model for the sequence set V = {x1:T  X : v(x1:T ) = 1}, that is, the subset of valid sequences in X . To achieve this, rather than only having a access to the validator v(x1:T ) which operates on full sequences, we would ideally like to be able to query a more-informative function v~(x1:t) which operates on prefixes x1:t of a hypothetical longer sequence x1:T . We define v~(x1:t) as
+
+v~(x1:t) =
+
+1 0
+
+if there exists a suffix xt+1:T such that v(c[x1:t, xt+1:T ]) = 1, otherwise
+
+(1)
+
+where c[x1:t, xt+1:T ] concatenates a prefix and a suffix to form a complete sequence. The function v~(x1:t) can be used to determine whether a given prefix can ever successfully yield a valid outcome. Note that we are indifferent to how many suffixes yield valid sequences. If we had access to v~(x1:t), we could create a generative model for V which would form sequences from left to right, a single character at a time, using v~(x1:t) to provide early feedback as to which of the next character choices will surely not lead to a "dead end" from which no valid sequence can be produced.
+We frame the problem of obtaining a generative model for V as a Markov decision process (Sutton & Barto, 1998), and train a reinforcement learning agent to select characters sequentially in a manner which avoids producing invalid sequences. At time t = 1, . . . , T , an agent is in state x<t = x1:t-1 and can take actions xt  C. At the end of an episode, following action xT , the agent receives a reward of v(x1:T ). Since in practice we are only able to evaluate v(x1:T ) in a meaningful way on complete sequences, the agent does not receive any reward at any of the intermediate steps t < T . The optimal Q-function Q (s, a) (Watkins, 1989), a function of a state s and an action a, represents
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+the expected reward of an agent following an optimal policy which takes action a at state s. This
+optimal Q-function assigns value 1 to actions a = xt in state s = x<t for which there exists a suffix xt+1:T such that c[x1:t, xt+1:T ]  V, and value 0 to all other state/action pairs. This behaviour exactly matches the desired prefix validator in (1), that is, Q (x<t, xt) = v~(x1:t).
+
+Having access to Q would allow us to obtain a generative model for V. In particular, an agent following any optimal policy  (x<t) = argmaxxtC Q (x<t, xt), will always generate valid sequences. If we sample uniformly at random across all optimal actions at each time t = 1, . . . , T , we obtain the joint distribution given by
+
+p(x1:T
+
+)
+
+=
+
+T t=1
+
+Q
+
+(x<t, xt) Z (x<t )
+
+,
+
+(2)
+
+where Z(x<t) = xt Q (x<t, xt) are the per-timestep normalisation constants. This distribution allows us to sample sequences x1:T in a straightforward manner by sequentially selecting characters xt  C given the previously selected ones in x<t.
+
+We focus on learning an approximation to (2). For this, we use recurrent neural networks, which have
+recently shown remarkable empirical success in the modelling of sequencial data, e.g., in natural
+language processing applications (Sutskever et al., 2014). We approximate the optimal Q-function
+with a long-short term memory (LSTM) model Hochreiter & Schmidhuber (1997) that includes one output unit per character in C, with each output unit using a logistic activation function (see figure 1). We denote by y(xt|x<t, w) the value at time t of the LSTM output unit corresponding to character xt when the network weights are w the input is the sequence x<t. We interpret the neural network output y(xt|x<t, w) as p(Q (x<t, xt) = 1), that is, as the probability that action xt can yield a valid sequence given that the current state is x<t. We consider that the prediction errors of the LSTM model are independent. Therefore, a sequence x1:T will be valid according to our model if every action during the sequence generation process is permissible, that is, if Q (x<t, xt) = 1 for t = 1, . . . , T . Similarly, we consider that the sequence x1:T will be invalid if at least one action during the sequence generation process is not valid1 that is, if Q (x<t, xt) = 0 at least once for t = 1, . . . , T . This specifies the following log-likelihood function given a training set D = {(x1n:T , yn)}Nn=1 of sequences x1n:T  X and corresponding labels yn = v(x1:T ):
+
+N
+L(w|D) = {yn log p(yn = 1|xn1:T , w) + (1 - yn) log p(yn = 0|xn1:T , w)} ,
+n=1
+
+(3)
+
+where, as described above, we define
+
+T
+p(yn = 1|x1n:T , w) = y(xt|x<t, w) ,
+t=1
+
+T
+p(yn = 0|xn1:T , w) = 1 - y(xt|x<t, w) ,
+t=1
+
+(4)
+
+according to our model's predictions. The log-likelihood (3) can be optimised using backpropagation and stochastic gradient descent. Let w^ be the resulting maximizer. Then, when D is very large and the LSTM model has sufficient capacity, it can be shown that y(xt|x<t, w^)  Q (x<t, xt) for all xt and for all states x<t that can be reached by following any possible optimal policy  (x<t). This result is independent of the sampling distribution used to construct D.
+
+Instead of directly maximising (3), we can follow a Bayesian approach to obtain estimates of uncertainty in the predictions of our LSTM model. For this, we can introduce dropout layers which stochastically zero-out units in the input and hidden layers of the LSTM model according to a Bernoulli distribution (Gal & Ghahramani, 2016). Under the assumption of a Gaussian prior p(w) over weights, the resulting stochastic process yields an implicit approximation q(w) to the posterior distribution p(w|D)  exp(L(w|D))p(w).
+
+3 ONLINE GENERATION OF SYNTHETIC TRAINING DATA
+One critical aspect of learning w as described above is how to generate the training set D in a sensible manner. A na¨ive approach could be to draw elements from X uniformly at random. However, in
+1 Note that, once Q (x<t, xt) is zero, all the following values of Q (x<t, xt) in that sequence will be irrelevant to us. Therefore, we can safely assume that a sequence is invalid if Q (x<t, xt) is zero at least once in that sequence.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+many cases, X contains only a tiny fraction of valid sequences and the uniform sampling approach produces extremely unbalanced sets which are useless in practice. While rejection sampling can be used to increase the number of positive samples, the resulting additional cost makes such an alternative infeasible in most practical cases. The problem gets typically worse as the sequence length T increases since |X | always grow as |C|T , while |V| will typically grow at a lower rate.
+We employ two approaches for artificially constructing balanced sets that permit learning these models in far fewer samples than |C|T . In settings where we do not have a corpus of known valid sequences, Bayesian active learning can automatically construct the training set D. These methods work by iteratively selecting sequences in X that are maximally informative about the model parameters w given the data collected so far (MacKay, 1992). When we do have a set of known valid sequences, we can use these to seed a process for generating balanced sets by applying random perturbations to valid sequences.
+
+3.1 ACTIVE LEARNING
+
+Let x1:T denote an arbitrary sequence and let y be the unknown binary label indicating whether x1:T is valid or not. Our model's predictive distribution for y, that is, p(y|x1:T , w) is given by (4). The amount of information on w that we expect to gain by labeling and adding x1:T to D can be measured in terms of the expected reduction in the entropy of the posterior distribution p(w|D). That is,
+
+(x1:T ) = H[p(w|D)] - Ep(y|x1:T ,w)H[p(w|D  (x1:T , y)] ,
+
+(5)
+
+where H(·) computes the entropy of a distribution. This formulation of the entropy-based active
+learning criterion is, however, difficult to approximate because it requires to work with the entropy of p(w|D) which is intractable. To obtain a simpler expression we follow Houlsby et al. (2011) and note that (x1:T ) is equal to the mutual information between y and w given x1:T and D:
+
+(x1:T ) = H{Ep(w|D)[p(y|x1:T , w)]} - Ep(w|D){H[p(y|x1:T , w)]} ,
+
+(6)
+
+which is easier to work with because it only requires to compute expectations with respect to p(w|D)
+and these can be easily approximated by Monte Carlo. The expression above also requires to compute the entropy of Bernoulli predictive distributions. Let B(z|p) = pz(1 - p)1-z be a Bernoulli distribution on z with probability p. The entropy of B(z|p) can be easily obtained as
+
+H[B(z|p)] = -p log p - (1 - p) log(1 - p)  g(p) .
+
+(7)
+
+We could then sequentially construct D by optimising (6). However, this optimisation process would still be difficult, as it would require evaluating (x1:T ) exhaustively on all the elements of X . To avoid this, we follow a greedy approach and construct our informative sequence in a sequential manner. In
+particular, at each time step t = 1, . . . , T , we select xt by optimising the mutual information between w and Q (x<t, xt), where x<t denotes here the prefix already selected at previous steps of the optimisation process. This mutual information quantity is denoted by (xt|x<t) and its expression is given by
+
+(xt|x<t) = H{Ep(w|D)[B(z|y(xt|x<t, w))]} - Ep(w|D){H[B(z|y(xt|x<t, w))]} , (8)
+
+where the binary variable z represents the model's predictions for Q (x<t, xt). The generation of an informative sequence can then be performed efficiently by sequentially optimizing (8), an operation that requires only |C| × T evaluations of (xt|x<t).
+To obtain an approximation to (8), we first approximate the posterior distribution p(w|D) with q(w) and then estimate the expectations in (8) by Monte Carlo using K samples drawn from q(w). The resulting estimator is given by
+
+^(xt | x<t) = g
+
+1 K
+
+K
+
+y(xt|x<t, wk)
+
+-1 K
+
+K
+
+g[y(xt|x<t, wk)] ,
+
+k=1
+
+k=1
+
+(9)
+
+where w1, . . . , wK  q(w) and g(·) is defined in (7). The nonlinearity of g(·) means that our Monte Carlo approximation is biased, but still consistent. In practice, reasonable estimates can be obtained even for small K. In our experiments we use K = 16.
+
+The iterative procedure just described is designed to produce a single informative sequence. However, in practice, we would like to generate a batch of informative and diverse sequences. The reason
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+for this is that, when training neural networks, processing a batch of data is computationally more efficient than processing individually multiple data points. To construct a batch with L informative sequences, we propose to repeat the previous iterative procedure L times. To introduce diversity in the batch-generation process, we "soften" the greedy maximisation operation at each step by injecting a small amount of noise in the evaluation of the objective function (Finkel et al., 2006). Besides introducing diversity, this can also lead to better overall solutions than those produced by the noiseless greedy approach (Cho, 2016). We introduce noise into the greedy selection process by sampling from
+
+p(xt|x<t, ) =
+
+exp{(xt|x<t)/} xtC exp{(xt|x<t)/}
+
+(10)
+
+for each t = 1, . . . , T , which is a Boltzmann distribution with sampling temperature . By adjusting this temperature parameter, we can trade off the diversity of samples in the batch vs. their similarity.
+
+3.2 DATA AUGMENTATION
+In some settings, such as the molecule domain we will consider later, we have databases of knownvalid examples (e.g. collections of known drug-like molecules). Training directly on sequences which are valid has a danger of overfitting to only the subset of the space covered by the data, rather than the entire domain of X ; furthermore, if the model views primarily valid sequences during training then the batches of data will be quite non-uniform.
+We address this by augmenting a database of valid sequences x1:T with additional, minimallyperturbed invalid sequences x1:T . This is constructed by setting each xt to be a symbol selected independently from C with probability , while remaining the original xt with probability 1 - . In expectation this changes T entries in the sequence. We choose  = 0.05, which generates synthetic data which, despite its high per-character overlap with original SMILES strings, empirically produces valid sequences less than 1% of samples.
+
+4 EXPERIMENTS
+After training, we have learned a model y(xt|x<t, w) which can be used to approximate the optimal Q (x<t, xt), and thus to estimate the potential for valid sub-sequences to have valid suffixes. To evaluate this we first consider how this Q-function approximation can be used to define optimal policies  , exploring the tradeoff between accuracy rate when estimating v~(x1:t) and the coverage over the full space of valid prefixes in X , in the context of generating mathematical expressions in the Python 3 programming language, and in generating valid molecules in the SMILES language.
+
+4.1 MATHEMATICAL EXPRESSIONS
+The value of sequential Bayesian active learning can be demonstrated in the context of Python 3 mathematical expressions. Here we base the expressions on the alphabet of numbers and symbols shown in table 1. Length 25 strings of these characters are run using the Python 3 eval function to evaluate their validity. This either returns the result of the calculation if valid or raises an exception. The expressions in this experiment are all of one fixed length.
+Table 1: Python 3 expression alphabet
+
+digits
+
+operators comparisons brackets
+
+1234567890 +-*/%!
+
+=<>
+
+()
+
+The key in these experiments is that we do not assume the existence of a data set of positive examples
+that could be used in model training. To benchmark against the active learning approach, we train an identical network using data uniformly sampled from X , which has 1.14 × 1033 total elements.
+Sampling uniformly for a very long duration allows us to estimate the total size of the valid subset X+  X is approximately 3.17 × 1029, meaning that drawing at random would only yield a valid sequence on the order of one every ten thousand samples.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+V-H AUC entropy
+
+60
+40
+20 active passive
+0 0 50 100 150 200
+training sequences / thousands
+
+80
+
+60
+
+40
+
+20
+0 0.0
+
+active passive
+0.2 0.4 0.6 0.8 1.0
+validity fraction of samples
+
+Figure 2: Experiments with length 25 Python expressions. (Left) Area under validity-entropy curve as training progresses. Active learning converges faster and reaches a higher maximum. (Right) Entropy versus validity for median active and median passive model after 200K training sequences. Both models have learnt to generate valid sequences with high entropy.
+Table 2: Estimated lower bound of coverage N for Passive and Active models, defined as the size of the set of Python expressions the model places positive probability mass on. Evaluated on models trained until convergence, at 800, 000 training points (beyond scope of figure 2). The lower bound estimation method is detailed in Appendix B.
+
+temperature 
+0.100 0.025 0.005
+
+passive model
+
+validity
+
+N
+
+0.850 0.969 1.000
+
+9.7 × 1027 2.9 × 1025 1.1 × 1022
+
+active model
+
+validity
+
+N
+
+0.841 0.995 1.000
+
+8.2 × 1028 4.3 × 1027 1.3 × 1027
+
+Instead of defining a surrogate validation distribution to measure against, we measure the performance
+of the model in terms of its ability to generate diverse valid sequences. To do so requires defining a probabilistic model we can simulate from, as a function of our learned Q-function approximations y(xt|x<t, w). A standard approach for this is a Boltzmann policy, i.e. a policy which samples next actions according to
+
+(xt = c|x<t, w,  ) =
+
+exp(y(c|x<t, w)/ ) jC exp(y(j|x<t, w)/ )
+
+(11)
+
+where  is a temperature constant that governs the tradeoff between exploration and exploitation. Note that this is not the same as the Boltzmann distribution used as a proposal generation scheme during active learning, which was defined not on Q-function values but rather on the estimated mutual information. We obtain samples {x(1), . . . , x(N)}i for a range of temperatures i and compute the validity fraction and entropy of each set of samples. These points now plot a curve of the tradeoff between validity and entropy that a given model provides. Without a preferred level of sequence validity, the area under this validity-entropy curve (V-H AUC) can be utilised as a metric of model quality.
+
+The use of a Boltzmann policy allows us to tune the temperature parameter to identify policies which hit high levels of accuracy for any learned Q-function approximation. However, this is counterbalanced by a decrease in coverage, yielding false negatives. We will see that the Q-function approximation estimated by the active learning approach allows us to demand accuracy > 99% while still maintaining very high coverage over the space X , as measured by the entropy of the distribution. Figure 2 shows the validity-entropy curve of the proposed Bayesian LSTM model trained on length 25 Python expressions, representing the tradeoff between policies at different sampling temperatures. To provide some context for these, we estimate an information theoretic lower bound for the fraction of the set X+ that our model is able to generate. This translates to upper bounding the false negative
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+SMILES: 'CC1CN(C(=O)C2=CC(Br)=CN2C)CCC1[NH3+]'
+
+example invalid sequences: reason:
+
+'CC1CN(C(=OC' 'CC1CN(C(=O)C2=CC(BrC' 'CC1CN(C(=O)C2=F' 'CC1CN(C(=O)C2=CC(BrF'
+'CC1CN(C()' 'CC1CN(C(=)' ']'
+
+O has too many bonds Br has too many bonds F cannot have double bond Br, F have too many bonds cannot have empty branch ()
+branch must have atoms cannot have ] before [
+
+Figure 3: Predictions y(xt|x<t, w) of the agent at each step t for the given (valid) test molecule at in the top left figure, shown over a subset of possible actions (selecting as next character C, F, ), or ]) on the axis on the left. Each column shows which characters the trained agent believes are valid at each t, given the characters x<t preceding it. We see that the validity model has learned basic valence constraints: for example the oxygen atom O at position 10 can form at most 2 bonds, and since it is preceded by a double bond, the model knows that neither carbon C nor fluorine F can immediately follow it at position 11; we see the same after the bromine Br at position 18, which can only form a single bond. The model also correctly identifies that closing branch symbols ) cannot immediately follow opening branches (after positions 6, 8, and 17), as well as that closing brackets ] cannot occur until an open bracket has been followed by at least one atom (at positions 32­35). The full output heatmap for this example molecule is in Figure 4 in the appendix.
+
+rate for our model. We also see Bayesian active learning converge faster per sample, with little additional computational cost; per 10,000 data points, training runtime is 31 seconds with the passive approach, and 38 seconds with active.
+
+4.2 SMILES MOLECULES
+One of the most common representations for molecules is as SMILES strings Weininger (1970). The top left of Figure 3 shows an example SMILES string and its corresponding molecule. A SMILES string is an ordering of atoms and bonds. It is attractive for many applications because it maps the graphical representation of a molecule to a sequential representation. This comes at the cost of intricate dependencies in SMILES strings that are dictated by chemical constraints. For instance, the atom Bromine (Br) can only bond with a single other atom. This means that it may only occur at the beginning or end of a SMILES string, or within a so-called `branch' which are denoted with the characters (, ). The top right of Figure 3 shows more such examples: strings which are invalid SMILES because of a single error, shown in red. The full SMILES alphabet is shown in Table 3.
+Table 3: SMILES alphabet
+
+atoms/chirality
+
+bonds/ringbonds charges branches/brackets
+
+B CNO S P F I c n o s H Cl Br @ =#/\12345678 -+
+
+()[]
+
+Whereas previous experiments focused on fixed length expressions, in order to test on real data sets we extend our framework to deal with variable length expressions. To so we introduce a terminal character ` ' to the alphabet. Because of the size and complexity of the space of possible molecules, at lengths T > 20 uniform sampling from the alphabet is unlikely to find a single valid molecule. Thus, we propose a new approach. We use a subset of the ZINC drug molecule dataset, used in Go´mez-Bombarelli et al. (2016b), to train models of SMILES validity. The dataset consists of strings of length no more than T  120, which implies a |X | = 5.65 × 10189.
+7
+
+Under review as a conference paper at ICLR 2018
+
+Dataset
+Zinc (test) USPTO Solubility
+
+passive model Accuracy (valid) Accuracy (invalid)
+1.0 0.77 0.96 0.77 0.53 0.65
+
+active model Accuracy (valid) Accuracy (invalid)
+0.98 0.79 0.86 0.70 0.64 0.78
+
+Table 4: Accuracy on known positive and negative examples of molecules. Negative examples are obtained using augmentation technique described in section 3.2.
+
+We train two distinct models: (1) a data-augmented model which trains on minibatches of 10 ZINC sequences and 10 random sequences which are a mix of uniform random, and random generated by perturbing known-valid ZINC molecules; and (2) an active model, which includes 10 actively constructed sequences, 5 ZINC molecules, and 5 random which may be either uniform or perturbed ZINC molecules. These splits are chosen to obtain an approximately balanced number of positive and negative examples per batch; other parameters are specified in appendix A.
+
+We test the predictions of the models on held-out data sequences, both from the ZINC dataset as well
+
+as from two completely external datasets (one a dataset for estimating molecule solubility, the other
+
+taken as a set of reaction outcomes from the USPTO 15k dataset). These are true held-out molecules,
+
+and represent challenging benchmarks for generalization. Recalling that a sequence is considered
+
+invalid if v~(x1:t) = 0 at any t  T , we take the prediction of each model for a molecule x1:T as
+
+T t=1
+
+I
+
+[y(xt|x<t,
+
+w)
+
+
+
+0.5],
+
+and
+
+compare
+
+this
+
+to
+
+its
+
+true
+
+label.
+
+Solubility
+
+contains
+
+many
+
+sequences
+
+that are not alike any seen in the Zinc training data. Unsurprisingly, the active model performs better
+
+in this domain. On the other two data sets, the augmentation technique is better at identifying valid
+
+molecules.
+
+5 DISCUSSION
+By combining a Bayesian recurrent neural network with mutual-information-based active learning and a data augmentation scheme, the model we propose in this paper enables learning of valid sequences which would otherwise not be possible due to the vanishingly small number of valid sequences obtained when na¨ively sampling from the data generating distribution.
+These benefits are reflected in the experimental results: on a dataset of Python expressions with a length that allows enough valid examples to train a passive model, we show that the active learning approach converges much faster. For longer sequences the benefits are much greater: for the SMILES molecules, naively fitting to the data does not yield a model that is able to generate valid sequences or successfully generalize. Beyond providing practical improvements in drug discovery and program synthesis tasks, we hope this approach here can be adapted to learn validity estimators in new, novel domains.
+
+REFERENCES
+Samuel R. Bowman, Luke Vilnis, Oriol Vinyals, Andrew M. Dai, Rafal Jo´zefowicz, and Samy Bengio. Generating sentences from a continuous space. In Proceedings of the 20th SIGNLL Conference on Computational Natural Language Learning, (CoNLL), pp. 10­21, 2016.
+Kyunghyun Cho. Noisy parallel approximate decoding for conditional recurrent language model. arXiv preprint arXiv:1605.03835, 2016.
+Kyunghyun Cho, Bart Van Merrie¨nboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio. Learning phrase representations using rnn encoder-decoder for statistical machine translation. arXiv preprint arXiv:1406.1078, 2014.
+Jenny Rose Finkel, Christopher D Manning, and Andrew Y Ng. Solving the problem of cascading errors: Approximate bayesian inference for linguistic annotation pipelines. In Proceedings of the 2006 Conference on Empirical Methods in Natural Language Processing, pp. 618­626. Association for Computational Linguistics, 2006.
+
+8
+
+Under review as a conference paper at ICLR 2018
+Yarin Gal and Zoubin Ghahramani. A theoretically grounded application of dropout in recurrent neural networks. In Advances in Neural Information Processing Systems, pp. 1019­1027, 2016.
+Leon A Gatys, Alexander S Ecker, and Matthias Bethge. Image style transfer using convolutional neural networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 2414­2423, 2016.
+Rafael Go´mez-Bombarelli, Jorge Aguilera-Iparraguirre, Timothy D Hirzel, David Duvenaud, Dougal Maclaurin, Martin A Blood-Forsythe, Hyun Sik Chae, Markus Einzinger, Dong-Gwang Ha, Tony Wu, et al. Design of efficient molecular organic light-emitting diodes by a high-throughput virtual screening and experimental approach. Nature Materials, 15(10):1120­1127, 2016a.
+Rafael Go´mez-Bombarelli, David Duvenaud, Jose´ Miguel Herna´ndez-Lobato, Jorge AguileraIparraguirre, Timothy D. Hirzel, Ryan P. Adams, and Ala´n Aspuru-Guzik. Automatic chemical design using a data-driven continuous representation of molecules. arXiv:1610.02415 [physics], October 2016b.
+Gabriel L. Guimaraes, Benjamin Sanchez-Lengeling, Pedro Luis Cunha Farias, and Aln AspuruGuzik. Objective-reinforced generative adversarial networks (organ) for sequence generation models. In arXiv:1705.10843, 2017.
+Jose´ Miguel Herna´ndez-Lobato, Matthew W Hoffman, and Zoubin Ghahramani. Predictive entropy search for efficient global optimization of black-box functions. In Advances in neural information processing systems, pp. 918­926, 2014.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Long short-term memory. Neural computation, 9(8): 1735­1780, 1997.
+Neil Houlsby, Ferenc Husza´r, Zoubin Ghahramani, and Ma´te´ Lengyel. Bayesian active learning for classification and preference learning. arXiv preprint arXiv:1112.5745, 2011.
+Nal Kalchbrenner, Edward Grefenstette, and Phil Blunsom. A convolutional neural network for modelling sentences. arXiv preprint arXiv:1404.2188, 2014.
+M. J. Kusner, B. Paige, and J. M. Herna´ndez-Lobato. Grammar Variational Autoencoder. International Conference on Machine Learning, March 2017.
+David JC MacKay. Information-based objective functions for active data selection. Neural computation, 4(4):590­604, 1992.
+Alec Radford, Luke Metz, and Soumith Chintala. Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks. arXiv:1511.06434 [cs], November 2015.
+David E Rumelhart, Geoffrey E Hinton, and Ronald J Williams. Learning internal representations by error propagation. Technical report, California Univ San Diego La Jolla Inst for Cognitive Science, 1985.
+Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks. In Advances in neural information processing systems, pp. 3104­3112, 2014.
+Richard S Sutton and Andrew G Barto. Reinforcement learning: An introduction, volume 1. MIT press Cambridge, 1998.
+Christopher John Cornish Hellaby Watkins. Learning from delayed rewards. PhD thesis, King's College, Cambridge, 1989.
+David Weininger. Smiles, a chemical language and information system. 1. introduction to methodology and encoding rules. In Proc. Edinburgh Math. SOC, volume 17, pp. 1­14, 1970.
+9
+
+Under review as a conference paper at ICLR 2018
+
+A APPENDIX: MODEL PARAMETERS AND IMPLEMENTATION DETAILS
+
+Model hyperparameters. There are a handful of free parameters in both the LSTM model and the training procedure. We document the values used in all experiments in table 5. For both models we used a distributed representation of the characters with a size of 50 as input to the LSTM (i.e., an embedding layer of size 50). The "mixture weight" for samples chosen via randomization denotes the percentage which are drawn uniformly (i.e. 30%); the remainder are constructed via random perturbations of known-valid sequences.
+
+parameter
+hidden size dropout probability
+batch size temperature  learning rate weight decay data augmentation  mixture weight for random samples
+
+passive
+512 0.0 20 ­ 1e-4 1e-8 0.05 0.3
+
+active
+512 0.2 20 1e-7 1e-4 1e-8 0.05 0.3
+
+Table 5: Model parameters
+
+B COVERAGE ESTIMATION
+Ideally, we would like to check that the learned model y(xt|x<t, w) assigns positive probability to exactly those points which may lead to valid sequences, but for large discrete spaces this is impossible to compute or even accurately estimate. A simple check for accuracy could by to evaluate whether the model correctly identifies points as valid in a known, held-out validation or test set of real data, relative to randomly sampled sequences (which are nearly always invalid). However, if the validation set is too "similar" to the training data, even showing 100% accuracy in classifying these as valid may simply indicate having overfit to the training data: a discriminator which identifies data as similar to the training data needs to be accurate over a much smaller space than a discriminator which estimates validity over all of X .
+Instead, we propose to evaluate the trade-off between accuracy on a validation set, and an approximation to the size of the effect support of t y(xt|x<t, w) over X . Let X+ denote the valid subset of X . Suppose we estimate the fraction valid f+ = |X+|/|X | by simple Monte Carlo, sampling uniformly from X . We can then estimate N+ = |X+| by f+|X |, where |X | = CT , a known quantity. A uniform distribution over N+ sequences would have an entropy of log N+. We denote the entropy of output from the model H. If our model were perfectly uniform over the sequences it can generate, it would then be capable of generating Nmodel = eH . As our model at its optimum is extremely not uniform over elements x  X , this is very much a lower bound a coverage.
+
+10
+
+Under review as a conference paper at ICLR 2018
+
+Candidate symbol
+
+B C N O S P F I c n o s H Cl Br 1 2 3 4 5 6 7 8 @ + = # / \ ( ) [ ]
+C C 1 C N ( C ( = O ) C 2 = C C ( Br ) = C N 2 C ) C C C 1 [ N H 3 + ] Symbol in molecule
+
+1.0 0.8 0.6 0.4 0.2 0.0
+
+Figure 4: Full heatmap showing predictions y(xt|x<t, w) for the molecule in Figure 3.
+
+11
+
+

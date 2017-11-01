@@ -1,0 +1,861 @@
+Under review as a conference paper at ICLR 2018
+PARAMETERIZED HIERARCHICAL PROCEDURES FOR NEURAL PROGRAMMING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Neural programs are highly accurate and structured policies that perform algorithmic tasks by controlling the behavior of a computation mechanism. Despite its potential to increase the interpretability and the compositionality of the behavior of artificial agents, it remains difficult to learn from demonstrations neural networks that represent computer programs. The main challenges that set algorithmic domains apart from other imitation learning domains are the need for high accuracy, the involvement of specific structures of data, and the extremely limited observability. To address these challenges, we propose to model programs as Parameterized Hierarchical Procedures (PHPs). A PHP is a sequence of conditional operations, that uses a program counter, along with the observation, to select between taking an elementary action, invoking another PHP as a sub-procedure, and returning to the caller. We develop an algorithm for training PHPs from a mixture of annotated and unannotated demonstrations, and demonstrate efficient level-wise training of multi-level PHPs. We show in two benchmarks, NanoCraft and long-hand addition, that PHPs can learn neural programs more accurately from smaller amounts of strong and weak supervision.
+1 INTRODUCTION
+Representing the logic of a computer program with a parameterized model, such as a neural network, is a central challenge in AI with applications ranging from reinforcement learning to natural language. A salient feature of several recently-proposed approaches for learning programs (Reed & de Freitas, 2016; Cai et al., 2017; Li et al., 2017) is to leverage the natural hierarchical structure of function invocations present in most well-designed programs. Explicitly exposing this hierarchical structure enables learning neural programs with empirically superior generalization, compared to baseline methods with access only to elementary computer operations.
+These hierarchical approaches require some explicit supervision of the hierarchical structure, where the training data not only consists of low-level computer operations but is annotated with the higher level function calls (Reed & de Freitas, 2016; Cai et al., 2017). Li et al. (2017) tackled the problem of learning hierarchical neural programs from a mixture of annotated training data (hereafter called "strongly-supervised") and unannotated training data where only the elementary operations are given without their call-stack annotations (called "weakly-supervised"). In this paper, we also propose to learn hierarchical neural programs from a mixture of strongly-supervised and weakly-supervised data, using the Expectation­Gradient method and an explicit program counter in lieu of a high-dimensional real-valued state of a recurrent neural network.
+Our approach is inspired by recent work in robot learning and control. In Imitation Learning (IL), an agent learns to behave in its environment using supervisor demonstrations of the intended behavior. Recently proposed methods infer hierarchical control policy from demonstration data, where high-level behaviors are composed of low-level manipulation primitives. We explore a similar approach for program learning. However, existing approaches to IL are largely insufficient for addressing algorithmic domains, in which the target policy is program-like in its accurate and structured manipulation of inputs and data structures. An example of such domain is long-hand addition, where the computer loops over the digits to add, from least to most significant, calculating the sum and carry. In more complicated examples, the agent must correctly manipulate data structures to compute the right output.
+1
+
+Under review as a conference paper at ICLR 2018
+Three main challenges set algorithmic domains apart from other IL domains. First, the agent's policy must be highly accurate. Algorithmic behavior is characterized by a hard constraint of output correctness, where any suboptimal actions are simply wrong and considered failures. In long-hand addition, for example, any mistake in sequentially reading the digits or in producing output digits would render the entire output incorrect. In contrast, many tasks in physical and simulated domains tolerate errors in the agent's actions, as long as some goal region in state-space is eventually reached, or some safety constraints are satisfied. A second challenge is that algorithms often involve the utilization and manipulation of specific data structures, which may require the algorithmic policies themselves to be structured in particular ways. A third challenge is that the environment in algorithmic domains, which consists of the program input and the data structures, is almost completely unobservable. Depending on the model of computation implemented by the environment, the agent may only observe the values under the read heads in a Turing Machine; the top value in a stack machine; or the register values in a register machine.
+In this paper, we address these challenges by introducing Parameterized Hierarchical Procedures (PHPs), a structured model of algorithmic policies inspired by the options framework (Sutton et al., 1999). A PHP is a sequence of statements, such that each statement branches conditionally on the observation, to either (1) perform an elementary operation, (2) invoke another PHP as a sub-procedure, or (3) terminate and return control to the caller PHP. The index of each statement in the sequence serves as a program counter to accurately remember which statement was last executed and which one is next. The conditional branching in each statement is implemented by a neural network mapping the program counter and the agent's observation into the elementary operation, sub-procedure, or termination to be executed. The PHP model is detailed in Section 4.1.
+PHPs have the potential to address all three challenges of algorithmic domains. Accuracy is facilitated by the strict maintenance of two internal structures: a call stack containing the current branch of caller PHPs, and the current program counter of each PHP in the stack. When a statement invokes a PHP as a sub-procedure, this PHP is pushed into the call stack, which effectively appends it to the current call branch. When a statement terminates the current PHP, it is popped from the stack, returning control to the calling PHP to execute its next statement (or ending the entire episode). The stack also keeps the program counter of each PHP, which starts at 0, and is incremented each time a non-terminating statement is executed.
+We provide the stack and counters as hard-coded aspects of the agent's behavior. Since such constructs are widely useful in computer programs, they provide a strong inductive bias towards learning correct policies. Moreover, the call stack arranges the policy into a hierarchical structure, where a higher-level PHP can solve a task by invoking lower-level PHPs that solve sub-tasks. Such hierarchical structures are a fundamental part of computer progamming.
+Partial observability requires the agent to have memory, so that it can remember currently hidden aspects of the state that were observed before. A popular memory model is Recurrent Neural Networks (RNN), in which a parameterized function takes the previous agent memory state as input and outputs the next memory state. While this approach has been applied successfully in several settings, learning memory representations remains challenging; in particular, it is difficult to learn RNNs which will generalize to arbitrary input lengths beyond those seen in training. In contrast, the memory in PHPs is succinctly represented by the call stack and the program counters, whose structure enables learning to focus on the crucial aspects of the memory state transition, namely what PHPs to push and when to pop them.
+We experiment with PHPs in two benchmarks, the NanoCraft domain introduced in Li et al. (2017), and long-hand addition. We find that our algorithm is able to learn PHPs from a mixture of strongly and weakly supervised demonstrations with better performance than previous algorithms: it achieves better test performance with fewer demonstrations.
+In this paper we make three main contributions:
+· We introduce the PHP model and discuss its benefits.
+· We propose an Expectation-Gradient algorithm for training PHPs from a mixture of annotated and unannotated demonstrations (strong and weak supervision).
+· We demonstrate efficient training of multi-level PHPs on NanoCraft (Li et al., 2017) and long-hand addition (Reed & de Freitas, 2016), and achieve superior results to existing work.
+2
+
+Under review as a conference paper at ICLR 2018
+
+Task specification format
+
+System
+
+Input-output Natural pairs language
+
+Graves et al. (2014); Joulin & Mikolov (2015); Kaiser & Sutskever (2016); Sukhbaatar et al. (2015) Neelakantan et al. (2015); Andreas et al. (2016) Andreas et al. (2017) NPI (Reed & de Freitas, 2016)
+Recursive NPI (Cai et al., 2017)
+NPL (Li et al., 2017)
+Our work
+
+
+
+    
+
+
+
+    
+
+Execution traces
+
+Low-level Higher-level
+
+actions
+
+structure
+
+
+
+
+   (recursive)  Mixed  Mixed
+
+Table 1: Summary of related work in neural programming. Each column indicates which data is provided to and made use of by the system. "Mixed" indicates that a fraction of the training data contains the higher-level structure.
+
+2 RELATED WORK
+2.1 NEURAL PROGRAMMING
+Using input­output examples to specify a task has been a common setting for learning programs with neural networks. Neural network architectures such as Recurrent Neural Networks (RNNs), and Long Short-Term Memory (LSTM) in particular, are capable of representing arbitrary mappings between inputs and outputs of variable length. However, it is very difficult for these architectures to learn to represent an underlying program or algorithm, such as sorting or long-hand addition, by the standard method of gradient descent with input­output examples. Various architectures, such as the Neural Turing Machine (Graves et al., 2014), Stack RNNs (Joulin & Mikolov, 2015), the Neural GPU (Kaiser & Sutskever, 2016), and End-to-End Memory Networks (Sukhbaatar et al., 2015), have been proposed for learning neural programs from input­output examples, with components such as a variable-sized memory and novel addressing mechanisms facilitating the training process.
+In contrast, our work considers the setting where, along with the input­output examples, execution traces are available which describe the steps necessary to solve a given problem. The Neural Programmer-Interpreter (NPI, Reed & de Freitas (2016)) learns hierarchical policies from execution traces which not only indicate the low-level actions to perform, but also higher-level abstractions which provide a structure over them. Cai et al. (2017) showed that learning from an execution trace with recursive structure enables perfect generalization. Neural Program Lattices (Li et al., 2017) work within the same setting as the NPI, but can learn from a dataset of execution traces where only a small fraction contains information about the higher-level hierarchy.
+Other works use neural networks as a tool for outputting programs written in a discrete programming language, rather than having the neural network itself represent a program. Balog et al. (2016) learned to generate programs for solving competition-style problems. Devlin et al. (2017) and Parisotto et al. (2016) generate programs in a domain-specific language for manipulating strings in spreadsheets.
+2.2 HIERARCHICAL CONTROL
+Automatic discovery of hierarchical structure has been well-studied, and successful approaches include action-sequence compression (Thrun & Schwartz, 1994), identifying important transitional states (McGovern & Barto, 2001; Menache et al., 2002; S¸ ims¸ek & Barto, 2004; Stolle, 2004; Lakshminarayanan et al., 2016), learning from demonstrations (Bui et al., 2002; Krishnan et al., 2015; Daniel et al., 2012; Krishnan et al., 2016), considering the set of initial states from which the MDP can be solved (Konidaris & Barto, 2009; Konidaris et al., 2012), policy gradients Levy & Shimkin
+3
+
+Under review as a conference paper at ICLR 2018
+
+(2011), information theoretic considerations (Genewein et al., 2015; Fox et al., 2016; Jonsson & Gómez, 2016; Florensa et al., 2017), active learning (Hamidi et al., 2015), and recently value-function approximation (Bacon et al., 2016; Heess et al., 2016; Sharma et al., 2017).
+Our approach is inspired by the Discovery of Deep Options (DDO) algorithm of Fox et al. (2017). Following the work of Daniel et al. (2016), who use Expectation­Maximization (EM) to train an Abstract Hidden Markov Model (Bui et al., 2002), DDO parametrizes the model with neural networks where complete maximization in the M-step is infeasible. Instead, DDO uses Expectation­Gradient (EG) to take a single gradient step using the same forward­backward E-step as in the EM algorithm. A variant of DDO for continuous action spaces (DDCO) has shown success in simulated and physical robot control (Krishnan et al., 2017). Our PHPs extend this framework by introducing a program counter at each level of the hierarchy, and we develop an efficient EG algorithm for level-wise training with these program counters.
+
+3 PROBLEM STATEMENT
+
+Computation can be modeled as a deterministic dynamical system, where the computer is an agent interacting with its environment, which consists of the program input and its data structures. Mathematically, the environment is a Deterministic Partially Observable Markov Decision Process (DETPOMDP (Bonet, 2009)), which consists of a state (or configuration) space S, an observation space O, an action space A, the state-dependent observation otpstq, and the state transition st`1 " f pst, atq. The initial state s0 includes the program input, and is generated by some distribution p0ps0q.
+In partially observable environments, the agent often benefits from maintaining memory mt of past observations, which reveals currently hidden aspects of the current state. The agent has a parametrized stochastic policy , in some parametric family  P , where pmt, at|mt´1, otq is the probability of updating the memory state from mt´1 to mt and taking action at, when the observation is ot. The policy can be rolled out to induce the stochastic process ps0:T , o0:T , m0:T ´1, a0:T ´1q, such that upon observing oT the agent chooses to terminate the process.
+In Imitation Learning (IL), the learner is provided with direct supervision of the correct actions to take. The setting we use is Behavior Cloning (BC), where the supervisor rolls out its policy ° to generate a batch of demonstrations before learning begins, and the agent's policy is trained to minimize a loss on its own selection of actions in demonstrated states, with respect to the demonstrated actions.
+
+We distinguish between two modes of supervision. In strong supervision, the demonstrations contain not only the sequence of observable variables  " po0:T , a0:T ´1q, containing the supervisor's actions, but also the sequence of the supervisor's memory states  " m0:T ´1, which are normally latent. This allows the agent to directly imitate not just the actions, but also memory updates of the supervisor,
+for example by maximizing the log-likelihood of the policy given the demonstrations
+
+Ti ´1
+
+ÿ ÿÿ
+
+arg max log Ppi, i|q " arg max
+
+log pmi,t, ai,t|mi,t´1, oi,tq,
+
+i
+
+ i t"0
+
+the latter being the negative cross-entropy loss with respect to the demonstrations.
+
+In weak supervision, on the other hand, only the observable trajectories  are given as demonstrations.
+
+This
+
+makes
+
+it
+
+difficult
+
+to
+
+maximize
+
+the
+
+likelihood
+
+Pp|q
+
+"
+
+
+
+
+Pp ,
+
+|q,
+
+due
+
+to
+
+the
+
+large
+
+space
+
+of
+
+possible memory trajectories .
+
+4 PARAMETRIZED HIERARCHICAL PROCEDURES
+
+4.1 DEFINITION
+
+4.1.1 HIERARCHICAL PROCEDURES
+
+A finite set H of hierarchical procedures can be defined recursively as follows. Each hierarchical
+
+procedure h P H is operation statement
+
+ahseaqnudeancteermh0in, ath1io, .n.s.taotfesmtaetnetmehn.tsT.hAe
+
+ostpaetreamtieonntstahte"mepnth, hh:
+
+q consists of an O Ñ A Y H is
+
+a conditional branching block that selects at step  of procedure h, based on the external observation,
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+a0 dd(o0) = add1 a0 dd1(o0) = write
+
+w0 rite(o1) = 1
+
+a0 dd1(o1) = 0 a1 dd1(o1) = carry
+
+add 0
+
+add1 0 add 0
+
+write 0 add1 0 add 0
+
+write 0 add1 0 add 0
+
+add1 0 add 0
+
+o0
+45 37
+
+w0 rite(o0) = WRITE(sum,2)
+
+o1
+
+45 37
+
+add1 1 add 0
+
+carry 0 add1 1 add 0
+
+c0 arry(o1) = MOVE(carry,L)
+
+45 37
+
+s0 t0
+
+2
+s1 t1
+
+2
+s2
+
+Figure 1: Execution of a Parametrized Hierarchical Procedure (PHP) on the long-hand addition
+domain. The highest level add executes a sub-routine add1 which further executes write. write takes the elementary action WRITE(sum,2), and returns to add1. add1 chooses not to return, incrementing its program counter to 1, and then executing carry, which in turn takes the elementary action MOVE(carry,L).
+
+either an elementary action to execute or another hierarchical procedure to invoke. The termination statement h : O Ñ t0, 1u is a conditional termination indicator that decides, based on the external observation, whether to terminate the procedure h after step  . One of the procedures is the root of
+the hierarchy.
+
+The semantics of this definition are given by the following control policy. The agent's memory
+
+maintains a stack rph1, 1q, . . . , phn, nqs of the active procedures and their program counters. Ini-
+
+tially, this stack contains only the root procedure and the counter is 0. Upon observing ot, the
+
+agent checks terminates, it
+
+whether the top procedure should terminate, i.e. hnn potq " is popped from the stack, and the next termination condition
+
+1. If the procedure hn
+
+n´1
+hn´1
+
+potq
+
+is
+
+consulted,
+
+and so on. For the first procedure hi to not terminate, we then increment the program counter, and
+
+select the operation hii`1potq. If this operation is an invocation of procedure hi1`1, we push that
+
+procedure
+
+into
+
+the
+
+stack
+
+with
+
+counter
+
+0,
+
+and
+
+consult
+
+its
+
+operation
+
+statement
+
+0
+hi1 `1
+
+pot
+
+q,
+
+and
+
+so
+
+on.
+
+Finally, upon the first procedure h1n1 to select an elementary action at, we save the memory state
+
+mt " rph1, 1q, . . . , phi, i ` 1q, ph1i`1, 0q, . . . , phn1 1 , 0qs, and take the action at in the world.
+
+In practice, we impose two limitations on this general definition. Our training algorithm in Section 4.2 does not support recursive procedures, i.e. cycles in the invocation graph. For simplicity, we also avoid procedures that can mix invoking other procedures and executing elementary actions. This is achieved by layering the procedures in levels, such that only the lowest-level procedures can execute elementary actions, and each higher-level procedure can only invoke procedures in the level directly below it. If necessary, we can define higher-level surrogate procedures for the elementary actions, so we do not lose generality from this limitation.
+
+4.1.2 PARAMETRIZED HIERARCHICAL PROCEDURES
+A Parametrized Hierarchical Procedure (PHP) is a representation of a hierarchical procedure by differentiable parametrization. In this paper, we represent each PHP by two multi-layer perceptrons (MLP) with ReLU activation, one for its operation statement and one for its termination statement. The input is a concatenation of the observation o and the program counter  , where  is provided to the MLPs as a real number. During training, we apply soft-argmax to the output of each MLP to
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+obtain stochastic statements h p¨|otq and h p¨|otq. During testing, we replace the soft-argmax with argmax, to obtain deterministic statements as before.
+
+4.2 TRAINING ALGORITHM
+
+In weak supervision, only the observable trajectory  " po0:T , a0:T ´1q is available in a demonstration, and the sequence of memory states  " m0:T ´1 is latent. This poses a challenge, since the space of possible memory trajectories  has size exponential in the length of the demonstration, which
+at first seems to prohibit the computation of the log-likelihood gradient  log Pp|q, needed to
+maximize the log likelihood via gradient ascent.
+
+We use the Expectation­Gradient (EG) trick to ascend on a log-likelihood with latent variables and deep parametrizations (Salakhutdinov et al., 2003). This method has been previously used in dynamical settings to play Atari games (Fox et al., 2017) and to control simulated and physical robots (Krishnan et al., 2017), and is made possible by the following observation:
+
+
+
+log
+
+Pp|q
+
+"
+
+1 Pp|q
+
+
+
+Pp|q
+
+"
+
+ÿ
+
+
+1 Pp|q
+
+
+
+Pp, |q
+
+"
+
+ÿ
+
+
+Pp, |q Pp|q
+
+
+
+log
+
+Pp ,
+
+|q
+
+"
+
+E |, r
+
+log
+
+Pp ,
+
+|qs,
+
+(1)
+
+where the first and third equations follow from the likelihood ratio trick. In the E-step, we find the posterior distribution of  given the observed  and the current parameter . In the G-step, we use this posterior to calculate and apply the gradient of the observable log likelihood, by finding the exact
+expected gradient of the full log likelihood.
+
+We start by assuming a shallow hierarchy, where the root PHP calls level-one PHPs that only perform elementary operations. We relax this assumption in Section 4.2.1. At any time t, the stack contains two PHPs, the root PHP and the PHP it invoked to select the elementary action. The stack also contains the program counters of these two PHPs, however we ignore the root counter to reduce complexity, and bring it back when we discuss multi-level hierarchies in the next section.
+
+Let us denote by h pat|otq and h pbt|otq, respectively, the stochastic operation and termination statements of procedure h P H Y tKu, where K is the root PHP. Let pht, tq be the top stack frame when action at is selected. With these, the EG trick gives us the gradient of the observable
+demonstration
+
+T ´1~
+
+ÿÿ
+
+ Pp|q "
+
+vtph, 0q log Kph|otq
+
+hPH t"0
+
+t~
+
+ÿ `
+
+vtph,  q log h pat|otq
+
+ "0
+
+` wtph,  q log h p0|ot`1qq
+
+¸¸
+
+` pvtph,  q ´ wtph,  qq log h p1|ot`1q .
+
+(2)
+
+where vtph, 0q and wtph, 0q are defined as: vtph,  q " Ppht"h, t" |, q wtph,  q " Ppht"h, t", t`1" `1|, q.
+These values computed by a forward-backward algorithm as described in Appendix A.
+
+4.2.1 TRAINING MULTI-LEVEL PHPS
+A naive attempt to generalize the same approach to multi-level PHPs would result in an exponential blow-up of the forward­backward state, which would need to include the entire stack. Instead, we train each level separately, iterating over the PHP hierarchy from the lowest level to the highest. If we denote by n the number of levels in the hierarchy, with 1 being lowest and n highest, then we train level i in the hierarchy after we've trained levels 1 through i ´ 1.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Two components are required to allow this separation. First, we need to use our trained levels 1 through i ´ 1 to abstract away from the elementary actions, and generate demonstrations where the level i ´ 1 PHPs are treated as the new elementary operations. In this way, we can view level i PHPs as low-level PHPs, whose operations are elementary in the demonstrations. This is easy to do in strongly supervised demonstrations, since we have the complete stack, and we only need to truncate the lowest i ´ 1 levels. In weakly supervised demonstrations, on the other hand, we need an algorithm for decoding the observable trajectories, and replacing the elementary actions with
+higher-level operations. We present such an algorithm below.
+
+The second component needed for level-wise training is approximate separation from higher levels that have not been trained yet. When we train level i  n ´ 1 via the EG algorithm in the previous section, the `root PHP' does not correspond to any real PHP. In all but the simplest domains, we cannot expect a single PHP to perfectly match the behavior of the n ´ i-level PHP hierarchy that actually selected the level i PHPs that generated the demonstrations. To facilitate better separation from higher levels, we augment the `root PHP' used for training with an LSTM, that approximates the n ´ i level stack memory as hLST M pat|o1, ¨ ¨ ¨ , otq.
+Separation from lower levels is achieved by rewriting weakly supervised demonstrations to show level i ´ 1 operations as elementary. After level i ´ 1 is trained, the level i ´ 1 PHPs that generated the demonstrations are decoded using the trained parameters. We considered three different decoding algorithms: (1) finding the most likely level i ´ 1 PHP at each time step, by taking the maximum over vt; (2) finding the Viterbi most likely latent trajectory of level i ´ 1 PHPs; (3) sampling from the posterior distribution Pp|, q over latent trajectories. Here we present the third algorithm, which we used in our experiments.
+
+After computing tph,  q and tph,  q, where the values of h are level i ´ 1 PHPs, we can compute for each step 0  t  T ´ 1
+
+ztph, , h1,  1q " Ppht"h, t", ht`1"h1, t`1" 1|, q
+
+"
+
+#
+
+1 Pp|q
+
+tph,
+
+h1"hwtph,
+
+ qh pat|otqh pot`1qKph1|ot`1qt`1ph1, q
+
+0q
+
+ 1"0  1" ` 1.
+
+We can then draw h0 according to v0p¨, 0q, take 0 " 0, and continue to draw each pht`1, t`1q from
+
+Ppht`1, t`1|ht, tq
+
+"
+
+z
+
+pht, t, ht`1, t`1 vtpht, tq
+
+q
+
+.
+
+5 EXPERIMENTS
+
+We evaluate our proposed method on the two settings studied by Li et al. (2017): NanoCraft, which involves an agent interacting in a grid world, and long-hand addition, which was also considered by Reed & de Freitas (2016) and Cai et al. (2017).
+
+5.1 NANOCRAFT
+Task description. The NanoCraft domain, introduced by Li et al. (2017), involves placing blocks in a two-dimensional grid world. The goal of the task is to control an agent to build a rectangular building of a particular height and width, at a specified location within the grid, by moving around the grid and placing blocks in appropriate cells.
+The state contains a 6 ^ 6 grid. In our version, each grid cell can either be empty or contain a block. The state also includes the current location of the agent, as well as the building's desired height, width, and location, expressed as the offset from the agent's initial location at the top left corner.
+The state-dependent observation otpstq reveals whether the grid cell at which the agent is located contains a block or not, and four numbers for the building's specifications. We provide each observation to the MLPs as a 5-dimensional real-valued feature vector.
+PHPs and elementary actions. The top-level PHP nanocraft executes (moves_r, moves_d, builds_r, builds_d, builds_l, builds_u, return). moves_r calls move_r a number
+
+7
+
+Under review as a conference paper at ICLR 2018
+Figure 2: Sample complexity in the NanoCraft domain. The accuracy is the fraction of completely correct test episodes, as a function of the number of demonstrations annotated with the supervisor's hierarchy. PHP-{16, 32, 64} shows our results for training PHPs from the indicated total number of demonstrations. The results for NPL-{64, 128, 256} and NPI provided by Li et al. (2017) are shown for comparison.
+of times equal to the building's horizontal location, and similarly for moves_d w.r.t. move_d and the vertical location; builds_r w.r.t. build_r and the building's width; and so on for builds_d, builds_l, and builds_u. At the lowest level, move_r takes the elementary action MOVE_RIGHT and terminates, and similarly for move_d taking MOVE_DOWN. build_r executes (MOVE_RIGHT, if cell full: return, else: PLACE_BLOCK, return), and similarly for build_d, build_l, and build_u w.r.t. MOVE_DOWN, MOVE_LEFT, and MOVE_UP.
+Experiment setup. We trained our model on datasets of 4, 8, 16, 32, and 64 demonstrations, of which some are strongly supervised and the rest weakly supervised. We trained each level for 2000 iterations, iteratively from the lowest level to the highest. The results are averaged over 5 trials with independent datasets.
+Results. We find that 32 strongly supervised demonstrations are sufficient for achieving perfect performance at the task, although 16 such demonstrations obtain almost the same success rate (Figure 2). Intriguingly, it seems that adding weakly supervised demonstrations to the training set improves test performance when it is otherwise high, but hurts performance when it is already low. A possible explanation for this phenomenon is that weakly supervised demonstrations deepen several basins of attraction of the log-likelihood objective, only some of which coincide with the intended hierarchy. This facilitates convergence to the intended solution when the strongly supervised demonstrations are sufficient to guide the optimization into those basins, but otherwise hinders such convergence. Note that the alternative basins of attraction deepened by weakly supervised demonstrations are not necessarily bad policies, but they do not match the internal control hierarchy employed by the supervisor.
+5.2 LONG-HAND ADDITION Task description. The long-hand addition task was also considered by Reed & de Freitas (2016), Li et al. (2017), and Cai et al. (2017). In this task, our goal is to add two numbers represented in decimal, by starting at the rightmost column (least significant digit) and repeatedly summing each column to write the resulting digit and a carry if needed. The state consists of 4 tapes, as in a Turing Machine, corresponding to the first number, the second number, the carries, and the output. The state also includes the locations of 4 read/write heads, one for each tape. Initially, each of the first two
+8
+
+Under review as a conference paper at ICLR 2018
+
+2 5 9* 4 2 3* - - -* - - -*
+2 5 9* 4 2 3* - 1* - - 2*
+2 5* 9 4 2* 3 - 1* - - 2*
+
+add add1
+
+add1
+
+write
+
+write
+
+WRITE OUT 8
+
+WRITE OUT 2
+
+lshift
+
+carry
+
+MOVE INP1 LEFT
+
+MOVE CARRY LEFT
+
+MOVE INP2 LEFT
+
+WRITE CARRY 1
+
+MOVE CARRY LEFT
+
+MOVE CARRY RIGHT
+
+MOVE OUT LEFT
+
+lshift
+
+add1
+
+MOVE INP1 LEFT
+
+write
+
+MOVE INP2 LEFT
+
+WRITE OUT 6
+
+MOVE CARRY LEFT lshift
+
+MOVE OUT LEFT
+
+MOVE INP1 LEFT
+
+MOVE INP2 LEFT
+
+MOVE CARRY LEFT
+
+MOVE OUT LEFT
+
+Figure 3: An example trace for addition. Elementary actions are in capital letters.
+tapes contains the K digits of a number to be added, all other cells contain the empty symbol, and the heads point to the least significant digits.
+The state-dependent observation otpstq reveals the value of the digits (or empty symbol) pointed to by the pointers. The four values are provided to the MLPs in one-hot encoding, i.e., the input vector has 11 ` 11 ` 11 ` 11 dimensions with exactly one 1-valued entry in each group.
+PHPs and elementary actions. The top-level PHP add repeatedly calls add1 to add each column of digits. add1 calls write, carry, and lshift in order to compute the sum of the column, write the carry in the next column, and move the pointers to the next column. If the sum for a column is less than 10, then add1 does not call carry.
+There are two elementary actions: one which moves a specified pointer in a specified direction (e.g. MOVE CARRY LEFT, and one which writes a specified digit to a specified tape (e.g. WRITE OUT 2). write, carry, and lshift output the probability distribution over possible action and argument combinations as the product of 3 multinomial distributions, each with 2, 4, and 10 possibilities respectively.
+Experiment setup. Following Li et al. (2017), we trained our model on execution traces for inputs of each length 1 to 10. We used 16 traces for each input length, for a total of 160 traces.1 We experimented with providing 1, 2, 3, 5, and 10 strongly supervised traces per input length, with the remainder containing only the elementary actions.
+For training our model, we performed a search over two hyperparameters:
+· Weight on loss from strongly supervised traces: When the number of weakly supervised demonstrations overwhelms the number of strongly supervised traces, the model can learn a hierarchy which does not match the supervisor. By appropriately scaling up the loss contribution from the strongly supervised traces, we can ensure that the model learns to follow the hierarchy specified in them.
+· Use of  in : the termination condition h pbt|otq contains a dependence on  , the number of steps that the current procedure h has executed. However, sometimes the underlying definition for  does not contain any dependence on  : h1pb|oq " h2pb|oq " ¨ ¨ ¨ . In such a case, the MLP for h may learn a spurious dependency on  , and generalize poorly to values of  seen during test time. Therefore, we searched over whether to use  for  at each level of the hierarchy.
+Results. Our experimental results are summarized in Table 2. The previous work by Li et al. (2017) failed to learn a model which can generalize to all input lengths. In our experiments with the same sample complexity, we can learn models which generalize to length 1000 inputs with 100% empirical test accuracy.
+1While the dataset was randomly generated, we ensured that it contained at least one example of each possible column of numbers.
+9
+
+Under review as a conference paper at ICLR 2018
+
+Model
+NPI (Reed & de Freitas, 2016)2 NPL (Li et al., 2017) PHP
+
+Strongly-supervised traces
+160 10 3
+
+Accuracy for input length
+
+500 1000
+
+<100% 100% 100%
+
+<100% <100% 100%
+
+Table 2: Experimental results for addition task. All models were trained with 160 total traces, where each trace was for inputs of length 1 to 10.
+
+Moreover, we succeed at learning models with as few as 3 strongly supervised demonstrations per input length, compared to the 10 used by Li et al. (2017). However, we found that when the number of strongly supervised demonstrations was smaller than 10, early termination of the training of the top-level policy was needed to learn a correct model. To obtain our results, we evaluated different snapshots of the model generated during training.
+6 CONCLUSION
+In this paper we introduced the Parametrized Hierarchical Procedures (PHP) model for hierarchical representation of neural programs. We proposed an Expectation­Gradient algorithm for training PHPs from a mixture of strongly and weakly supervised demonstrations of an algorithmic behavior, showed how to perform level-wise training multi-level PHPs, and demonstrated the benefits of our approach on two benchmarks.
+Our results suggest that adding weakly supervised demonstrations to the training set can improve performance at the task, but only when the strongly supervised demonstrations already get decent performance. Weak supervision could attract the optimization process to a different hierarchical structure than intended by the supervisor, and in such cases we found it necessary to limit the number of weakly supervised demonstrations, or weight them less than demonstrations annotated with the intended hierarchy.
+An open question is whether the attractors strengthened by weak supervision are alternative but usable hierarchical structures, that are as accurate and interpretable as the supervisor's. Future work will explore the quality of solutions obtained by training from only weakly supervised demonstrations.
+REFERENCES
+Jacob Andreas, Marcus Rohrbach, Trevor Darrell, and Dan Klein. Learning to compose neural networks for question answering. arXiv preprint arXiv:1601.01705, 2016.
+Jacob Andreas, Dan Klein, and Sergey Levine. Modular multitask reinforcement learning with policy sketches. In Doina Precup and Yee Whye Teh (eds.), Proceedings of the 34th International Conference on Machine Learning, volume 70 of Proceedings of Machine Learning Research, pp. 166­175, International Convention Centre, Sydney, Australia, 06­11 Aug 2017. PMLR. URL http://proceedings.mlr.press/v70/andreas17a.html.
+Pierre-Luc Bacon, Jean Harb, and Doina Precup. The option-critic architecture. arXiv preprint arXiv:1609.05140, 2016.
+Matej Balog, Alexander L Gaunt, Marc Brockschmidt, Sebastian Nowozin, and Daniel Tarlow. Deepcoder: Learning to write programs. arXiv preprint arXiv:1611.01989, 2016.
+Blai Bonet. Deterministic pomdps revisited. In Proceedings of the twenty-fifth conference on uncertainty in artificial intelligence, pp. 59­66. AUAI Press, 2009.
+Hung Hai Bui, Svetha Venkatesh, and Geoff West. Policy recognition in the abstract hidden Markov model. JAIR, 17:451­499, 2002.
+2Result provided by Li et al. (2017).
+10
+
+Under review as a conference paper at ICLR 2018
+Jonathon Cai, Richard Shin, and Dawn Song. Making neural programming architectures generalize via recursion. In International Conference on Learning Representations, 2017. URL http: //arxiv.org/abs/1511.06279.
+Christian Daniel, Gerhard Neumann, and Jan Peters. Hierarchical relative entropy policy search. In AISTATS, pp. 273­281, 2012.
+Christian Daniel, Herke Van Hoof, Jan Peters, and Gerhard Neumann. Probabilistic inference for determining options in reinforcement learning. Machine Learning, 104(2-3):337­357, 2016.
+Jacob Devlin, Jonathan Uesato, Surya Bhupatiraju, Rishabh Singh, Abdel-rahman Mohamed, and Pushmeet Kohli. Robustfill: Neural program learning under noisy i/o. arXiv preprint arXiv:1703.07469, 2017.
+Carlos Florensa, Yan Duan, and Pieter Abbeel. Cstochastic neural networks for hierarchical reinforcement learning. In ICLR, 2017.
+Roy Fox, Michal Moshkovitz, and Naftali Tishby. Principled option learning in Markov decision processes. arXiv preprint arXiv:1609.05524, 2016.
+Roy Fox, Sanjay Krishnan, Ion Stoica, and Ken Goldberg. Multi-level discovery of deep options. arXiv preprint arXiv:1703.08294, 2017.
+Tim Genewein, Felix Leibfried, Jordi Grau-Moya, and Daniel Alexander Braun. Bounded rationality, abstraction, and hierarchical decision-making: An information-theoretic optimality principle. Frontiers in Robotics and AI, 2:27, 2015.
+Alex Graves, Greg Wayne, and Ivo Danihelka. Neural turing machines. CoRR, abs/1410.5401, 2014. URL http://arxiv.org/abs/1410.5401.
+Mandana Hamidi, Prasad Tadepalli, Robby Goetschalckx, and Alan Fern. Active imitation learning of hierarchical policies. In IJCAI, pp. 3554­3560, 2015.
+Nicolas Heess, Greg Wayne, Yuval Tassa, Timothy Lillicrap, Martin Riedmiller, and David Silver. Learning and transfer of modulated locomotor controllers. arXiv preprint arXiv:1610.05182, 2016.
+Anders Jonsson and Vicenç Gómez. Hierarchical linearly-solvable Markov decision problems. arXiv preprint arXiv:1603.03267, 2016.
+Armand Joulin and Tomas Mikolov. Inferring algorithmic patterns with stack-augmented recurrent nets. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett (eds.), Advances in Neural Information Processing Systems 28, pp. 190­ 198. Curran Associates, Inc., 2015. URL http://papers.nips.cc/paper/ 5857-inferring-algorithmic-patterns-with-stack-augmented-recurrent-nets. pdf.
+Lukasz Kaiser and Ilya Sutskever. Neural gpus learn algorithms. In International Conference on Learning Representations, 2016. URL http://arxiv.org/abs/1511.08228.
+George Konidaris and Andrew G Barto. Skill discovery in continuous reinforcement learning domains using skill chaining. In NIPS, pp. 1015­1023, 2009.
+George Konidaris, Scott Kuindersma, Roderic A. Grupen, and Andrew G. Barto. Robot learning from demonstration by constructing skill trees. IJRR, 31(3):360­375, 2012. doi: 10.1177/ 0278364911428653.
+Sanjay Krishnan, Animesh Garg, Sachin Patil, Colin Lea, Gregory Hager, Pieter Abbeel, and Ken Goldberg. Transition state clustering: Unsupervised surgical trajectory segmentation for robot learning. In ISRR, 2015.
+Sanjay Krishnan, Animesh Garg, Richard Liaw, Brijen Thananjeyan, Lauren Miller, Florian T Pokorny, and Ken Goldberg. SWIRL: A sequential windowed inverse reinforcement learning algorithm for robot tasks with delayed rewards. In WAFR, 2016.
+11
+
+Under review as a conference paper at ICLR 2018
+Sanjay Krishnan, Roy Fox, Ion Stoica, and Ken Goldberg. Ddco: Discovery of deep continuous options forrobot learning from demonstrations. In Conference on Robot Learning, 2017.
+Aravind S Lakshminarayanan, Ramnandan Krishnamurthy, Peeyush Kumar, and Balaraman Ravindran. Option discovery in hierarchical reinforcement learning using spatio-temporal clustering. arXiv preprint arXiv:1605.05359, 2016.
+Kfir Y Levy and Nahum Shimkin. Unified inter and intra options learning using policy gradient methods. In European Workshop on Reinforcement Learning, pp. 153­164. Springer, 2011.
+Chengtao Li, Daniel Tarlow, Alexander L Gaunt, Marc Brockschmidt, and Nate Kushman. Neural program lattices. In International Conference on Learning Representations, 2017.
+Amy McGovern and Andrew G. Barto. Automatic discovery of subgoals in reinforcement learning using diverse density. In ICML, pp. 361­368, 2001.
+Ishai Menache, Shie Mannor, and Nahum Shimkin. Q-cut--dynamic discovery of sub-goals in reinforcement learning. In ECML, pp. 295­306. Springer, 2002.
+Arvind Neelakantan, Quoc V Le, and Ilya Sutskever. Neural programmer: Inducing latent programs with gradient descent. arXiv preprint arXiv:1511.04834, 2015.
+Emilio Parisotto, Abdel-rahman Mohamed, Rishabh Singh, Lihong Li, Dengyong Zhou, and Pushmeet Kohli. Neuro-symbolic program synthesis. arXiv preprint arXiv:1611.01855, 2016.
+Scott Reed and Nando de Freitas. Neural programmer-interpreters. In International Conference on Learning Representations, 2016. URL http://arxiv.org/abs/1511.06279.
+Ruslan Salakhutdinov, Sam Roweis, and Zoubin Ghahramani. Optimization with EM and expectationconjugate-gradient. In ICML, pp. 672­679, 2003.
+Sahil Sharma, Aravind S. Lakshminarayanan, and Balaraman Ravindran. Learning to repeat: Fine grained action repetition for deep reinforcement learning. In ICLR, 2017.
+Özgür S¸ ims¸ek and Andrew G Barto. Using relative novelty to identify useful temporal abstractions in reinforcement learning. In ICML, pp. 95. ACM, 2004.
+Martin Stolle. Automated discovery of options in reinforcement learning. PhD thesis, McGill University, 2004.
+Sainbayar Sukhbaatar, arthur szlam, Jason Weston, and Rob Fergus. End-to-end memory networks. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett (eds.), Advances in Neural Information Processing Systems 28, pp. 2440­2448. Curran Associates, Inc., 2015. URL http://papers.nips.cc/paper/5846-end-to-end-memory-networks.pdf.
+Richard S Sutton, Doina Precup, and Satinder Singh. Between mdps and semi-mdps: A framework for temporal abstraction in reinforcement learning. Artificial intelligence, 112(1-2):181­211, 1999.
+Sebastian Thrun and Anton Schwartz. Finding structure in reinforcement learning. In NIPS, pp. 385­392, 1994.
+12
+
+Under review as a conference paper at ICLR 2018
+
+APPENDIX
+
+A EXPECTATION GRADIENT
+
+In weak supervision, only the observable trajectory  " po0:T , a0:T ´1q is available in a demonstration, and the sequence of memory states  " m0:T ´1 is latent. This poses a challenge, since the space of possible memory trajectories  has size exponential in the length of the demonstration, which at first seems to prohibit the computation of the log-likelihood gradient  log Pp|q, needed to maximize the log likelihood via gradient ascent.
+Our key insight is that the log-likelihood gradient can be computed precisely and efficiently using an instance of the Expectation-Gradient (EG) method (Salakhutdinov et al., 2003), which we detail below:
+
+
+
+log Pp|q
+
+"
+
+ÿ  log Pp, |q
+
+
+"
+
+1 Pp|q
+
+ÿ 
+
+
+Pp, |q
+
+"
+
+ÿ
+
+
+Pp, |q Pp|q
+
+
+
+log
+
+Pp ,
+
+|q
+
+"
+
+E |, r
+
+log
+
+Pp ,
+
+|qs,
+
+(3)
+
+where the second and third equations follow from the likelihood ratio trick.
+At any time t, the stack contains two PHPs, the root PHP and the PHP it invoked to select the elementary action. The stack also contains the program counters of these two PHPs, however we ignore the root counter to reduce complexity, and bring it back when we discuss multi-level hierarchies in the next section.
+Let us denote by h pat|otq and h pbt|otq, respectively, the stochastic operation and termination statements of procedure h P H Y tKu, where K is the root PHP. Let pht, tq be the top stack frame when action at is selected. Then the full likelihood of the the policy given an entire demonstration is
+
+T ´1
+
+T ´1
+
+Pp, |q
+
+9
+
+ph0|o0q0"0
+
+
+
+htt pat|otq
+
+
+
+Ppht
+
+,
+
+t
+
+|ht´1
+
+,
+
+t´1
+
+,
+
+ot
+
+qT ´1
+hT ´1
+
+p1|oT
+
+q,
+
+t"0 t"1
+
+where from the right-hand side we omitted the constant causal dynamics factor
+
+and with
+
+T
+ Ppo0:T | dopa0:T ´1qq " Ppot|o0:t´1, a0:t´1q,
+t"0
+
+Ppht,
+
+t|ht´1,
+
+t´1,
+
+otq
+
+"
+
+# t´1 htt´´11 ht´1
+
+p1|ot p0|ot
+
+qKpht|ot qht "ht´1
+
+q
+
+if t " 0 if t " t´1 ` 1.
+
+This formulation of the likelihood has the extremely useful property that  log Pp, |q decomposes into the sum of gradients. To find the expected gradient, as in (1), we do not need to represent the entire posterior distribution Pp|, q, which would be intractable. Instead, we only need the marginal posteriors that correspond to the various terms, namely
+
+vtph,  q " Ppht"h, t" |, q wtph,  q " Ppht"h, t", t`1" `1|, q.
+13
+
+Under review as a conference paper at ICLR 2018
+
+With these, the EG trick gives us the gradient of the observable demonstration
+
+T ´1~
+
+ÿÿ
+
+ Pp|q "
+
+vtph, 0q log Kph|otq
+
+hPH t"0
+
+t~
+
+ÿ `
+
+vtph,  q log h pat|otq
+
+ "0
+
+` wtph,  q log h p0|ot`1qq
+
+¸¸
+
+` pvtph,  q ´ wtph,  qq log h p1|ot`1q .
+
+(4)
+
+To allow the G-step (2), we take an E-step that calculates the marginal posteriors v and w with a forward­backward pass. We first compute the likelihood of a trajectory prefix
+
+tph,  q 9 Ppo0:t, a0:t, ht"h, t" q,
+
+up to the causal dynamics factor, via the forward recursion given by
+
+0ph, 0q " Kph|o0q,
+
+and for 0  t  T ´ 1
+
+~¸
+
+t`1ph1, 0q "
+
+ÿ tph,  qh pat|otqh p1|ot`1q Kph1|ot`1q
+
+hPH,0 t
+
+t`1ph,  `1q " tph,  qh pat|otqh p0|ot`1qq.
+
+We similarly compute the likelihood of a trajectory suffix
+
+tph,  q 9 Ppat:T ´1, ot`1:T |o0:t, ht"h, t" q,
+
+via the backward recursion given by
+
+T ´1ph,  q " h paT ´1|oT ´1qh p1|oT q,
+and for 0  t  T ´ 1 ~¸
+tph,  q " h pat|otq h p1|ot`1q ÿ Kph1|ot`1qt`1ph1, 0q ` h p0|ot`1qqt`1ph,  `1q .
+h1 PH
+For efficiency considerations, note that this forward­backward graph has pt ` 1qk nodes in layer t, where k " |H|, but only pt ` 1qkpk ` 1q edges to the next layer, rather than the naive pt ` 1qpt ` 2qk2.
+
+We can calculate our target likelihood using any 0  t  T , by taking
+
+Pp|q " ÿ Pp, ht"h, t" q 9 ÿ tph,  qtph,  q,
+
+hPH,0 t
+
+hPH,0 t
+
+so most efficient is to use t " 0
+
+ÿÿ Pp|q " Pp, h0"h, 0"0q 9 0ph, 0q0ph, 0q.
+
+hPH
+
+hPH
+
+Finally, the marginal posteriors are given by
+
+vtph,  q
+
+"
+
+1 Pp|q
+
+t
+
+ph,
+
+
+
+qt
+
+p
+
+,
+
+hq
+
+wT ´1ph,  q " 0,
+
+and for 0  t  T ´ 1
+
+wtph,  q
+
+"
+
+1 Pp|q
+
+t
+
+ph,
+
+
+
+qh
+
+pat
+
+|otqh p0|ot`1
+
+qqt`1
+
+ph,
+
+
+
+`1q.
+
+14
+
+

@@ -1,0 +1,1082 @@
+Under review as a conference paper at ICLR 2018
+VARIATIONAL NETWORK QUANTIZATION
+Anonymous authors Paper under double-blind review
+ABSTRACT
+We formulate the preparation of a neural network for pruning and few-bit quantization as a variational inference problem. We introduce a quantizing prior that leads to a multi-modal, sparse posterior distribution over weights and further derive a differentiable KL approximation for this prior. After training with Variational Network Quantization (VNQ), weights can be replaced by deterministic quantization values with small to negligible loss of task accuracy (including pruning by setting weights to 0). Our method does not require fine-tuning after quantization. We show results for ternary quantization on LeNet-5 (MNIST) and DenseNet-121 (CIFAR-10).
+1 INTRODUCTION
+Parameters of a trained network commonly exhibit high degrees of redundancy (Denil et al., 2013) which implies an over-parametrization of the network. Network compression methods implicitly or explicitly aim at the systematic reduction of redundancy in neural network models while at the same time retaining a high level of task accuracy. Besides architectural approaches, such as SqueezeNet (Iandola et al., 2016) or MobileNets (Howard et al., 2017), many compression methods either perform some form of pruning or quantization. Pruning is the removal of irrelevant units (weights, neurons or convolutional filters) (LeCun et al., 1990). Relevance of weights is often determined by the absolute value ("magnitude based pruning" (Han et al., 2016; 2017; Guo et al., 2016)), but more sophisticated methods have been known for decades, e.g. based on second-order (Optimal Brain Damage (LeCun et al., 1990) and Optimal Brain Surgeon Hassibi & Stork (1993)) or ARD (automatic relevance determination, a Bayesian framework for determining the relevance of weights, (MacKay, 1995; Neal, 1995; Karaletsos & Ra¨tsch, 2015)). Quantization is the reduction of the bitprecision of weights, activations or even gradients, which is particularly desirable from a hardware perspective (Sze et al., 2017). Methods range from fixed bit-width computation (e.g. 12-bit fixed point) to aggressive quantization such as binarization of weights and activations (Courbariaux et al., 2016; Rastegari et al., 2016; Zhou et al., 2016; Hubara et al., 2016). Few-bit quantization (2 to 6 bits) is often performed by k-means clustering of trained weights with subsequent fine-tuning of the cluster centers (Han et al., 2016). Pruning and quantization have been shown to work well in conjunction (Han et al., 2016). In so-called "ternary" networks, weights are either negative, zero or positive which also allows for simultaneous pruning and few-bit quantization (Li et al., 2016; Zhu et al., 2016).
+Our work is closely related to some recent Bayesian methods for network compression (Ullrich et al., 2017; Molchanov et al., 2017; Louizos et al., 2017; Neklyudov et al., 2017) that learn a posterior distribution over network weights under a sparsity-inducing prior. The posterior distribution over network parameters allows identifying redundancies through three means: (1) weights with an expected value very close to zero and (2) weights with a large variance can be pruned as they do not contribute much to the overall computation. (3) the posterior variance over non-pruned parameters can be used to determine the required bit-precision (quantization noise can be made as large as implied by the posterior uncertainty). Additionally, variational Bayesian inference is known to automatically reduce parameter redundancy by penalizing overly complex models.
+In this paper we present Variational Network Quantization, a Bayesian network compression method for simultaneous pruning and few-bit quantization of weights. We extend previous work introducing a multi-modal quantizing prior that penalizes weights of low variance unless they lie close to one of the target values for quantization. As a result, weights are either drawn to one of the quantization target values or they are assigned large variance values--see Fig. 1. After training, our method yields a
+1
+
+Under review as a conference paper at ICLR 2018
+
+log 2
+density
+log 2
+density
+
+Bayesian Neural Network with a multi-modal posterior over weights (typically with one mode fixed at 0), which is the basis for subsequent pruning and quantization. However, posterior uncertainties can also be interesting for network introspection and analysis, as well as for obtaining uncertainty estimates over network predictions Gal & Ghahramani (2015); Gal (2016); Depeweg et al. (2016; 2017). After pruning and hard quantization, and without the need for additional fine-tuning, our method yields a deterministic feed-forward neural network with heavily quantized weights. Our method is applicable to pre-trained networks but can also be used for training from scratch. Target values for quantization can either be manually fixed or they can be learned during training via hierarchical Bayesian inference. We demonstrate our results for the case of ternary quantization on LeNet-5 (MNIST) and DenseNet-121 (CIFAR-10).
+
+nc o=n v5_010
+0
+
+n c=o n2v5_0200
+
+n d=e 4n0se0_0100
+
+nd e=n 5se0_020
+
+5
+
+10 0.25 0.00 0.25 0.25 0.00 0.25 0.25 0.00 0.25 0.25 0.00 0.25
+
+nc o=n v5_010
+0
+
+n c=o n2v5_0200
+
+n d=e 4n0se0_0100
+
+nd e=n 5se0_020
+
+5
+
+10 0.25 0.00 0.25 0.2 0.0 0.2 0.1 0.0 0.1 0.25 0.00 0.25
+
+0.25 0.00 0.25 0.25 0.00 0.25 0.25 0.00 0.25 0.25 0.00 0.25
+
+0.25 0.00 0.25 0.2 0.0 0.2 0.1 0.0 0.1 0.25 0.00 0.25
+
+(a) Pre-trained network. No obvious clusters are vis- (b) Soft-quantized network after VNQ training.
+
+ible in the network trained without VNQ. No regular- Weights tightly cluster around the quantization target
+
+ization was used during pre-training.
+
+values.
+
+Figure 1: Distribution of weights (means  and log-variance log 2) before and after VNQ training of LeNet-5 on MNIST (validation accuracy before: 99.2% vs. after 195 epochs: 99.31%). Top row:
+scatter plot of weights (blue dots) per layer. Means were initialized from pre-trained deterministic network, variances with log 2 = -8. Bottom row: corresponding density1. Red shaded areas
+show the funnel-shaped "basins of attraction" induced by the quantizing prior. Target values for
+ternary quantization (the codebook) have also been learned. After training, weights with small
+(absolute) expected value or large variance (inside the area marked by the dotted line, corresponding to log ij  log T = 2 ) are pruned and remaining weights are quantized without loss in accuracy.
+
+2 PRELIMINARIES
+2.1 WHY BAYES FOR COMPRESSION?
+Bayesian inference can be well motivated from an information-theoretic treatment of (lossy) compression (Cover & Thomas, 2006; Tishby et al., 2000; Genewein et al., 2015). In particular, Bayesian inference automatically penalizes overly complex parametric models, an effect known as "Bayesian Occams Razor" in Bayesian model selection (MacKay, 2003; Genewein & Braun, 2014). The same effect leads to automatic regularization in variational Bayesian inference over model parameters (Gru¨nwald, 2007; Graves, 2011) (see Molchanov et al. (2017), where the authors show that Sparse Variational Dropout (Sparse VD) successfully prevents a network from fitting a unstructured data, that is a random labeling). This is particularly interesting since regularization is the basis for compression and is thought to be key for generalization (MacKay, 2003; Gru¨nwald, 2007). The automatic regularization effect is based on maximizing model evidence, where model parameters are marginalized. A very complex model might have a parameter setting that achieves extremely good likelihood given the data, however, since the model evidence is based on the average or marginal likelihood, overly complex models are penalized for having many parameter settings with poor likelihood. The argument that Bayesian methods search for optimal model structure can also be made from an information-theoretic point-of-view by investigating the equivalence of variational inference and the Minimum description length (MDL) principle Rissanen (1978); Gru¨nwald (2007); Graves (2011); Louizos et al. (2017). The evidence lower bound (ELBO, see Eq. (1)), which is maximized
+1Kernel density estimate, with radial basis function kernels with a bandwidth of 0.05
+2
+
+Under review as a conference paper at ICLR 2018
+
+in variational inference, is the sum of two terms: one, the average message length required to transmit outputs (labels) to a receiver that knows the inputs and the posterior over model parameters and two, the average message length to transmit the posterior parameters to a receiver that knows the prior over parameters:
+LELBO = neg. reconstr. error + neg. KL divergence ,
+
+-LE
+
+-LC =entropy-cross entropy
+
+compare Eq. (1). Maximizing the ELBO minimizes the total message length: max LELBO = min LE + LC, leading to an optimal trade-off between short description length of the data and the model (thus minimizing the sum of error cost LE and model complexity cost LC). Interestingly,
+MDL dictates the use of probabilistic models since they are in general "more compressible" com-
+pared to deterministic models: high uncertainty over parameters is rewarded by the entropy term in LC--higher uncertainty allows the quantization noise to be higher, thus requiring lower bit-precision
+for a parameter (the bits back argument (Hinton & Van Camp, 1993; Louizos et al., 2017)).
+
+2.2 VARIATIONAL BAYES AND REPARAMETRIZATION
+
+Let D be a dataset of N pairs (xn, yn)nN=1 and p(y|x, w) be a parameterized model that predicts outputs y given inputs x and parameters w. A Bayesian neural network models a (posterior) distribution over parameters w instead of just a point-estimate. The posterior is given by Bayes' rule: p(w|D) = p(D|w)p(w)/p(D), where p(w) is the prior over parameters. Computation of the true
+posterior is in general intractable. Common approaches to approximate inference in neural networks
+are for instance: MCMC methods pioneered in (Neal, 1995) and later refined e.g. via stochas-
+tic gradient Langevin dynamics (Welling & Teh, 2011), or variational approximations to the true
+posterior (Graves, 2011), Bayes by Backprop (Blundell et al., 2015), Expectation Backpropagation
+(Soudry et al., 2014), Probabilistic Backpropagation (Herna´ndez-Lobato & Adams, 2015). In the latter methods the true posterior is approximated by a parameterized distribution q(w). Variational parameters  are optimized by minimizing the Kullback-Leibler divergence between the true and the approximate posterior DKL(q(w)||p(w|D)). Since computation of the true posterior is intractable, minimizing this KL divergence is approximately performed by maximizing the so-called "evidence
+lower bound" (ELBO) or "negative variational free energy" (Kingma & Welling, 2014):
+
+N
+L() = Eq(w)[log p(yn|xn, w)] -DKL(q(w)||p(w))
+n=1
+
+(1)
+
+LD ()
+
+LSGVB() = N M
+
+M
+
+log p(y~m|x~m, f (, m)) - DKL(q(w)||p(w))
+
+m=1
+
+(2)
+
+where we have used the Reparameterization Trick2 (Kingma & Welling, 2014) in Eq. (2) to get
+an unbiased, differentiable, minibatch-based Monte Carlo estimator of the expected log likelihood LD(). A mini-batch of data is denoted by (x~m, y~m)Mm=1. Additionally, and in line with similar work (Molchanov et al., 2017; Louizos et al., 2017; Neklyudov et al., 2017), we use the Local
+Reparameterization Trick (Kingma et al., 2015) to further reduce variance of the stochastic ELBO
+gradient estimator, which locally marginalizes weights at each layer and instead samples directly
+from the distribution over pre-activations (which can be computed analytically). See Appendix A.2 for more details on the Local Reparametrization. Commonly, the prior p(w) and the parametric form of the posterior q(w) are chosen such that the KL divergence term can be computed analytically (e.g. a fully factorized Gaussian prior and posterior, known as the mean-field approximation). Due
+to the particular choice of prior in our work, a closed-form expression for the KL divergence cannot
+be obtained but instead we use a differentiable approximation (see Sec. 3.3).
+
+2.3 VARIATIONAL DROPOUT
+Dropout (Srivastava et al., 2014) is a method originally introduced for regularization of neural networks, where activations are stochastically dropped (i.e. set to zero) with a certain probability p
+2The trick is to use a deterministic differentiable function w = f (, ) with  N (0, 1), instead of directly using q(w).
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+during training. It was shown that dropout, i.e. multiplicative noise on inputs, is equivalent to hav-
+
+ing noisy weights and vice versa (Wang & Manning, 2013; Kingma et al., 2015). Multiplicative
+
+Gaussian
+
+noise
+
+ij
+
+
+
+N (1, 
+
+=
+
+p 1-p
+
+)
+
+on
+
+a
+
+weight
+
+wij
+
+induces
+
+a
+
+Gaussian
+
+distribution
+
+wij
+
+=
+
+ij ij
+
+=
+
+ ij(1 + 
+
+ij )
+
+
+
+N (ij , i2j )
+
+(3)
+
+with ij  N (0, 1). In standard (Gaussian) dropout training, the dropout rates  (or p to be precise) are fixed and the expected log likelihood LD() (first term in Eq. (1)) is maximized with respect to the means . Kingma et al. (2015) show that Gaussian dropout training is mathematically equivalent
+to maximizing the ELBO (both terms in Eq. (1)), under a prior p(w) and fixed  where the KL term
+does not depend on :
+
+Eq [LD()] - L(, ) = DKL(q(w)||p(w)),
+
+(4)
+
+where the dependencies on  and  of the terms in Eq. (1) have been made explicit. The only prior that meets this requirement is the scale invariant log-uniform prior:
+
+p(log |wij|) = const.
+
+
+
+p(|wij |)
+
+
+
+1 |wij | .
+
+(5)
+
+Using this result, it is straightforward to learn individual dropout-rates ij per weight, by including
+ into the set of variational parameters  = (, ). This procedure was introduced in (Kingma et al.,
+2015) under the name "Variational Dropout". With the choice of a log-uniform prior (Eq. (5)) and a factorized Gaussian approximate posterior q(wij) = N (ij, i2j) (Eq. (3)) the KL term in Eq. (1) is not analytically tractable, but the authors of Kingma et al. (2015) present an approximation
+
+-DKL(q(wij)||p(wij))  const. + 0.5 log  + c1 + c22 + c33,
+
+(6)
+
+see original publication for numerical values of c1, c2, c3. Note that due to the mean-field approximation, where the posterior over all weights factorizes into a product over individual weights
+q(w) = q(wij), the KL divergence factorizes into a sum of individual KL divergences DKL(q(w)||p(w)) = DKL(q(wij)||p(wij)).
+
+2.4 PRUNING UNITS WITH LARGE DROPOUT RATES
+
+Learning dropout rates is interesting for network compression since neurons or weights with very high dropout rates p  1 can very likely be pruned without loss in accuracy. However, as the authors of Sparse Variational Dropout (sparse VD) (Molchanov et al., 2017) report, the approximation in Eq. (6) is only accurate for   1 (corresponding to p  0.5). For this reason, the original variational dropout paper restricted  to values smaller or equal to 1, which are unsuitable for pruning. Molchanov et al. (2017) propose an improved approximation, which is very accurate on the full range of log :
+
+-DKL(q(wij )||p(wij ))  const. + k1S(k2 + k3 log ij ) - 0.5 log(1 + i-j1) = FKL,LU(ij , ij ), (7)
+
+with k1 = 0.63576, k2 = 1.87320 and k3 = 1.48695 and S denoting the sigmoid function. Ad-
+
+ditionally, the authors propose to use an additive, instead of a multiplicative noise reparameteriza-
+
+tion, which significantly reduces variance in the gradient
+
+ LSGVB  ij
+
+for large ij.
+
+To achieve this,
+
+the multiplicative noise term is replaced with an exactly equivalent additive noise term ij ij with
+
+i2j = iji2j and the set of variational parameters becomes  = (, ):
+
+wij
+
+ = ij (1 + 
+
+ij ) = ij +ij
+
+ij
+
+ N (ij , i2j ),
+
+ N (0, 1).
+
+(8)
+
+mult.noise
+
+add.noise
+
+After
+
+Sparse
+
+VD
+
+training,
+
+pruning
+
+is
+
+performed
+
+by
+
+thresholding
+
+ij
+
+=
+
+,i2j
+i2j
+
+which
+
+translates
+
+into
+
+a
+
+threshold for the variance-to-mean ratio (also known as the index of dispersion, a limit-case of the
+
+Fano factor). In Molchanov et al. (2017) a threshold of log  = 3 is used, which roughly corresponds
+
+to p > 0.95. Pruning weights that lie above a threshold of T leads to
+
+i2j i2j
+
+ T  i2j
+
+ Ti2j ,
+
+(9)
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+which means effectively that weights with large variance but also weights of lower variance and a mean ij close to zero are pruned. A visualization of the pruning threshold can also be seen in Fig 1 (the "central funnel", i.e. the area marked by the red dotted lines for a threshold for T = 2). Sparse VD training can be performed from random initialization or with pre-trained networks by initializing the means ij accordingly. In Bayesian Compression (Louizos et al., 2017) and Structured Bayesian Pruning (Neklyudov et al., 2017) Sparse VD has been extended to include group-sparsity constraints,
+which allows for pruning of whole neurons or convolutional filters (via learning their corresponding
+dropout rates).
+
+2.5 SPARSITY INDUCING PRIORS
+
+The prior p(w) can be used to induce sparsity into the posterior by having high density at zero and heavy tails. There is a well known family of such distributions: scale-mixtures of normals (Andrews & Mallows, 1974; Louizos et al., 2017; Ingraham & Marks, 2017):
+w  N (0, z2); z  p(z),
+
+where the scales of w are random variables. A well-known example is the spike-and-slab prior (Mitchell & Beauchamp, 1988), which has a delta-spike at zero and a slab over the real line. Gal & Ghahramani (2015); Kingma et al. (2015) show how Dropout (Srivastava et al., 2014) implies a spike-and-slab distribution over weights. The log uniform prior used in Sparse VD (Eq. (5)) can also be derived as a marginalized scale-mixture of normals
+
+p(wij) 
+
+1 |z|
+
+N
+
+(wij
+
+|0,
+
+z
+
+2)dz
+
+=
+
+1 |wij | ;
+
+p(z)
+
+
+
+1 |z| ,
+
+(10)
+
+also known as the normal-Jeffreys prior (Figueiredo, 2002). Louizos et al. (2017) discuss how the
+
+log-uniform prior can be seen as a continuous relaxation of the spike-and-slab prior and how the
+
+alternative formulation through the normal-Jeffreys distribution can be used to couple the scales of
+
+weights that belong together and thus learn dropout rates for whole neurons or convolutional filters,
+
+which is the basis for Bayesian Compression (Louizos et al., 2017) and Structured Bayesian Pruning
+
+(Neklyudov et al., 2017).
+
+3 VARIATIONAL NETWORK QUANTIZATION
+
+We formulate the preparation of a neural network for a post-training quantization step as a variational inference problem. To this end, we introduce a multi-modal, quantizing prior and train by maximizing the ELBO (Eq. (2)) under a mean-field approximation of the posterior (i.e. a fully factorized Gaussian). The goal of our algorithm is to achieve soft quantization, that is learning a posterior distribution such that the accuracy-loss introduced by post-training quantization is small. Our variational posterior approximation and training procedure is similar to Kingma et al. (2015) and Molchanov et al. (2017) with the crucial difference of using a quantizing prior that drives weights towards the target values for quantization.
+
+3.1 A QUANTIZING PRIOR
+
+The log uniform prior (Eq. (5)) can be viewed as a continuous relaxation of the spike-and-slab prior with a spike at location 0 (Louizos et al., 2017). We use this insight to formulate a quantizing prior,
+a continuous relaxation of a "multi-spike-and-slab" prior which has multiple spikes at locations ck, k  {1..K}. Each spike location corresponds to one target value for subsequent quantization. The quantizing prior allows weights of low variance only at the locations of the quantization target values ck. The effect of using such a quantizing prior during Variational Network Quantization is shown in Fig. 1. After training, most weights of low variance are distributed very closely around the quantization target values ck and can thus be replaced by the corresponding value without significant loss in accuracy. Weights of large variance can be pruned. Additionally, we typically fix one of the spike locations to zero, e.g. c2 = 0, which allows to prune weights with an ij threshold (see Eq. (9)) as in sparse Variational Dropout (Molchanov et al., 2017). Following the interpretation of the log uniform prior p(w) as a marginal over the scale-hyperparameter z, we extend Eq. (10) with a
+hyper-prior over locations
+
+p(wij) = N (wij|m, z)pz(z)pm(m) dzdm
+
+pm(m) = pk(m - ck),
+k
+
+(11)
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+with p(z)  |z|-1. The location prior pm(m) is a mixture of weighted delta distributions located at the quantization values ck. Marginalizing over m yields the quantizing prior
+
+p(wij )  pk
+k
+
+1 |z|
+
+N
+
+(wij |ck,
+
+z)
+
+dz
+
+=
+
+k
+
+1
+
+pk
+
+|wij
+
+-
+
+. ck |
+
+(12)
+
+In our experiments we use K = 3, pk = 1/K k and c2 = 0 unless indicated otherwise.
+
+3.2 POST-TRAINING QUANTIZATION
+
+Equation (9) implies that using a threshold on ij as a pruning criterion is equivalent to pruning weights whose value does not differ significantly from zero:
+
+i2j
+
+
+
+i2j T
+
+
+
+ij
+
+
+
+(- ij T
+
+,
+
+ij T
+
+).
+
+(13)
+
+
+
+To be precise, T specifies the width of a scaled standard-deviation band ±ij/ T around the
+
+mean ij. If the value zero lies within this band, the weight is assigned the value 0. For instance, a
+
+pruning threshold which implies p  0.95 corresponds to a variance band of approximately ij/4.
+
+An equivalent interpretation is that a weight is pruned if the likelihood for the value 0 under the
+
+weight posterior exceeds the threshold given by the standard-deviation band (Eq. (13)):
+
+N (0|ij , i2j )
+
+
+
+N (ij
+
+±
+
+ij T
+
+|ij
+
+,
+
+i2j
+
+)
+
+=
+
+1
+
+e-
+
+1 2T
+
+.
+
+2ij
+
+(14)
+
+Following this interpretation we can design a maximum a-posteriori (MAP) quantization scheme: to each weight we assign the quantized values ck with the highest likelihood under the posterior. Since weight posteriors are Gaussian, this translates into minimizing the squared distance between the mean ij and the quantized values ck:
+
+arg max
+k
+
+N
+
+(ck |ij
+
+,
+
+i2j )
+
+=
+
+arg
+
+max
+k
+
+e-
+
+(ck -ij 2i2j
+
+)2
+
+= arg min
+k
+
+(ck - ij )2
+
+(15)
+
+Additionally, the pruning rate can be increased by assigning a hard 0 to all weights that exceed the pruning threshold T (see Eq. (9)) before performing the MAP assignment to quantize the nonpruned weights described above.
+
+3.3 KL DIVERGENCE APPROXIMATION
+
+Under the quantizing prior (Eq. (12)) the KL divergence between the mean-field posterior and prior DKL(q(w)||p(w)) is analytically intractable. Similar to Kingma et al. (2015); Molchanov et al. (2017) we use a differentiable approximation FKL(, , c)3, composed of a small number of differentiable functions to keep the computational effort low during training. We now present the approximation for a reference codebook c = [-r, 0, r], r = 0.2, however later we show how
+the approximation can be used for arbitrary ternary, symmetric codebooks as well. The basis of
+our approximation is the approximation FKL,LU introduced by Molchanov et al. (2017) for the KL divergence between a log uniform prior and a Gaussian posterior (see Eq. (7)) which is centered
+around zero. We observe that a weighted mixture of shifted versions of FKL,LU can be used to approximate the KL divergence for our multi-modal quantizing prior (Eq. (12)) (which is composed
+of shifted versions of the log uniform prior). In a nutshell, we shift one version of FKL to each codebook entry ck and then use -dependent Gaussian windowing functions () to mix the shifted approximations (see more details in the Appendix A.3). The approximation for the KL divergence
+between a Gaussian posterior and our multi-modal quantizing prior is given as
+
+FKL(, , c) =
+
+( - ck)FKL,LU( - ck, ) + 0()FKL,LU(, )
+
+k:ck =0
+
+global behavior
+
+local behavior
+
+(16)
+
+3To keep notation in this section simple, we drop the indices ij from w,  and  but we refer to individual weights and their posterior parameters throughout the section.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+with
+
+()
+
+=
+
+exp(-
+
+1 2
+
+2 2
+
+)
+
+0() = 1 -
+
+( - ck)
+
+(17)
+
+k:ck =0
+
+We use  = 0.075 in our experiments. Illustrations of the approximation, including a comparison
+
+against the ground-truth computed via Monte Carlo sampling are shown in Fig. 2. Over the range
+
+of - and -values relevant to our method, the maximum absolute deviation from the ground-truth is
+
+1.07. See Fig. 4 in the Appendix for a more detailed quantitative evaluation of our approximation.
+
+DKL + C
+
+=1
+
+ = 0.01
+
+ = 1e - 08
+
+10 10 10 000
+
+FKL,LU( - 0.2, ) FKL,LU(, ) FKL,LU( + 0.2, ) DKMLC (q ||p)
+
+111
+
+( - 0.2) 0 () ( + 0.2)
+
+000 10 10 10
+
+FKL(, , {-0.2, 0, 0.2}) DKMLC (q ||p)
+
+DKL + C
+
+0 -1
+
+0 
+
+0 1 -1
+
+0 
+
+0 1 -1
+
+0 
+
+1
+
+Figure 2: Approximation to the analytically intractable KL divergence DKL(q||p), constructed by shifting and mixing known approximations to the KL divergence between the posterior a log uni-
+form prior. Top row: Shifted versions of the known approximation (Eq. (7)) in color and the ground truth KL approximation (computed via Monte Carlo sampling) DKMLC(q||p) in black. Middle row: weighting functions () that mix the shifted known approximation to form the final approximation FKL shown in the bottom row (gold), compared against the ground-truth (MC sampled). Each column corresponds to a different value of . A comparison between ground-truth and our approximation over a large range of  and  values is shown in the Appendix in Fig. 4. Note that since
+the priors are improper, KL approximation and ground-truth can only be compared up to an additive constant C - the constant is irrelevant for network training but has been chosen in the plot such that ground-truth and approximation align for large values of .
+
+This KL approximation in Eq. (16), developed for the reference codebook cr = [-r, 0, r], can be reused for any symmetric ternary codebook ca = [-a, 0, a], a  R+, since ca can be represented with the reference codebook and a positive scaling factor s, ca = scr, s = a/r. As derived in the
+Appendix (A.4), this re-scaling translates into a multiplicative re-scaling of the variational param-
+eters  and . The KL divergence between the posterior q(w) and a prior based on the codebook ca is thus given by DKL(q(w)||pca (w))  FKL(/s, /s, cr). This result allows learning the quantization level a during training as well.
+
+4 EXPERIMENTS
+In our experiments we train with VNQ and then first prune via thresholding log ij  log T = 3. Remaining weights are then quantized by minimizing the squared distance to the quantization values ck (corresponding to a MAP quantization, see Sec. 3.2). We use warm-up (Sønderby et al., 2016), that is we multiply the KL divergence term (Eq. (2)) with a factor , where  = 0 during the first few epochs and then linearly ramps up to  = 1. To improve stability of VNQ training we ensure through clipping that log i2j  (-10, 1) and ij  (0.223 ± -a, ) (which corresponds to a shifted log  threshold of 3, that is we clip ij if it lies left of the -a funnel or right of the +a funnel, compare Fig. 1). When learning codebook values a during training, we use a lower learning rate for
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+adjusting the codebook, otherwise we observe a tendency for codebook values to collapse in early
+stages of training (a similar observation was made by Ullrich et al. (2017)). Additionally, we ensure a  0.05 by clipping.
+
+4.1 LENET-5 ON MNIST
+We demonstrate our method with LeNet-54 (LeCun et al., 1998) on the MNIST handwritten digits dataset. Images are pre-processed by subtracting the mean and dividing by the standard-deviation over the training set. For the pre-trained network we run 5 epochs on a randomly initialized network (Glorot initialization, Adam optimizer), which leads to a validation accuracy of 99.2%. We initialize means  with the pre-trained weights and variances with log 2 = -8. The warm-up factor  is linearly increased from 0 to 1 during the first 15 epochs. VNQ training runs for a total of 195 epochs with a batch-size of 128, the learning rate is linearly decreased from 0.001 to 0 and the learning rate for adjusting the codebook parameter a uses a learning rate that is 100 times lower. Results are shown in Table 1, a visualization of the distribution over weights after VNQ training is shown in Fig. 1.
+Table 1: Results on LeNet-5 (MNIST), showing the error on the validation set, the percentage of non-pruned weights and the bit-precision per parameter. Original is our pre-trained LeNet-5. We show results after VNQ (no P&Q) where weights were deterministically replaced by the (fullprecision) means  and for VNQ with subsequent pruning and quantization. We also show results of non-ternary or pruning-only methods: Deep Compression (Han et al., 2016), Soft weight-sharing (Ullrich et al., 2017), Sparse VD (Molchanov et al., 2017), Bayesian Compression (Louizos et al., 2017) and Stuctured Bayesian Pruning (Neklyudov et al., 2017).
+
+Method
+Original VNQ (no P&Q)
+VNQ + P&Q Deep Compression (P&Q) Soft weight-sharing (P&Q)
+Sparse VD (P) Bayesian Comp. (P)
+Structured BP (P)
+
+val. error [%]
+0.8 0.69 0.83 0.74 0.97 0.75 1.0 0.86
+
+|w=0| |w|
+
+[%]
+
+100
+
+100
+
+24.5
+
+8
+
+3
+
+0.7
+
+0.6
+
+-
+
+bits
+32 32 2 10 - 13 3 7 - 18 -
+
+We find that VNQ training sufficiently prepares a network for pruning and quantization with negligible loss in accuracy and without requiring subsequent fine-tuning. Compared to pruning methods that do not consider few-bit quantization in their objective, we achieve significantly lower pruning rates. This is an interesting observation since our method is based on a similar objective (e.g. compared to Sparse VD) but with the addition of forcing non-pruned weights to tightly cluster around the quantization levels. Few-bit quantization severely limits network capacity. Perhaps this capacity limitation must be countered by pruning fewer weights. Our pruning rates are roughly in line with other papers on ternary quantization, e.g. Zhu et al. (2016), who report sparsity levels between 30% and 50% with their ternary quantization method. Note that a direct comparison between pruning, quantizing and ternarizing methods is difficult and depends on many factors such that a fair computation of the compression rate that does not implicitly favor certain methods is hardly possible within the scope of this paper. For instance, compression rates for pruning methods are typically reported under the assumption of a CSC storage format which would not fully account for the compression potential of a sparse ternary matrix. We thus chose not to report any measures for compression rates, however for the methods listed in Table 1, they can easily be found in the literature.
+4.2 DENSENET-121 ON CIFAR-10
+Our second experiment uses a modern DenseNet-121 Huang et al. (2017) (k=12, with bottleneck) on CIFAR-10 (Krizhevsky & Hinton, 2009). The training procedure is identical to the procedure on MNIST with the following exceptions: we use a batch-size of 64 epochs, warmup is linearly ramped
+4the Caffee version, see https://github.com/BVLC/caffe/blob/master/examples/mnist/lenet_train_test.prototxt
+
+8
+
+Under review as a conference paper at ICLR 2018
+
+up from 0 to 1 over the first 20 epochs, the learning rate of 0.005 is kept constant for the first 50 epochs and then linearly decreased until training stops at epoch 300. Results are shown from epoch 150. We pre-train a deterministic DenseNet (reaching validation accuracy of 93.19%) to initialize VNQ training. Results are shown in Table 2. A visualization of the distribution over weights after VNQ training is shown in the Appendix Fig. 3.
+
+Table 2: Results on DenseNet-121 (CIFAR-10), showing the error on the validation set, the percentage of non-pruned weights and the bit-precision per parameter. Original denotes the pre-trained network. We show results after VNQ training without pruning and quantization (weights were deterministically replaced by the (full-precision) means ), and VNQ with subsequent pruning and quantization (in the condition (w/o 1) we use full-precision means for the weights in the first layer and do not prune and quantize this layer).
+
+Method
+Original VNQ (no P&Q) VNQ + P&Q (w/o 1)
+VNQ + P&Q
+
+val error [%]
+6.81 8.45 8.52 10.92
+
+|w=0| |w|
+
+[%]
+
+100
+
+100
+
+55
+
+55
+
+bits
+32 32 2 (32) 2
+
+We generally observe lower levels of sparsity for DenseNet, compared to LeNet. This might be due to the fact that DenseNet already has an optimized architecture which removed a lot of redundant parameters from the start. In line with previous publications we find that the first and last layer of the network are most sensitive to pruning and quantization. However, in contrast to many other methods that do not quantize these layers (e.g. Zhu et al. (2016)), we find that after sufficient training, the final layer can be pruned and quantized without loss in accuracy and the first layer can also be pruned and quantized with a small loss in accuracy (see Table 2).
+
+5 RELATED WORK
+Our method is an extension of Sparse VD (Molchanov et al., 2017), originally used for network pruning. In contrast we use a quantizing prior, leading multi-modal posterior suitable for few-bit quantization and pruning. Bayesian Compression and Structured Bayesian Pruning Louizos et al. (2017); Neklyudov et al. (2017) extend Sparse VD to prune whole neurons or filters via group-sparsity constraints. Additionally, in Louizos et al. (2017) the required bit-precision per layer is determined via posterior uncertainty. In contrast to our method, Bayesian Compression does not explicitly enforce clustering of weights during training and thus requires bit-widths in the range between 5 and 18 bits. Extending our method to include group-constraints for pruning is an interesting direction for future work. Another Bayesian method for simultaneous network quantization and pruning is soft weightsharing (SWS) Ullrich et al. (2017), which uses a Gaussian mixture model prior (and a KL term without trainable parameters such that the KL term reduces to the prior entropy). SWS acts like a probabilistic version of k-means clustering with the advantage of automatic collapse of unnecessary mixture components. Similar to learning the codebooks in our method, soft weight-sharing learns the prior from the data, a technique known as empirical Bayes (see also ARD (Karaletsos & Ra¨tsch, 2015)). We cannot directly compare against soft weight-sharing since the authors do not report results on ternary networks. Gal et al. (2017) learn dropout rates by using a continuous relaxation of dropout's discrete masks (via the concrete distribution). The authors learn layer-wise dropout rates, which dos not allow for dropout-rate-based pruning. We have experimented with using the concrete distribution for learning codebooks for quantization with promising early results but we have generally observed lower pruning rates or lower accuracy compared to VNQ. A non-probabilistic state-of-the-art method for network ternarization is Trained Ternary Quantization Zhu et al. (2016) which uses full-precision shadow weights during training, but quantized forward passes. Additionally it learns a (non-symmetric) scaling per layer for the non-zero quantization values, similar to our learned quantization level a. While the method achieves impressive accuracy, the sparsity and thus pruning rates are rather low (between 50% and 70% sparsity) and the first and last layer need to be kept with full precision.
+9
+
+Under review as a conference paper at ICLR 2018
+6 DISCUSSION
+A potential shortcoming of our method is the KL divergence approximation (Sec. 3.3). While the approximation is reasonably good on the relevant range of - and -values, there is still room for improvement which could have the benefit that weights are drawn even more tightly onto the quantization levels, resulting in lower accuracy loss after quantization and pruning. Since the KL approximation only needs to be computed once and an arbitrary amount of ground-truth data can be produced, it should be possible to improve upon the approximation presented here, at least by some brute-force function approximation, e.g. a neural network, polynomial or kernel regression. The main difficulty is that the resulting approximation must be differentiable and must not introduce significant computational overhead since the approximation is evaluated once for each network parameter in each gradient step.
+Compared to similar methods that only consider network pruning, our pruning rates are significantly lower. This does not seem to be a particular problem of our method since other papers on network ternarization report similar sparsity levels (Li et al. (2016) roughly achieve between 30% and 50% sparsity). The reason for this might be that heavily quantized networks have much lower capacity compared to full-precision networks. This limited capacity might require that the network compensates by effectively using more weights such that the pruning rates become significantly lower. Similar trends have also been observed with binary networks, where drops in accuracy could be prevented by increasing the number of neurons (with binary weights) per layer. Principled experiments to test the trade-off between low bit-precision and sparsity rates would be an interesting direction for future work. One starting point could be to test our method with more quantization levels (e.g. 5, 7 or 9) and investigate how this affects the pruning rate.
+REFERENCES
+David F Andrews and Colin L Mallows. Scale mixtures of normal distributions. Journal of the Royal Statistical Society. Series B (Methodological), pp. 99­102, 1974.
+Charles Blundell, Julien Cornebise, Koray Kavukcuoglu, and Daan Wierstra. Weight uncertainty in neural networks. arXiv preprint arXiv:1505.05424, 2015.
+Matthieu Courbariaux, Itay Hubara, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Binarized neural networks: Training deep neural networks with weights and activations constrained to+ 1 or-1. arXiv preprint arXiv:1602.02830, 2016.
+Thomas M Cover and Joy A Thomas. Elements of information theory. John Wiley & Sons, 2006.
+Misha Denil, Babak Shakibi, Laurent Dinh, Nando de Freitas, et al. Predicting parameters in deep learning. In Advances in Neural Information Processing Systems, pp. 2148­2156, 2013.
+Stefan Depeweg, Jose´ Miguel Herna´ndez-Lobato, Finale Doshi-Velez, and Steffen Udluft. Learning and policy search in stochastic dynamical systems with bayesian neural networks. arXiv preprint arXiv:1605.07127, 2016.
+Stefan Depeweg, Jose´ Miguel Herna´ndez-Lobato, Finale Doshi-Velez, and Steffen Udluft. Uncertainty decomposition in bayesian neural networks with latent variables. arXiv preprint arXiv:1706.08495, 2017.
+Ma´rio Figueiredo. Adaptive sparseness using jeffreys prior. In Advances in neural information processing systems, pp. 697­704, 2002.
+Yarin Gal. Uncertainty in deep learning. PhD thesis, PhD thesis, University of Cambridge, 2016.
+Yarin Gal and Zoubin Ghahramani. Dropout as a Bayesian approximation: Representing model uncertainty in deep learning. arXiv:1506.02142, 2015.
+Yarin Gal, Jiri Hron, and Alex Kendall. Concrete dropout. arXiv preprint arXiv:1705.07832, 2017.
+Tim Genewein and Daniel A Braun. Occam's razor in sensorimotor learning. Proceedings of the Royal Society of London B: Biological Sciences, 281(1783):20132952, 2014.
+10
+
+Under review as a conference paper at ICLR 2018
+Tim Genewein, Felix Leibfried, Jordi Grau-Moya, and Daniel Alexander Braun. Bounded rationality, abstraction, and hierarchical decision-making: An information-theoretic optimality principle. Frontiers in Robotics and AI, 2:27, 2015.
+Alex Graves. Practical variational inference for neural networks. In Advances in Neural Information Processing Systems, pp. 2348­2356, 2011.
+Peter D Gru¨nwald. The minimum description length principle. MIT press, 2007.
+Yiwen Guo, Anbang Yao, and Yurong Chen. Dynamic network surgery for efficient dnns. In Advances In Neural Information Processing Systems, pp. 1379­1387, 2016.
+Song Han, Huizi Mao, and William J Dally. Deep compression: Compressing deep neural networks with pruning, trained quantization and huffman coding. ICLR 2016, 2016.
+Song Han, Jeff Pool, Sharan Narang, Huizi Mao, Shijian Tang, Erich Elsen, Bryan Catanzaro, John Tran, and William J Dally. Dsd: Regularizing deep neural networks with dense-sparse-dense training flow. ICLR 2017, 2017.
+Babak Hassibi and David G Stork. Second order derivatives for network pruning: Optimal brain surgeon. In Advances in Neural Information Processing Systems, pp. 164­171, 1993.
+Jose´ Miguel Herna´ndez-Lobato and Ryan Adams. Probabilistic backpropagation for scalable learning of bayesian neural networks. In International Conference on Machine Learning, pp. 1861­ 1869, 2015.
+Geoffrey E Hinton and Drew Van Camp. Keeping the neural networks simple by minimizing the description length of the weights. In Proceedings of the sixth annual conference on Computational learning theory, pp. 5­13. ACM, 1993.
+Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry Kalenichenko, Weijun Wang, Tobias Weyand, Marco Andreetto, and Hartwig Adam. Mobilenets: Efficient convolutional neural networks for mobile vision applications. arXiv preprint arXiv:1704.04861, 2017.
+Gao Huang, Zhuang Liu, Laurens van der Maaten, and Kilian Q Weinberger. Densely connected convolutional networks. 2017.
+Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-Yaniv, and Yoshua Bengio. Quantized neural networks: Training neural networks with low precision weights and activations. arXiv preprint arXiv:1609.07061, 2016.
+Forrest N Iandola, Song Han, Matthew W Moskewicz, Khalid Ashraf, William J Dally, and Kurt Keutzer. Squeezenet: Alexnet-level accuracy with 50x fewer parameters and¡ 0.5 mb model size. arXiv preprint arXiv:1602.07360, 2016.
+John Ingraham and Debora Marks. Variational inference for sparse and undirected models. In International Conference on Machine Learning, pp. 1607­1616, 2017.
+Theofanis Karaletsos and Gunnar Ra¨tsch. Automatic relevance determination for deep generative models. arXiv preprint arXiv:1505.07765, 2015.
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes. ICLR, 2014.
+Diederik P Kingma, Tim Salimans, and Max Welling. Variational dropout and the local reparameterization trick. In Advances in Neural Information Processing Systems, pp. 2575­2583, 2015.
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images. 2009.
+Yann LeCun, John S. Denker, and Sara A. Solla. Optimal brain damage. In D. S. Touretzky (ed.), Advances in Neural Information Processing Systems, pp. 598­605. 1990.
+Yann LeCun, Le´on Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to document recognition. Proceedings of the IEEE, 86(11):2278­2324, 1998.
+11
+
+Under review as a conference paper at ICLR 2018
+Fengfu Li, Bo Zhang, and Bin Liu. Ternary weight networks. arXiv preprint arXiv:1605.04711, 2016.
+Christos Louizos, Karen Ullrich, and Max Welling. Bayesian compression for deep learning. Advances in Neural Information Processing Systems, 2017.
+David JC MacKay. Probable networks and plausible predictions - a review of practical bayesian methods for supervised neural networks. Network: Computation in Neural Systems, 6(3):469­ 505, 1995.
+David JC MacKay. Information theory, inference and learning algorithms. Cambridge university press, 2003.
+Toby J Mitchell and John J Beauchamp. Bayesian variable selection in linear regression. Journal of the American Statistical Association, 83(404):1023­1032, 1988.
+Dmitry Molchanov, Arsenii Ashukha, and Dmitry Vetrov. Variational dropout sparsifies deep neural networks. ICML 2017, 2017.
+Radford M Neal. Bayesian Learning for Neural Networks. PhD thesis, PhD thesis, University of Toronto, 1995.
+Kirill Neklyudov, Dmitry Molchanov, Arsenii Ashukha, and Dmitry Vetrov. Structured bayesian pruning via log-normal multiplicative noise. arXiv preprint arXiv:1705.07283, 2017.
+Mohammad Rastegari, Vicente Ordonez, Joseph Redmon, and Ali Farhadi. Xnor-net: Imagenet classification using binary convolutional neural networks. In European Conference on Computer Vision, pp. 525­542. Springer, 2016.
+Jorma Rissanen. Modeling by shortest data description. Automatica, 14(5):465­471, 1978.
+Casper Kaae Sønderby, Tapani Raiko, Lars Maaløe, Søren Kaae Sønderby, and Ole Winther. How to train deep variational autoencoders and probabilistic ladder networks. arXiv preprint arXiv:1602.02282, 2016.
+Daniel Soudry, Itay Hubara, and Ron Meir. Expectation backpropagation: Parameter-free training of multilayer neural networks with continuous or discrete weights. In Advances in Neural Information Processing Systems, pp. 963­971, 2014.
+Nitish Srivastava, Geoffrey E Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: a simple way to prevent neural networks from overfitting. Journal of machine learning research, 15(1):1929­1958, 2014.
+Vivienne Sze, Yu-Hsin Chen, Tien-Ju Yang, and Joel Emer. Efficient processing of deep neural networks: A tutorial and survey. arXiv preprint arXiv:1703.09039, 2017.
+Naftali Tishby, Fernando C Pereira, and William Bialek. The information bottleneck method. arXiv preprint physics/0004057, 2000.
+Karen Ullrich, Edward Meeds, and Max Welling. Soft weight-sharing for neural network compression. ICLR 2017, 2017.
+Sida Wang and Christopher Manning. Fast dropout training. In Proceedings of the 30th International Conference on Machine Learning (ICML-13), pp. 118­126, 2013.
+Max Welling and Yee W Teh. Bayesian learning via stochastic gradient langevin dynamics. In Proceedings of the 28th International Conference on Machine Learning (ICML-11), pp. 681­688, 2011.
+Shuchang Zhou, Yuxin Wu, Zekun Ni, Xinyu Zhou, He Wen, and Yuheng Zou. Dorefa-net: Training low bitwidth convolutional neural networks with low bitwidth gradients. arXiv preprint arXiv:1606.06160, 2016.
+Chenzhuo Zhu, Song Han, Huizi Mao, and William J Dally. Trained ternary quantization. arXiv preprint arXiv:1612.01064, 2016.
+12
+
+Under review as a conference paper at ICLR 2018
+A APPENDIX
+A.1 VISUALIZATION OF DENSENET WEIGHTS AFTER VNQ TRAINING
+Figure 3: Visualization of distribution over DenseNet-121 weights after training on CIFAR-10 with VNQ. Each panel shows one layer, starting in the top-left corner with the input and ending with the final layer in the bottom-right panel (going row-wise, that is first moving to the right as layers increase). The validation accuracy of the network shown is 91.2%.
+13
+
+Under review as a conference paper at ICLR 2018
+
+A.2 LOCAL REPARAMETERIZATION
+We follow Sparse VD Molchanov et al. (2017) and use the Local Reparametrization trick Kingma et al. (2015) and Additive Noise Reparmetrization to optimize the stochastic gradient variational lower bound LSGVB (Eq. (2)). We optimize posterior means and log-variances (, log 2) and in some experiments additionally the codebook level a. We apply Variational Network Quantization to fully connected and convolutional layers. Denoting inputs to a layer with AM×I outputs of a layer with BM×O and using local reparametrization we get:
+II
+bmj  N (mj , mj ); mj = amiij , mj = a2mii2j
+i=1 i=1
+for a fully connected layer. Similarly activations for a convolutional layer are computed as follows vec(bmk)  N (mk, mk); mk = vec(Am  k), mk = diag(vec(A2m  k2)),
+where (·)2 denotes an element-wise operation,  is the convolution operation and vec(·) denotes reshaping of a matrix/tensor into a vector.
+
+A.3 KL APPROXIMATION FOR QUANTIZING PRIOR
+
+Under the quantizing prior (Eq. (12)) the KL divergence between the mean-field posterior and prior
+
+DKL(q(wij)||p(wij)) is analytically intractable. Molchanov et al. (2017) presented an approxima-
+
+tion for the KL divergence under a (zero-centered) log uniform prior (Eq. (5)). Since our quantizing
+
+prior is essentially a composition of shifted log uniform priors, we construct a composition of the
+
+approximation given by Molchanov et al. (2017), shown in Eq. (7). The original approximation
+
+can be utilized to calculate a KL divergence approximation (up to an additive constant C~) between
+
+a
+
+Gaussian
+
+posterior
+
+q(wij )
+
+and
+
+a
+
+shifted
+
+log-uniform
+
+prior
+
+p(wij )
+
+
+
+1 |wij -r|
+
+by
+
+transferring
+
+the
+
+shift to the posterior parameter 
+
+DKL
+
+q{ij ,ij }||p(wij )
+
+
+
+1 |wij - r|
+
+= DKL
+
+q{ij -r,ij }(wij )||p(wij )
+
+
+
+1 |wij |
+
++ C~ (18)
+
+For small posterior variances i2j (ij r) and means near the quantization levels (i.e, |ij|  r ), the KL divergence is dominated by the mixture prior component located at the respective quan-
+tization level r. For these values of  and , the KL divergence can be approximated by shifting the approximation FLU,KL(, ) to the quantization level r, i.e. FLU,KL( ± r, ). For small  and values of  near zero or far away from any quantization level, as well as for large values of 
+and arbitrary , the KL divergence can be approximated by the original non-shifted approximation
+FLU,KL(, ). Based on these observations we construct our KL approximation by properly mixing shifted versions of FLU,KL( ± r, ). We use Gaussian window functions ( ± r) to perform this weighting (to ensure differentiability). The remaining  domain is covered by an approximation
+located at zero and weighted such that this approximation is dominant near zero and far away from
+the quantization levels, which is achieved by introducing the constraint that all window functions
+sum up to one on the full  domain. See Fig. 2 for a visual representation of shifted approximations
+and their respective window functions.
+
+We evaluate the quality of our KL approximation (Eq. (16)) by comparing against a ground-trugh Monte Carlo approximation on a dense grid over the full range of relevant  and  values. Results of this comparison are shown in Fig. 4.
+
+A.4 REUSING THE KL APPROXIMATION FOR ARBITRARY CODEBOOKS
+
+We show that the KL approximation (Eq. (16)), developed for a fixed reference codebook, can be
+reused for arbitrary codebooks as long as codebook learning is restricted to learning a multiplicative scaling factor. Without loss of generality we consider the case of ternary, symmetric codebooks5
+
+cr = [-r, 0, r];
+
+pcr (w)
+
+=
+
+3 k=1
+
+|w
+
+pk - cr,k|
+
+(19)
+
+5Note that indices ij have been dropped for notational brevity from the whole section. However, throughout the section we refer to individual weights wij and their variational parameters ij and ij
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+Figure 4: Quantitative analysis of the KL approxmiation quality. The top panel shows the "groundtruth" (computed via computationally expensive Monte Carlo approximation), the middle panel shows our approxiomation (Eq. (16)) and the bottom panel shows the difference between both. The maximum absolute error between our approximation and the ground-truth is 1.07.
+
+where r  R+ is the quantization level value and pcr denotes a sparsity-inducing, quantizing prior over weights (sparsity is induced because one of the codebook entries is fixed to 0). We denote
+cr as the reference codebook for which we design the KL approximation DKL(q(w)||pcr ) = FKL(, , cr) (Eq. (16)). This approximation can be reused for any symmetric ternary codebook ca = [-a, 0, a] with quantization level a  R+. The latter can be seen by representing ca with the reference codebook and a positive scaling factor s > 0 as ca = scr, s = a/r. This re-scaling translates into a multiplicative re-scaling of the variational parameters  and . To see this, consider
+the prior pca , based on codebook ca:
+
+pca (w)
+
+=
+
+1 Z
+
+3 k=1
+
+|w
+
+pk - ca,k|
+
+=
+
+1 Z
+
+3 k=1
+
+|w
+
+pk . - scr,k|
+
+(20)
+
+The KL divergence between the posterior q(w) and a prior based on the codebook ca is given by
+
+DKL(q(w)||pca (w)) = = =
+
+q(w) log
+
+q(w)
+3 pk
+
+dw + C
+
+k=1 |w-ca,k|
+
+q(w) log 1
+s
+
+q(w)
+3 pk
+
+dw + C
+
+k=1
+
+|
+
+w s
+
+-cr,k
+
+|
+
+q(sz) log 1
+s
+
+q(sz)
+3 pk
+
+sdz + C.
+
+k=1 |z-cr,k|
+
+|
+
+subst.
+
+z
+
+=
+
+w , dw
+
+=
+
+sdz
+
+s
+
+(21)
+
+Since q(sz) is Gaussian, the scaling s can be transfered into the variational parameters  = (, ):
+
+q(sz)
+
+=
+
+N (s; , 2)
+
+=
+
+1 N (z; s
+
+ ,
+s
+
+2 s2 )
+
+=
+
+1 s q^(z),
+
+15
+
+Under review as a conference paper at ICLR 2018
+
+with
+
+^
+
+=
+
+(
+
+ s
+
+,
+
+ s
+
+).
+
+Inserting
+
+into
+
+Eq.
+
+(21)
+
+yields:
+
+DKL(q(w)||pca (w)) =
+
+1 s q^(z) log 1
+s
+
+1 s
+
+q^(z)
+
+3 pk
+
+sdz + C.
+
+k=1 |z-cr,k|
+
+= q^(z) log
+
+q^(z)
+3 pk
+
+dz + C.
+
+k=1 |z-cr,k|
+
+= DKL(q^(w)||pcr (w)).
+
+(22)
+
+Thus, DKL(q(w)||pca (w)) = DKL(q^(w)||pcr (w))  FKL(/s, /s, cr), where FKL is given
+
+by Eq. (16). This means that the KL approximation can be used for arbitrary ternary, symmetric
+
+codebooks of the form ca = [-a, 0, a] = scr because the scaling factor s translates into a re-scaling
+
+of
+
+the
+
+variational
+
+parameters
+
+^
+
+=
+
+(
+
+ s
+
+,
+
+ s
+
+).
+
+16
+
+

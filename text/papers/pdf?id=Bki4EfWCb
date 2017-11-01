@@ -1,0 +1,585 @@
+Under review as a conference paper at ICLR 2018
+
+INFERENCE DISSECTION IN VARIATIONAL AUTOENCODERS
+Anonymous authors Paper under double-blind review
+
+ABSTRACT
+It can be difficult to diagnose whether a given variational autoencoder can benefit from more costly inference and if so, how to improve the inference. This paper introduces quantitative tests to answer these questions. We categorize the ways that inference can fail in VAEs in order to gain insight into how to improve it. These tests also illustrate how the choice of the approximate posterior influences the trained model.
+
+1 INTRODUCTION
+
+There has been significant work on improving variational autoencoders (VAEs) (Kingma & Welling, 2014; Rezende et al., 2014)) through the development of expressive approximate posteriors (Rezende & Mohamed, 2015; Kingma et al., 2016; Ranganath et al., 2016; Tomczak & Welling, 2016; 2017). These works have shown that with more expressive approximate posteriors, the model learns a better distribution over the data.
+
+In this paper, we analyze how inference is influenced by expressive approximate posteriors and subsequently how this affects the learned model. We begin by examining the sources that contribute to the mismatch between the true and approximate posterior. We refer to this mismatch as the inference gap. Moreover, we break down the gap into two components: the approximation gap and the amortization gap. The approximation gap comes from the inability of the approximate distribution family to exactly match the true posterior. The amortization gap refers to the difference caused by amortizing the variational parameters over the entire training set, instead of optimizing for each datapoint independently. We refer the reader to Table 1 for detailed definitions.
+
+To understand what roles these gaps play in inference, we train VAE models in a number of settings. We compare the gaps under different approximate posterior families, different encoder sizes on the MNIST and FashionMNIST (Xiao et al., 2017) datasets.
+Our contributions are: a) we introduce the amortization and approximation gaps, b) we study in which settings each of them contribute more to the total inference gap, providing a tool to guide future improvements in VAE inference, and c) we quantitatively demonstrate that the true posterior can be influenced by the approximation through the joint optimization and the role warm-up plays.
+
+log () [   ] []
+
+ 
+ 
+
+Figure 1: Gaps in Inference
+
+2 BACKGROUND
+
+2.1 VARIATIONAL AUTOENCODERS
+
+Let x be the observed variable, z the latent variable, and p(x, z) be their joint distribution. Given a dataset X = {x1, x2, ..., xN }, we would like to maximize the marginal log-likelihood:
+
+NN
+
+log p(X) = log p(xi) = log p(xi, zi)dzi.
+
+(1)
+
+i=1 i=1
+
+1
+
+Under review as a conference paper at ICLR 2018
+
+Term Inference Gap Approximation Gap Amortization Gap
+
+Definition
+log p(x) - L[q] log p(x) - L[q]
+L[q] - L[q]
+
+VAE KL(q(z|x)||p(z|x)) KL(q(z|x)||p(z|x)) KL(q(z|x)||p(z|x)) - KL(q(z|x)||p(z|x))
+
+Table 1: Summary of Gap Terms. The middle column refers to the general case where our variational objective is a lower bound on the marginal log-likelihood (not necessarily the ELBO). The right most column demonstrates the specific case in VAEs. q(z|x) refers to the optimal approximation within a family Q, i.e. q(z|x) = arg minqQ KL(q(z|x)||p(z|x)).
+
+In practice, the marginal log-likelihood is computationally intractable due to the integration over the latent variable z. Instead, VAEs optimize the evidence lower bound (ELBO) of the marginal log-likelihood (Kingma & Welling, 2014; Rezende et al., 2014):
+
+log p(x) = Ezq(z|x) log  Ezq(z|x) log
+
+p(x, z) q(z|x) p(x, z) q(z|x)
+
++ KL(q(z|x)||p(z|x)) = LVAE[q].
+
+(2) (3)
+
+From the above we can see that if q(z|x) = p(z|x), then the lower bound is tight, which motivates approximations q(z|x) which have the capacity to model p(z|x).
+The original VAE parameterizes the likelihood p(x|z) and inference distribution q(z|x) by deep neural nets. The overall model is trained by stochastically optimizing the ELBO using the reparametrization trick (Kingma & Welling, 2014).
+
+2.2 EXPRESSIVE APPROXIMATE POSTERIORS
+There are a number of strategies for increasing the expressiveness of approximate posteriors, going beyond the original factorized-Gaussian. We briefly summarize normalizing flows and auxiliary variables.
+
+2.2.1 NORMALIZING FLOWS
+
+Normalizing flow (Rezende & Mohamed, 2015) is a change of variables procedure for constructing complex distributions by transforming probability densities through a series of invertible mappings. Specifically, if we transform a random variable z0 with distribution q0(z), the resulting random variable zT = T (z0) has a distribution:
+
+qT (zT ) = q0(z0)
+
+det zT z0
+
+-1
+
+(4)
+
+By successively applying these transformations, we can build arbitrarily complex distributions. Stacking these transformations remains tractable due to the determinant being decomposable: det(A · B) = det(A)det(B). An important property of these transformations is that we can take expectations with respect to the transformed density qT (zT ) without explicitly knowing its formula:
+
+EqT [h(zT )] = Eq0 [h(fT (fT -1(...f1(z0))))]
+
+(5)
+
+This is known as the law of the unconscious statistician (LOTUS). Using the change of variable and LOTUS, the lower bound can be written as:
+
+
+
+
+
+log
+
+p(x)
+
+
+
+Ez0 q0 (z |x)
+
+log 
+
+ 
+
+q0(z0|x)
+
+p(x, zT )
+
+T t=1
+
+det
+
+zt  zt-1
+
+-1
+
+ 
+
+.
+
+(6)
+
+The main constraint on these transformations is that the determinant of their Jacobian needs to be easily computable.
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+2.2.2 AUXILIARY VARIABLES
+
+Deep generative models can be extended with auxiliary variables which leave the generative model unchanged but make the variational distribution more expressive. Just as hierarchical Bayesian models induce dependencies between data, hierarchical variational models can induce dependencies between latent variables. The addition of the auxiliary variable changes the lower bound to:
+
+log(p(x))F  Ez,vq(z,v|x) log
+
+p(x, z)r(v|x, z) q(z|x, v)q(v|x)
+
+= Eq(z|x) log
+
+p(x, z) q(z|x)
+
+- KL q(v|z, x) r(v|x, z)
+
+(7) (8)
+
+where r(v|x, z) is called the reverse model. From Eqn. 8, we see that this bound is looser than the regular ELBO, however the extra flexibility provided by the auxiliary variable can compensate and result in a higher lower bound. This idea has been employed in works such as auxiliary deep generative models (ADGM, Maaløe et al. (2016)), hierarchical variational models (HVM, Ranganath et al. (2016)) and Hamiltonian variational inference (HVI, Salimans et al. (2015)).
+
+2.3 EVALUATION METRICS Here we describe two options for estimating the marginal log-likelihood of a model: IWAE and AIS.
+
+2.3.1 IWAE BOUND
+
+The bound used in Burda et al. (2016) is a tighter lower bound than the VAE bound. As the number of importance samples approaches infinity, the bound approaches the marginal log likelihood. It is often used as an evaluation metric for generative models (Burda et al., 2016; Kingma et al., 2016). More specifically, if we take multiple samples from the q distribution, we can compute a tighter lower bound to the marginal log likelihood:
+
+log p(x)  Ez1...zkq(z|x) log
+
+1 k p(x, zi) k i=1 q(zi|x)
+
+= LIWAE[q].
+
+(9)
+
+This importance weighted bound was introduced along with the Importance Weighted Autoencoder (Burda et al., 2016), so we will refer to it as the IWAE bound. As shown by Bachman & Precup (2015) and Cremer et al. (2017), the IWAE bound can be seen as using the VAE bound but with an importance weighted q distribution.
+
+2.3.2 ANNEALED IMPORTANCE SAMPLING
+
+Annealed importance sampling (AIS, Neal (2001); Jarzynski (1997)) is another means of computing a lower bound to the marginal log-likelihood. Similarly to the importance weighted bound, AIS must sample a proposal distribution f1(z) and compute the density of these samples, however, AIS then transforms the samples through a sequence of reversible transitions Tt(z |z). The transitions anneal the proposal distribution to the desired distribution fT (z).
+Specifically, AIS samples an initial state z1  f1(z) and sets an initial weight w1 = 1. For the following annealing steps, zt is sampled from Tt(z |z) and the weight is updated according to:
+
+wt
+
+=
+
+wt-1
+
+ft(zt-1) . ft-1(zt-1)
+
+This procedure produces weight wT such that E [wT ] = ZT /Z1, where ZT and Z1 are the normalizing constants of fT (z) and f1(z) respectively. This pertains to estimating the marginal likelihood when the target distribution is p(x, z) and we are integrating with respect to z.
+Typically, the intermediate distributions are simply defined to be geometric averages: ft(x) = f1(x)1-t fT (x)t , where t is monotonically increasing with 1 = 0 and T = 1. When f1(x) = p(z) and fT (x) = p(x, z), the intermediate distributions are: fi(x) = f0(x)fn(x)1-i .
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+3 METHODS
+
+3.1 FLEXIBLE APPROXIMATE POSTERIOR
+
+Our experimentation compares two families of approximate posteriors: the fully-factorized Gaussian (FFG) and a flexible flow (Flow). Our choice of flow is a combination of the Real NVP (Dinh et al., 2017) and auxiliary variables (Ranganath et al., 2016; Maaløe et al., 2016). Our model also resembles leap-frog dynamics applied in Hamiltonian Monte Carlo (HMC, Neal et al. (2011)).
+
+Let z  Rn be the variable of interest and v  Rn the auxiliary variable. Each flow step involves:
+
+v = v  1(z) + µ1(z)
+
+(10)
+
+z = z  2(v ) + µ2(v )
+
+(11)
+
+where 1, 2, µ1, µ2 : Rn  Rn are differentiable mappings parameterized by neural nets and  takes the Hadamard or element-wise product. The determinant of the combined transformation's Jacobian, |det(Df )|, can be easily evaluated. See section 6.2 in Appendix for a detailed derivation.
+
+Thus, we can jointly train the generative and flow-based inference model by optimizing the bound:
+
+log p(x)  Ez,vq(z,v|x) log
+
+p(x, z )r(v |x, z ) q(z|x, v)q(v|x) |det(Df )|-1
+
+= Lflow[q].
+
+(12)
+
+Additionally, multiple such type of transformations can be stacked to improve expressiveness. We refer readers to the Appendix for details of our flow configuration adopted in the experimentation.
+
+3.2 EVALUATION BOUNDS
+For our experiments, we test two different variational distributions q: the fully-factorized Gaussian qF F G or the flexible approximation qF low, described above. We use several bounds for evaluation. LVAE[q] refers to the bound of Eqn. 3, with q being either qF F G or qF low depending on the experiment. LIWAE[q] (or IW) is the bound defined at Eqn. 9. To compute LVAE[q] and LIWAE[q], we use 5000 samples. When computing the AIS bound, LAIS, we use Hamiltonian Monte Carlo (Neal, 2011) as our transition operator Tt(z |z). We use 100 samples, 10 HMC steps, and 500 intermediate distributions. The initial distribution is the prior, so that it is encoder-independent.
+
+3.3 GAPS
+
+We break down the inference gap into two parts:
+
+Inference Gap = Approximation Gap + Amortization Gap
+
+The definitions of Table 1 are general definitions for any lower bound and any variational distribution. In this paper, we focus on the VAE lower bound, LVAE[q] (Eqn. 3). In the VAE case, we can translate the definitions to KL divergences by rearranging Eqn. 2:
+
+log p(x) - LVAE[q] = KL(q(z|x)||p(z|x)).
+
+(13)
+
+Similarly, the approximation gap is: log p(x) - LVAE[q] = KL(q(z|x)||p(z|x)), where q(z|x) = arg minqQ KL(q(z|x)||p(z|x)). In our experiments, to obtain q, we optimize the parameters of the variational distribution q for each datapoint. Thus, for the FFG variational distribution, we optimize
+the mean and variance for each datapoint. For the Flow model, we optimize the parameters of the
+flow and auxiliary variable networks for each datapoint. We refer to the resulting distributions as mOpatxim(LaAl IFS,FLGIW(AqFE[FqG])).and Optimal Flow (qF low). We approximate log p(x), denoted log p^(x), by
+
+4 RELATED WORK
+Model evaluation with AIS for decoder-based models was proposed by Wu et al. (2017). They validated the accuracy of the approach with Bidirectional Monte Carlo (BDMC, Grosse et al. (2015))
+
+4
+
+Under review as a conference paper at ICLR 2018
+ABCD
+TProusteerior
+FAFmGortized
+FOFpGtimal
+FOlpotwimal
+Figure 2: True Posterior and Approximate Distributions of a VAE with 2D latent space. Columns: 4 different datapoints. FFG: Fully-factorized Gaussian. Flow: Using a flexible approximate distribution. Amortized: Using amortized parameters. Optimal: Parameters optimized for individual datapoints. The green distributions are the true posterior distributions, highlighting the mismatch with the approximation.
+and demonstrated the advantage of using AIS over the IWAE bound for evaluation when the inference network overfits to the training data. Much of the earlier work on variational inference focused on optimizing the variational parameters locally for each datapoint. Salakhutdinov & Larochelle (2010) perform such local optimization when learning deep Boltzmann machines. The original Stochastic Variational Inference scheme (SVI, Hoffman et al. (2013)) also specifies the variational parameters to be optimized locally in the inner loop. Krishnan et al. (2017) remark on two sources of error in variational learning with inference networks, and propose to optimize locally with an initialization output by the inference network. They show improved training on high-dimensional, sparse data with the hybrid method, claiming that local optimization reduces the negative effects of random initialization in the inference network early on in training. Yet, their work only dwells on reducing the amortization gap during training and does not touch on analyzing the approximation gap caused by using the Gaussian family. Even though it is clear that failed inference would lead to a failed generative model, little quantitative assessment has been done showing the effect of the approximate posterior on the true posterior. Burda et al. (2016) visually demonstrate that trained with an importance-weighted approximate approximate, the resulting true posterior is more complex than those trained with fully-factorized Gaussian approximations. We extend this observation quantitatively in the setting of flow-based approximate inference in VAEs.
+5 EXPERIMENTAL RESULTS
+5.1 INTUITION THROUGH VISUALIZATION
+To begin, we would like to gain some insight into the properties of inference in VAEs by visualizing different distributions in the latent space. To this end, we trained a VAE with a two-dimensional latent space and in Fig. 2 we show contour plots of various distributions. The first row contains contour plots of the true posteriors p(z|x) for four different training datapoints (columns). We've selected these four examples to highlight different inference phenomena. The amortized FFG row refers to the output of the recognition net, in this case, a fully-factorized Gaussian (FFG) approximation. Optimal FFG is the FFG that best fits this datapoint's posterior. Optimal Flow is the optimal
+5
+
+Under review as a conference paper at ICLR 2018
+
+Log-Likelihood Log-Likelihood
+
+89 90 91 92 93 94 95 96
+400
+
+FFG Flow 89
+
+90
+
+91
+
+92
+
+93
+
+VAE train IW train IW test AIS train AIS test
+
+94 95 96
+
+1300 2200 3100 400 Epochs
+
+VAE train IW train IW test AIS train AIS test 1300 2200 3100 Epochs
+
+(a) Full dataset
+
+80 100 120 140 160
+1000
+
+FFG Flow
+80
+
+100
+
+VAE train
+
+IW train
+
+IW test AIS train
+
+120
+
+AIS test
+
+140 VAE train IW train IW test AIS train
+160 AIS test
+
+1900 Epochs
+
+2800 1000
+
+1900 Epochs
+
+(b) 1000 datapoints
+
+2800
+
+Figure 3: Training curves for a FFG and a Flow inference model on MNIST. AIS provides the tightest lower bound and is independent of encoder overfitting. There is little difference between FFG and Flow models trained on the 1000 datapoints since inference is nearly equivalent.
+
+fit of a flexible distribution to the same posterior, where the flexible distribution we use is described in 3.1.
+Posterior A is an example of a distribution where FFG can fit well. Posterior B is an example of dependence between dimensions, demonstrating the limitation of having a factorized approximation. Posterior C highlights a shortcoming of performing amortization with a limited-capacity recognition network, where the amortized FFG shares little support with the true posterior. Posterior D is a bimodal distribution which demonstrates the ability of the flexible approximation to fit to complex distributions, in contrast to the simple FFG approximation.
+These observations raise the following question: in more typical VAEs, is the amortization of the approximate distribution the leading cause of the distribution mismatch, or is it the approximation?
+5.2 THE INFERENCE GAP
+How well is inference done in VAEs during training? Are we close to doing the optimal or is there much room for improvement? To answer this question, we quantitatively measure the inference gap: the gap between the true marginal log-likelihood and the lower bound. This amounts to measuring how well inference is being done during training. Since we cannot compute the exact marginal log-likelihood, we estimate it using the maximum of any of its lower bounds, described in 3.2.
+Fig. 3a shows training curves for a FFG and Flow inference network as measured by the VAE, IWAE, and AIS bounds on the training and test set. The inference gap on the training set with the FFG model is 3.01 nats, whereas the Flow model is 2.71 nats. Accordingly, the plot shows that the training IWAE bound is much tighter for the Flow model compared to the FFG. Due to this lower inference gap during training, the Flow model achieves a higher AIS bound on the test set than the FFG model.
+To demonstrate that strong inference can be achieved, even with FFG, we train a model on a small dataset. In this experiment, our training set consists of 1000 datapoints randomly chosen from the original MNIST training set. The training curves on this small datatset are show in Fig. 3b. Even with FFG, inference is so strong to the point that the AIS and IWAE bounds are overlapping. Yet, the model is overfitting as seen by the decreasing test set bounds.
+5.2.1 ENCODER AND DECODER OVERFITTING
+We will begin by explaining how we separate encoder from decoder overfitting. Decoder overfitting is the same as in the regular supervised learning scenario, where we compare the train and test error. To measure decoder overfitting independently from encoder overfitting, we use the AIS
+6
+
+Under review as a conference paper at ICLR 2018
+
+log p^(x)
+
+LLVVAAEE[[qqFF
+
+low ] F G]
+
+LVAE[q]
+
+Approximation Gap
+
+Amortization Gap
+
+Inference Gap
+
+MNIST
+
+qF F G -89.85
+
+qF low -88.82
+
+-90.83
+
+-90.40
+
+-91.19 -102.88
+
+-92.76
+
+-91.42
+
+1.34 1.58
+
+1.57 1.02
+
+2.91 2.60
+
+Fashion MNIST
+
+qF F G -97.78
+
+qF low -97.35
+
+-98.03
+
+-97.74
+
+-99.03
+
+-130.90
+
+-103.20 -102.19
+
+1.25 0.39
+
+4.17 4.45
+
+5.42 4.84
+
+Table 2: Inference Gaps. The columns qF F G and qF low refer to the variational distribution used for training the model. All numbers are in nats.
+
+bound since it is encoder-independent. Thus we can observe decoder overfitting through the AIS test training curve. In contrast, the encoder can only overfit in the sense that the recognition network becomes unsuitable for computing the marginal likelihood on the test set. Thus, encoder overfitting is computed by: LAIS - LIW on the test set.
+For the small dataset of Fig. 3b, it clear that there is significant encoder and decoder overfitting. A model trained in this setting would benefit from regularization. For Fig. 3a, the model is not overfit and would benefit from more training. However, there is some encoder overfitting due to the gap between the AIS and IWAE bounds on the test set. Comparing the FFG and Flow models, it appears that the Flow does not have a large effect on encoder or decoder overfitting.
+
+5.3 AMORTIZATION VS APPROXIMATION GAP
+Here we will compare the impact on inference that amortization has compared to the posterior approximation. The evaluation is performed on a subset of 100 datapoints due to the computational cost of optimizing the local parameters for each datapoint. Table 2 are results from training on MNIST and Fashion MNIST. For MNIST, the amortization gap is slightly larger than the approximation gap on the FFG-trained model. For the flow model, although the inference gap is slightly smaller than the FFG model, a larger portion of its inference gap comes from the approximation gap. On Fashion MNIST, which is a more difficult dataset to model, the amortization gap is much larger than the approximation gap.
+How does increasing the capacity of the encoder effect the gaps? We trained the same models with larger encoders. Table 3 are the results of this experiment. We see that the FFG model's inference gap decreases and that decrease is mainly due to a reduction in the amortization gap. For the Flow model, the increased encoder size is less beneficial, but there is a decrease in the amortization gap.
+
+log p^(x)
+
+LLVVAAEE[[qqFF
+
+low ] F G]
+
+LVAE[q]
+
+Approximation Gap
+
+Amortization Gap
+
+Inference Gap
+
+MNIST
+
+qF F G -89.09
+
+qF low -88.59
+
+-90.05
+
+-90.26
+
+-90.34 -103.53
+
+-91.12
+
+-91.25
+
+1.25 1.67
+
+0.78 0.99
+
+2.03 2.66
+
+Fashion MNIST
+
+qF F G -94.55
+
+qF low -97.35
+
+-95.93
+
+-97.74
+
+-98.09
+
+-130.90
+
+-101.28 -102.19
+
+3.54 0.71
+
+3.19 3.73
+
+6.73 4.44
+
+Table 3: Larger Encoder. The columns qF F G and qF low refer to the variational distribution used for training the model. All numbers are in nats.
+
+5.4 INFLUENCE OF APPROXIMATE POSTERIOR ON TRUE POSTERIOR
+We've seen that increasing the expressiveness of the approximation improves the marginal likelihood of the trained model, but to what amount does it alter the true posterior? Will a fully factorized Gaussian approximation cause the true posterior to be more FFG or is the true posterior mostly
+7
+
+Under review as a conference paper at ICLR 2018
+
+fixed? Just as it is hard to evaluate a generative model by visually inspecting samples from the model, its hard to say how Gaussian the true posterior is by visual inspection. We can quantitatively determine how close the posterior is to a FFG distribution by comparing the Optimal FFG bound, LVAE[qF F G], and the Optimal Flow bound, LVAE[qF low].
+In Table 2 on MNIST, the Optimal Flow improves upon the Optimal FFG for the FFG trained model by 0.4 nats. In contrast, on the Flow trained model, the difference increases to 12.5 nats. This suggests that the true posterior of a FFG-trained model is closer to FFG than the true posterior of the Flow-trained model. The same observation can be made on the Fashion MNIST dataset. This implies that the decoder can learn to have a true posterior that fits better to the approximation. Although the generative model can learn to have a posterior that fits to the approximation, it seems that not having this constraint, ie. using a flexible approximate, results in better generative models.
+
+5.4.1 ANNEALING THE ENTROPY
+Typical warm-up (Bowman et al., 2015; Sønderby et al., 2016) refers to annealing KL(q(z|x)||p(z)) during training. This can also be interpreted as performing maximum likelihood estimation (MLE) early on during training. This optimization technique is known to help prevent the latent variable from degrading to the prior (Burda et al., 2016; Sønderby et al., 2016). We employ a similar annealing during training. Rather than annealing the KL, we anneal the entropy of the approximate distribution q:
+Ezq(z|x) [log p(x, z) -  log q(z|x)] ,
+where  is annealed from 0 to 1 over training. This can be interpreted as maximum a posteriori (MAP) in the initial phase. Due to its similarity, we will also refer to this technique as warm-up.
+We find that warm-up is very important for allowing the true posterior to be more complex. Table 4 are results from a model trained without the warm-up schedule. The difference between the Optimal Flow and Optimal FFG for the Flow-trained model is 1.5 nats. In contrast, when trained with warmup in Table 2, the difference is 12.5 nats. Thus, the difference between the Optimal Flow and Optimal FFG is significantly smaller without warmup than with warmup. This suggests that, in addition to preventing the latent variable from degrading to the prior, warmup allows the true posterior to better utilize the flexibility of the expressive approximation, resulting in a better trained model.
+
+log p^(x)
+
+LLVVAAEE[[qqFF
+
+low FG
+
+] ]
+
+LVAE[q]
+
+Approximation Gap
+
+Amortization Gap
+
+Inference Gap
+
+MNIST
+
+qF F G -89.84
+
+qF low -89.41
+
+-90.89 -90.78
+
+-91.02 -92.34
+
+-94.31 -94.29
+
+1.18 1.37
+
+3.29 3.51
+
+4.47 4.88
+
+Fashion MNIST
+
+qF F G -100.56
+
+qF low -100.33
+
+-100.74 -100.61
+
+-101.26 -102.80
+
+-103.63 -104.05
+
+0.70 0.28
+
+2.37 3.44
+
+3.07 3.72
+
+Table 4: Without warm-up. The columns qF F G and qF low refer to the variational distribution used for training the model. All numbers are in nats.
+
+6 CONCLUSION
+In this paper, we broke down the inference gap into two parts: the amortization and approximation gaps. We explored how these gaps were affected by different datasets, different posterior approximations, and different encoder capacities. We confirmed that increasing the capacity of the encoder, there is a reduction in amortization. These gaps could serve for diagnosing inference in VAEs. We also demonstrated the effect that the posterior approximation has on the true posterior by observing how well approximations fit to models trained with different variational distributions. We also improved our understanding of how warm-up helps model optimization, by noticing that warm-up allows the generative model to better utilize the flexibility of the expressive variational distribution. Future work includes evaluating other types of expressive approximations and more complex likelihood functions.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+P. Bachman and D. Precup. Training Deep Generative Models: Variations on a Theme. NIPS Approximate Inference Workshop, 2015.
+S. R. Bowman, L. Vilnis, O. Vinyals, A. M. Dai, R. Jozefowicz, and S. Bengio. Generating Sentences from a Continuous Space. ArXiv e-prints, November 2015.
+Y. Burda, R. Grosse, and R. Salakhutdinov. Importance weighted autoencoders. In ICLR, 2016.
+Djork-Arne´ Clevert, Thomas Unterthiner, and Sepp Hochreiter. Fast and accurate deep network learning by exponential linear units (elus). arXiv preprint arXiv:1511.07289, 2015.
+C. Cremer, Q. Morris, and D. Duvenaud. Reinterpreting Importance-Weighted Autoencoders. ICLR Workshop, 2017.
+L. Dinh, J. Sohl-Dickstein, and S. Bengio. Density estimation using Real NVP. ICLR, 2017.
+R. Grosse, Z. Ghahramani, and R. P Adams. Sandwiching the marginal likelihood using bidirectional monte carlo. arXiv preprint arXiv:1511.02543, 2015.
+Matthew D Hoffman, David M Blei, Chong Wang, and John Paisley. Stochastic variational inference. The Journal of Machine Learning Research, 14(1):1303­1347, 2013.
+C. Jarzynski. Nonequilibrium equality for free energy differences. Physical Review Letters, 78(14): 2690, 1997.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+D.P. Kingma and M. Welling. Auto-Encoding Variational Bayes. In ICLR, 2014.
+D.P. Kingma, T. Salimans, R. Jozefowicz, X. Chen, I. Sutskever, and M. Welling. Improving Variational Inference with Inverse Autoregressive Flow. NIPS, 2016.
+R. G. Krishnan, D. Liang, and M. Hoffman. On the challenges of learning with inference networks on sparse, high-dimensional data. ArXiv e-prints, October 2017.
+L. Maaløe, CK. Sønderby, SK. Sønderby, and O. Winther. Auxiliary Deep Generative Models. ICML, 2016.
+Radford M Neal et al. Mcmc using hamiltonian dynamics. Handbook of Markov Chain Monte Carlo, 2(11), 2011.
+R.M. Neal. Annealed importance sampling. Statistics and Computing, 2001.
+R.M. Neal. MCMC using hamiltonian dynamics. Hand- book of Markov Chain Monte Carlo, 2011.
+R. Ranganath, D. Tran, and D. M. Blei. Hierarchical Variational Models. ICML, 2016.
+D.J. Rezende and S Mohamed. Variational Inference with Normalizing Flows. In ICML, 2015.
+D.J. Rezende, S. Mohamed, and D. Wierstra. Stochastic Backpropagation and Approximate Inference in Deep Generative Models. ICML, 2014.
+Ruslan Salakhutdinov and Hugo Larochelle. Efficient learning of deep boltzmann machines. In Proceedings of the Thirteenth International Conference on Artificial Intelligence and Statistics, pp. 693­700, 2010.
+T. Salimans, D.P. Kingma, and M. Welling. Markov chain monte carlo and variational inference: Bridging the gap. In ICML, 2015.
+C.K. Sønderby, T. Raiko, L. Maaløe, S. Kaae Sønderby, and O. Winther. Ladder Variational Autoencoders. CONF, 2016.
+9
+
+Under review as a conference paper at ICLR 2018
+J. M. Tomczak and M. Welling. Improving Variational Auto-Encoders using Householder Flow. ArXiv e-prints, November 2016.
+J. M. Tomczak and M. Welling. Improving Variational Auto-Encoders using convex combination linear Inverse Autoregressive Flow. ArXiv e-prints, June 2017.
+Y. Wu, Y. Burda, R. Salakhutdinov, and R. Grosse. On the Quantitative Analysis of Decoder-Based Generative Models. ICLR, 2017.
+Han Xiao, Kashif Rasul, and Roland Vollgraf. Fashion-mnist: a novel image dataset for benchmarking machine learning algorithms. github.com/zalandoresearch/fashion-mnist, 2017.
+APPENDIX
+6.1 MODEL ARCHITECTURES AND TRAINING HYPERPARAMETERS
+DX refers to the dimensionality of the input and DZ refers to the dimensionality of the latent space. For MNIST and Fashion MNIST, DX = 784.
+6.1.1 2D VISUALIZATION
+The VAE model of Fig. 2 used a decoder p(x|z) with architecture: DZ - 100 - DX . The encoder q(z|x) was DX - 100 - 2DZ, where the latent space has dimensionality of 50. We used tanh activation functions and a batch size of 50. The model was trained for 3000 epochs with a learning rate of 0.0001.
+6.1.2 MNIST
+Here we describe the network architectures for the MNIST experiments. The decoder p(x|z) is DZ - 200 - 200 - DX . The encoder q(z|x) is DX - 200 - 200 - 2DZ , where the latent space has dimensionality of 50, so it outputs a mean and variance. For the large encoder experiment of Table 3, the encoder architecture is DX - 500 - 200 - 200 - 2DZ . For flexible model, we use two flow steps where each step contains a number of other networks: q(v0|x): DX - 200 - 2DZ q(z0|v0, x): [DX + DZ ] - 200 - 2DZ r(vT |x): [DX + DZ ] - 200 - 2DZ We use tanh for the activation functions and batch size of 100. We use the same learning rate schedule as (Burda et al., 2016). We use the warm-up schedule described in 5.4.1, where the annealing is over the first 100 epochs.
+6.1.3 FASHION-MNIST
+Fashion-MNIST consists of a training and test dataset with 60k and 10k datapoints respectively. We rescale the original dataset so that pixel values are within the greyscale range, i.e. [0, 1]. We then binarize the whole dataset statically, so that our Bernoulli likelihood model p(x|z) is valid. The VAE model used to trained on Fashion-MNIST has the same architecture as that used to train on MNIST. All neural networks chosen to parameterize the flow have hidden layers consisting of 100 units as opposed to 200 units as in the MNIST setting: q(v0|x): DX - 100 - 2DZ q(z0|v0, x): [DX + DZ ] - 100 - 2DZ r(vT |x): [DX + DZ ] - 100 - 2DZ In the large encoder setting, we change the number of hidden units for the inference network to be 500, instead of 200. The warm-up models were trained with a linearly increasing annealing constant over the first 400 epochs of training. The activation function were chosen to be the exponential linear unit (ELU, Clevert et al. (2015)), as we observed improved performance with it over tanh. We follow the same learning rate schedule
+10
+
+Under review as a conference paper at ICLR 2018
+
+and train for the same amount of epochs as described by Burda et al. (2016). All models were trained with the ADAM optimizer (Kingma & Ba, 2014).
+
+6.2 COMPUTATION OF THE DETERMINANT
+
+The overall mapping f that performs (z, v)  (z , v ) is the composition of two sheer mappings f1 and f2 that respectively perform (z, v)  (z, v ) and (z, v )  (z , v ). Since the Jacobian of either one of the sheer mappings is diagonal, the determinant of the composed transformation's Jacobian
+Df can therefore be easily computed:
+
+n
+det(Df ) = det(Df1) · det(Df2) = 1(z)i
+i=1
+
+n
+2(v )j .
+j=1
+
+11
+
+

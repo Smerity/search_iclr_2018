@@ -1,0 +1,624 @@
+Under review as a conference paper at ICLR 2018
+STATE SPACE LSTM MODELS
+WITH INFERENCE USING SEQUENTIAL MONTE CARLO
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Long Short-Term Memory (LSTM) is one of the most powerful sequence models. Despite the strong performance, however, it lacks the nice interpretability as in state space models. In this paper, we present a way to combine the best of both worlds by introducing State Space LSTM (SSL) models that generalizes the earlier work Zaheer et al. (2017) of combining topic models with LSTM. However, unlike Zaheer et al. (2017), we do not make any factorization assumptions in our inference algorithm. We present an efficient sampler based on sequential Monte Carlo (SMC) method that draws from the joint posterior directly. Experimental results confirms the superiority and stability of this SMC inference algorithm on a variety of domains.
+1 INTRODUCTION
+State space models (SSMs), such as hidden Markov models (HMM) and linear dynamical systems (LDS), have been the workhorse of sequence modeling in the past decades From a graphical model perspective, efficient message passing algorithms (Stratonovich, 1960; Kalman, 1960) are available in compact closed form thanks to their simple linear Markov structure. However, simplicity comes at a cost: real world sequences can have long-range dependencies that cannot be captured by Markov models; and the linearity of transition and emission restricts the flexibility of the model for complex sequences.
+A popular alternative is the recurrent neural networks (RNN), for instance the Long Short-Term Memory (LSTM) (Hochreiter & Schmidhuber, 1997) which has become the sine qua non for sequence modeling nowadays. Instead of associating the observations with stochastic latent variables, RNN directly defines the distribution of each observation conditioned on the past, parameterized by a neural network. The recurrent parameterization not only allows RNN to provide a rich function class, but also permits scalable stochastic optimization such as the backpropagation through time (BPTT) algorithm. However, flexibility does not come for free as well: due to the complex form of the transition function, the hidden states of RNN are often hard to interpret. Moreover, it can require large amount of parameters for seemingly simple sequence models (Zaheer et al., 2017).
+In this paper, we propose a new class of models State Space LSTM (SSL) that combines the best of both worlds. We show that SSLs can handle nonlinear, non-Markovian dynamics like RNNs, while retaining the probabilistic interpretations of SSMs. The intuition, in short, is to separate the state space from the sample space. In particular, instead of directly estimating the dynamics from the observed sequence, we focus on modeling the sequence of latent states, which may represent the bona fide underlying dynamics that generated the noisy observations. Unlike SSMs, where the same goal is pursued under linearity and Markov assumption, we alleviate the restriction by directly modeling the transition function between states parameterized by a neural network. On the other hand, we bridge the state space and the sample space using classical probabilistic relation, which not only brings additional interpretability, but also enables the LSTM to work with more structured representation rather than the noisy observations.
+Indeed, parameter estimation of such models can be nontrivial. Since the LSTM is defined over a sequence of latent variables rather than observations, it is not straightforward to apply the usual BPTT algorithm without making variational approximations. In Zaheer et al. (2017), which is an instance of SSL, an EM-type approach was employed: the algorithm alternates between imputing the latent states and optimizing the LSTM over the imputed sequences. However, as we show below, the inference implicitly assumes the posterior is factorizable through time. This is a restrictive assumption
+1
+
+Under review as a conference paper at ICLR 2018
+
+since the benefit of rich state transition brought by the LSTM may be neutralized by breaking down the posterior over time.
+We present a general parameter estimation scheme for the proposed class of models based on sequential Monte Carlo (SMC) (Doucet et al., 2001), in particular the Particle Gibbs (Andrieu et al., 2010). Instead of sampling each time point individually, we directly sample from the joint posterior without making limiting factorization assumptions. Through extensive experiments we verify that sampling from the full posterior leads to significant improvement in the performance.
+Related works Enhancing state space models using neural networks is not a new idea. Traditional approaches can be traced back to nonlinear extensions of linear dynamical systems, such as extended or unscented Kalman filters (Julier & Uhlmann, 1997), where both state transition and emission are generalized to nonlinear functions. The idea of parameterizing them with neural networks can be found in Ghahramani & Roweis (1999), as well as many recent works (Krishnan et al., 2015; Archer et al., 2015; Johnson et al., 2016; Krishnan et al., 2017; Karl et al., 2017) thanks to the development of recognition networks (Kingma & Welling, 2014; Rezende et al., 2014). Enriching the output distribution of RNN has also regain popularity recently. Unlike conventionally used multinomial output or mixture density networks (Bishop, 1994), recent approaches seek for more flexible family of distributions such as restricted Boltzmann machines (RBM) (Boulanger-Lewandowski et al., 2012) or variational auto-encoders (VAE) (Gregor et al., 2015; Chung et al., 2015).
+On the flip side, there have been studies in introducing stochasticity to recurrent neural networks. For instance, Pachitariu & Sahani (2012) and Bayer & Osendorfer (2014) incorporated independent latent variables at each time step; while in Fraccaro et al. (2016) the RNN is attached to both latent states and observations. We note that in our approach the transition and emission are decoupled, not only for interpretability but also for efficient inference without variational assumptions.
+On a related note, sequential Monte Carlo methods have recently received attention in approximating the variational objective (Maddison et al., 2017; Le et al., 2017; Naesseth et al., 2017). Despite the similarity, we emphasize that the context is different: we take a stochastic EM approach, where the full expectation in E-step is replaced by the samples from SMC. In contrast, SMC in above works is aimed at providing a tighter lower bound for the variational objective.
+Outline Section 2 introduces some basic concepts before the main class of models are presented in Section 3. We describe a parameter estimation algorithm in Section 4, with two concrete examples for continuous and discrete latent states respectively. The experimental results in Section 5 confirm the promises, and we discuss the contributions and limitations of the current work in Section 6.
+
+2 BACKGROUND
+
+In this section, we provide a brief review of some key ingredients of this paper. We first describe the SSMs and the RNNs for sequence modeling, and then outline the SMC methods for sampling from a series of distributions.
+
+2.1 STATE SPACE MODELS
+
+Consider a sequence of observations x1:T = (x1, . . . , xT ) and a corresponding sequence of latent states z1:T = (z1, . . . , zT ). The SSMs are a class of graphical models that defines probabilistic dependencies between latent states and the observations. A classical example of SSM is the (Gaussian)
+LDS, where real-valued states evolve linearly over time under the first-order Markov assumption. Let xt  Rd and zt  Rk, the LDS can be expressed by two equations:
+
+(Transition) zt = Azt-1 + ,   N (0, Q)
+
+(Emission) xt = Czt + ,
+
+ N (0, R),
+
+(1)
+
+where A  Rk×k, C  Rd×k, and Q and R are covariance matrices of corresponding sizes. They are widely applied in modeling the dynamics of moving objects, with zt representing the true state of the system, such as location and velocity of the object, and xt being the noisy observation under zero-mean Gaussian noise.
+
+We mention two important inference tasks (Koller & Friedman, 2009) associated with SSMs. The first tasks is filtering: at any time t, compute p(zt|x1:t), i.e. the most up-to-date belief of the state
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 Sequential Monte Carlo
+
+1. Let z0p = z0 and weights 0p = 1/P for p = 1, . . . , P . 2. For t = 1, . . . , T :
+
+(a) Sample ancestors apt-1  t-1 for p = 1, . . . , P .
+
+(b) Sample particles ztp  f (zt|z1a:ptt--11) for p = 1, . . . , P .
+
+(c) Set z1p:t = (z1a:tpt--11, ztp) for p = 1, . . . , P .
+
+(d)
+
+Compute the normalized weights tp 
+
+t (z1p:t ) t-1(z1a:tpt--11)f (ztp|z1a:tpt--11)
+
+for p = 1, . . . , P .
+
+zt conditioned on all past and current observations x1:t. The other task is smoothing, which computes p(zt|x1:T ), i.e. the update to the belief of a latent state by incorporating future observations. One of the beauties of SSMs is that these inference tasks are available in closed form, thanks to the simple Markovian dynamics of the latent states. For instance, the forward-backward algorithm (Stratonovich, 1960), the Kalman filter (Kalman, 1960), and RTS smoother (Rauch et al., 1965) are widely appreciated in the literature of HMM and LDS.
+Having obtained the closed form filtering and smoothing equations, one can make use of the EM algorithm to find the maximum likelihood estimate (MLE) of the parameters given observations. In the case of LDS, the E-step can be computed by RTS smoother and the M-step is simple subproblems such as least-squares regression. We refer to Ghahramani & Hinton (1996) for a full exposition on learning the parameters of LDS using EM iterations.
+
+2.2 RECURRENT NEURAL NETWORKS
+
+RNNs have received remarkable attention in recent years due to their strong benchmark performance
+as well as successful applications in real-world problems. Unlike SSMs, RNNs aim to directly learn the complex generative distribution of p(xt|x1:t-1) using a neural network, with the help of a deterministic internal state st:
+
+p(xt|x1:t-1) = p(xt; g(st)), st = RNN(st-1, xt-1),
+
+(2)
+
+where RNN(·, ·) is the transition function defined by a neural network, and g(·) is an arbitrary
+differentiable function that maps the RNN state st to the parameter of the distribution of xt. The flexibility of the transformation function allows the RNN to learn from complex nonlinear non-
+Gaussian sequences. Moreover, since the state st is a deterministic function of the past observations x1:t-1, RNNs can capture long-range dependencies, for instance matching brackets in programming languages (Karpathy et al., 2015).
+
+The BPTT algorithm can be used to find the MLE of the parameters of RNN(·, ·) and g(·). However, although RNNs can, in principle, model long-range dependencies, directly applying BPTT can be difficult in practice since the repeated application of a squashing nonlinear activation function, such as tanh or logistic sigmoid, results in an exponential decay in the error signal through time. LSTMs (Hochreiter & Schmidhuber, 1997) are designed to cope with the such vanishing gradient problems, by introducing an extra memory cell that is constructed as a linear combination of the previous state and signal from the input. In this work, we also use LSTMs as building blocks, as in Zaheer et al. (2017).
+
+2.3 SEQUENTIAL MONTE CARLO
+
+Sequential Monte Carlo (SMC) (Doucet et al., 2001) is an algorithm that samples from a series
+of potentially unnormalized densities 1(z1), . . . , T (z1:T ). At each step t, SMC approximates the target density t with P weighted particles using importance distribution f (zt|z1:t-1):
+
+t(z1:t)  ^t(z1:t) =
+
+tpz1p:t (z1:t),
+
+p
+
+(3)
+
+where tp is the importance weight of the p-th particle and x is the Dirac point mass at x. Repeating this approximation for every t leads to the SMC method, outlined in Algorithm 1.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+LSTM states st
+
+Latent states zt
+
+Observations xt
+
+(a) Full model with explicit LSTM states.
+
+(b) Model after collapsing LSTM states.
+
+Figure 1: Generative process of SSL.
+
+The key to this method lies in the resampling, which is implemented by repeatedly drawing the ancestors of particles at each step. Intuitively, it encourages the particles with a higher likelihood to survive longer, since the weight reflects the likelihood of the particle path. The final Monte Carlo estimate (3) consists of only survived particle paths, and sampling from this point masses is equivalent to choosing a particle path according to the last weights T . We refer to Doucet et al. (2001); Andrieu et al. (2010) for detailed proof of the method.
+
+3 STATE SPACE LSTM MODELS
+
+In this section, we present the class of State Space LSTM (SSL) models that combines interpretability of SSMs and flexibility of LSTMs.
+The key intuition, motivated by SSMs, is to learn dynamics in the state space, rather than in the sample space. However, we do not assume transition in the state space is linear, Gaussian, or Markovian. Existing approaches such as the extended Kalman filter (EKF) attempted to work with a general nonlinear transition function. Unfortunately, additional flexibility also introduced extra difficulty in the parameter estimation: EKF relies heavily on linearizing the nonlinear functions. We propose to use LSTM to model the dynamics in the latent state space, as they can learn from complex sequences without making limiting assumptions. The BPTT algorithm is also well established so that no additional approximation is needed in training the latent dynamics.
+
+Generative process Let h(·) be the emission function that maps a latent state to a parameter of the sample distribution. As illustrated in Figure 1 (a), the generative process of SSL for a single sequence is:
+
+· For t = 1, . . . , T :
+1. Perform LSTM transition: st = LSTM(st-1, zt-1) 2. Draw latent state: zt  p(z; g(st)) 3. Draw observation: xt  p(x; h(zt))
+
+The generative process specifies the following joint likelihood, with a similar factorization as SSMs except for the Markov transition:
+
+T
+
+p(x1:T , z1:T ) = p(zt|z1:t-1)p(xt|zt),
+
+(4)
+
+t=1
+where p(zt|z1:t-1) = p(zt; g(st)),  is the set of parameters of LSTM(·, ·) and g(·), and  is the parameters of h(·). The structure of the likelihood function is better illustrated in Figure 1 (b), where each latent state zt is dependent to all previous states z1:t-1 after substituting st recursively. This allows the SSL to have non-Markovian state transition, with parsimonious parameterization thanks to the recurrent structure of LSTMs.
+
+Parameter estimation We continue with a single sequence for the ease of notation. A variational lower bound to the marginal data likelihood is given by
+
+log p(x1:T )  Eq
+
+log p(z1:T )p(x1:T |z1:T ) q(z1:T )
+
+,
+
+(5)
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+where q(z1:T ) is the variational distribution. Following the (stochastic) EM approach, iteratively maximizing the lower bound w.r.t. q and the model parameters (, ) leads to the following updates:
+
+· E-step: The optimal variational distribution is given by the posterior:
+
+q (z1:T )  p(z1:T )p(x1:T |z1:T ).
+
+(6)
+
+In the case of LDS or HMM, efficient smoothing algorithms such as the RTS smoother or the forward-backward algorithm are available for computing the posterior expectations of sufficient statistics. However, without Markovian state transition, although the forward messages can still be computed, the backward recursion is no longer accessible.
+
+· S-step: Due to the difficulties in taking expectations, we take an alternative approach to collect posterior samples instead:
+
+z1:T  q (z1:T ),
+
+(7)
+
+given only the filtering equations. We discuss the posterior sampling algorithm in detail in
+
+the next section.
+
+· M-step: Given the posterior samples z1:T , which can be seen as Monte Carlo estimate of the expectations, the subproblem for  and  are
+
+ = argmax log p(z1:T )
+
+ = argmax log p(xt|zt ),
+t
+
+(8)
+
+which is exactly the MLE of an LSTM, with z1:T serving as the input sequence, and the MLE of the given emission model.
+
+Having seen the generative model and the estimation algorithm, we can now discuss some instances of the proposed class of models. In particular, we provide two examples of SSL, for continuous and discrete latent states respectively.
+
+Example 1 (Gaussian SSL) Suppose zt and xt are real-valued vectors. A typical choice of the transition and emission is the Gaussian distribution:
+
+p(zt; g(st)) = N (zt; gµ(st), g(st)) p(xt; h(zt)) = N (xt; hµ(zt), h(zt)),
+
+(9)
+
+where gµ(·) and g(·) map to the mean and the covariance of the Gaussian respectively, and similarly hµ(·) and h(·). For closed form estimates for the emission parameters, one can further assume
+
+hµ(zt) = Czt + b h(zt) = R,
+
+(10)
+
+where C is a matrix that maps from state space to sample space, and R is the covariance matrix
+
+with appropriate size. The MLE of  = (C, b, R) is then given by the least squares fit.
+
+Example 2 (Topical SSL, (Zaheer et al., 2017)) Consider x1:T as the sequence of websites a user has visited. One might be tempted to model the user behavior using an LSTM, however due to the enormous size of the Internet, it is almost impossible to even compute a softmax output to get a discrete distribution over the websites. There are approximation methods for large vocabulary problems in RNN, such as the hierarchical softmax (Morin & Bengio, 2005). However, another interesting approach is to operate on a sequence with a "compressed" vocabulary, while learning how to perform such compression at the same time.
+
+Let zt be the indicator of a "topic", which is a distribution over the vocabulary as in Blei et al. (2003). Accordingly, define
+
+p(zt; g(st)) = Multinomial(zt; softmax(W st + b)) p(xt; h(zt)) = Multinomial(xt; zt ),
+
+(11)
+
+where W is a matrix that maps LSTM states to latent states, b is a bias term, and zt is a point in the probability simplex. If zt lies in a lower dimension than xt, the LSTM is effectively trained over a sequence z1:T with a reduced vocabulary. On the other hand, the probabilistic mapping between zt and xt is interpretable, as it learns to group similar xt's together. The estimation of  is typically
+performed under a Dirichlet prior, which then corresponds to the MAP estimate of the Dirichlet
+
+distribution (Zaheer et al., 2017).
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+4 INFERENCE WITH PARTICLE GIBBS
+
+In this section, we discuss how to draw samples from the posterior (6), corresponding to the S-step of the stochastic EM algorithm:
+
+z1:T  p(z1:T |x1:T ) =
+
+t p(zt|z1:t-1)p(xt|zt) . t p(zt|z1:t-1)p(xt|zt) dz1:T
+
+(12)
+
+Due to non-Markov state transition, only forward messages are available, for instance
+
+t  p(xt|z1:t-1)  p(zt|z1:t-1)p(xt|zt) dzt t  p(zt|z1:t-1, xt)  p(zt|z1:t-1)p(xt|zt),
+
+(13)
+
+assuming the integration and normalization can be performed efficiently. The task is to draw from the joint posterior of z1:T only given access to these forward messages.
+
+One way to circumvent the tight dependencies in z1:T is to make a factorization assumption, as in Zaheer et al. (2017). More concretely, the joint distribution is decomposed as
+
+(factorization assumption) p(z1:T |x1:T )  p(zt|z1:t-1)p(xt|zt).
+
+(14)
+
+t
+
+This approach is computationally appealing, as it only requires a single forward pass over the data. However, as we confirm in the experiments, this assumption can be restrictive since the flexibility of LSTM state transitions is offset by considering each time step independently.
+
+In this work, we propose to use the SMC, which is a principled way of sampling from a sequence of
+distributions. As described earlier, the idea is to approximate the posterior (12) with point masses, i.e., weighted particles. Let f (zt|z1:t-1, xt) be the importance density, and P be the number of particles. We then can run Algorithm 1 with t(z1:t) = p(x1:t, z1:t) being the unnormalized target distribution at time t, where the weight becomes
+
+tp
+
+
+
+p(z1p:t, x1:t) p(z1a:ptt--11, x1:t-1)f (ztp|z1a:tpt--11, xt)
+
+=
+
+p
+
+(ztp|z1a:tpt--11)p f (ztp|z1a:ptt--11,
+
+(xt|ztp xt)
+
+)
+
+.
+
+(15)
+
+The choice of proposal distribution f (·) is arbitrary. An intuitive choice would simply be the transition density p(zt|z1:t-1). However, it may lead to slow mixing since the information from the emission density is missing. Instead, an optimal proposal in terms of variance is given by the pre-
+dictive distribution (Andrieu et al., 2010):
+
+f (zt|z1:t-1, xt) =
+
+p (zt |z1:t-1 )p (xt |zt ) p(zt|z1:t-1)p(xt|zt) dzt
+
+,
+
+(16)
+
+which is precisely one of the available forward messages:
+
+tp = f (zt|z1a:tpt--11, xt).
+
+(17)
+
+Notice the similarity between terms in (15) and (16). Indeed, with the choice of predictive distribu-
+
+tion as the proposal density, the importance weight simplifies to
+
+tp  ~tp = p(zt|z1a:tpt--11)p(xt|zt) dzt, ,
+
+(18)
+
+which longer
+
+is not a coincidence that depends on the current
+
+the name collides with the message particle ztp. Instead, it marginalizes
+
+t. Interestingly, over all possible
+
+this quantity no particle assign-
+
+ments of the current time step. This is beneficial computationally since the intermediate terms from
+
+(16) can be reused in (18).
+
+After a full pass over the sequence, the algorithm produces Monte Carlo approximation of the posterior and the marginal likelihood:
+
+p^(z1:T |x1:T ) =
+
+Tp z1p:T (z1:T )
+
+p
+
+p^(x1:T ) =
+
+1 P
+
+~tp.
+
+tp
+
+(19)
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 2 Inference with Particle Gibbs
+1. Let z0p = z0 and 0p = 1/P for p = 1, . . . , P .
+2. For t = 1, . . . , T :
+(a) Fix reference path: set a1t-1 = 1 and z11:t = z1:t from previous iteration. (b) Sample ancestors apt-1  t-1 for p = 2, . . . , P . (c) Sample particles ztp  tp and set z1p:t = (z1a:ptt--11, ztp) for p = 2, . . . , P . (d) Compute normalized weights tp for p = 1, . . . , P . 3. Sample r  T , return the particle path z1a:rTT .
+
+The inference is completed by a final draw from the approximate posterior,
+
+z1:T  p^(z1:T |w1:T ),
+
+(20)
+
+which is essentially sampling a particle path indexed by the last particle. Specifically, the last particle
+
+zTp is chosen according to the final weights T , and then backwards to the beginning of the sequence according to
+
+earlier particles can be the ancestry indicators
+
+obtained by tracing atp at each position.
+
+Since SMC produces a Monte Carlo estimate, as the number of particles P   the approximate posterior (19) is guaranteed to converge to the true posterior for a fixed sequence. However, as the length of the sequence T increases, the number of particles needed to provide a good approximation grows exponentially. This is the well-known depletion problem of SMC (Andrieu et al., 2010).
+
+One elegant way to avoid simulating enormous number of particles is to marry the idea of MCMC with SMC (Andrieu et al., 2010). The idea of such Particle MCMC (PMCMC) methods is to treat the particle estimate p^(·) as a proposal, and design a Markov kernel that leaves the target distribution invariant. Since the invariance is ensured by the MCMC, it does not demand SMC to provide an accurate approximation to the true distribution, but only to give samples that are approximately distributed according to the target. As a result, for any fixed P > 0 the PMCMC methods ensure the target distribution is invariant.
+
+We choose the Gibbs kernel that requires minimal modification from the basic SMC. The resulting
+algorithm is Particle Gibbs (PG), which is a conditional SMC update in a sense that a reference path z1re:Tf with its ancestral lineage is fixed throughout the particle propagation of SMC. It can be shown that this simple modification to SMC produces a transition kernel that is not only invariant,
+but also ergodic under mild assumptions. In practice, we use the assignments from previous step as
+the reference path. The final algorithm is summarized in Algorithm 2.
+
+We conclude this section by deriving forward messages for the previous examples.
+
+Example 1 (Gaussian SSL, continued) The integration and normalization preserves normality thanks to the Gaussian identify. The messages are given by
+
+t = N xt; Cgµ(st) + b, R + C[g(st)]-1CT t = N zt; V CT R-1(xt - b) + [g(st)]-1gµ(st) , V ,
+
+(21)
+
+where V = [g(st)]-1 + CT R-1C -1.
+
+Example 2 (Topical SSL, continued) Let t = softmax(W st + b). Since the distributions are discrete, we have
+
+t  t, xt t  t  xt ,
+
+(22)
+
+where  denotes element-wise product. Note that the integration for t corresponds to a summation in the state space. It is then normalized across P particles to form a weight distribution. For t the normalization is performed in the state space as well, hence the computation of the messages are
+manageable.
+
+7
+
+SSL LSTM Data
+
+Under review as a conference paper at ICLR 2018
+
+Line
+Truth Data
+
+Sine Wave
+
+Circle
+
+Truth Filtering Prediction Truth Filtering Prediction
+
+Swiss Roll
+
+Figure 2: Tracking a synthetic trajectory. Top row: true trajectory and noisy observations. Middle row: training/testing performance of LSTM. Bottom row: training/testing performance of SSL.
+5 EXPERIMENTS
+We now present empirical studies for our proposed model and inference (denoted as SMC) in order to establish that (1) SSL is flexible in capturing underlying nonlinear dynamics, (2) our inference is accurate yet easily applicable to complicated models, and (3) it opens new avenues for interpretable yet nonlinear and non-Markovian sequence models, previously unthinkable. To illustrate these claims, we evaluate on (1) synthetic sequence tracking of varying difficulties, (2) language modeling, and (3) user modeling utilizing complicated models for capturing the intricate dynamics.
+Software & hardware All the algorithms are implemented on TensorFlow (Abadi et al., 2016). We run our experiments on a commodity machine with Intel R Xeon R CPU E5-2630 v4 CPU, 256GB RAM, and 4 NVidia R Titan X (Pascal) GPU.
+5.1 SYNTHETIC SEQUENCE TRACKING
+To test the flexibility of SSL, we begin with inference using synthetic data. Working with synthetic data is advantageous as we can easily vary nonlinearity and difficulty to study its effect on the proposed method. We consider four different dynamics in 2D space: (i) a straight line, (ii) a sine wave, (iii) a circle, and (iv) a swiss role. Note that we do not add additional states such as velocity, keeping the dynamics nonlinear except for the first case. Data points are generated by adding zero mean Gaussian noise to the true underlying dynamics. The true dynamics and the noisy observations are plotted in the top row of Figure 2. The first 60% of the sequence is used for training and the rest is left for testing.
+The middle and bottom row of Figure 2 show the result of SSL and vanilla LSTM trained for same number of iterations until both are sufficiently converged. The red points refer to the prediction of zt after observing x1:t, and the green points are blind predictions without observing any data. We can observe that while both methods are capturing the dynamics well in general, the predictions of LSTM tend to be more sensitive to initial predictions. In contrast, even when the initial predictions are not incorrect, SSL can recover in the end by remaining on the latent dynamic.
+5.2 LANGUAGE MODELING
+For all experiments we follow the standard setup for evaluating temporal models, i.e. divide each document (user history) into 60% for training and 40% for testing. The task is to predict the remain-
+8
+
+Under review as a conference paper at ICLR 2018
+
+Perplexity
+
+3600 Topics K = 100
+
+3400
+
+SMC Factored
+
+3200
+
+3000
+
+28000 20 4E0poch6s0 80 100
+
+10 Topics K = 100
+
+9
+
+SMC Factored
+
+8
+
+7
+
+60 20 40 60 80 100 Epochs
+
+Perplexity
+
+NNZ per Word
+
+3200 Topics K = 250
+
+3000
+
+SMC Factored
+
+2800
+
+2600
+
+24000 20 4E0poch6s0 80 100
+
+Topics K = 250
+
+14
+
+SMC Factored
+
+12
+
+10 0 20 40 60 80 100 Epochs
+
+Perplexity
+
+NNZ per Word
+
+3500 Topics K = 500
+SMC
+3000 Factored
+
+2500
+
+20000 20 4E0poch6s0 80 100
+
+Topics K = 500
+
+18
+
+SMC Factored
+
+16
+
+14 0 20 40 60 80 100 Epochs
+
+NNZ per Word
+
+Figure 3: Comparison of the new inference method based on SMC to the older one assuming factored model. The top row represents perplexity on the held out set and the lower row represents the non zero entries in the word--topic count matrix. Lower perplexity indicates a better fit to the data and lower NNZ results in a sparser model and usually having better generalization.
+
+ing 40% of the document (user data) based on the representation inferred from the first 60% of the document. We use perplexity as our metric (lower values are better) and compare an instantiation of our SSL, namely, LLA, against LDA and LSTM. For a more thorough comparison please refer to Zaheer et al. (2017).
+
+We used the publicly available Wikipedia dataset to evaluate the models on the task of sequence prediction. Extremely short documents, i.e. documents having length less than 500 words were excluded. The most frequent 200k word-types were retained as our vocabulary. Unless otherwise stated, for LSTM and LLA, we selected the dimensions of the input embedding (word or topic) and evolving latent state (over words or topics) to be 50 and 150 respectively.
+
+In Figure 5, we show the particle paths on a snippet of an article about a music album 1. As we can see from the top row, which plots the particle paths at the initial iteration, the model proposed a number of candidate topic sequences since it is uncertain about the latent semantics yet. However, after 100 epochs, as we can see from the bottom row, the model is much more confident about the underlying topical transition. Moreover, by inspecting the learned parameters  of the probabilistic emission, we can see that the topics are highly concentrated on topics related to music and time. This confirms our claim about flexible sequence modeling while retaining interpretability.
+
+Convergence we want to explore if the newer inference can achieve a better perplexity than the factored algorithm. Figure 5 compares the performance in terms of perplexity over heldout set and resulting sparsity of
+
+4200 4000
+
+Topics K = 250
+SMC Factored
+
+3800
+
+3600
+
+3200 3000
+
+Documents
+
+N = 10k
+SMC Factored
+
+2800
+
+2600
+
+Perplexity Perplexity
+
+both the algorithms by varying 3400
+
+2400
+
+number of topics on a subset of Wikipedia containing 10k documents. As can be seen from the
+
+32000.0 0#.5Doc1u.0men1t.s5 1e25.0 22001 2 # To3pics 4 1e25
+
+figure, uniformly the new SMC
+
+based algorithms achieve much Figure 4: Comparison between SMC and factored algorithm by
+
+lower perplexity. In other words, varying number of topics and documents
+
+SMC improves over previous algorithm it captures the sequential dependence correctly.
+
+1https://en.wikipedia.org/wiki/The_Haunted_Man_(album)
+
+9
+
+Under review as a conference paper at ICLR 2018
+
+Topics Topics
+
+100 80 60 40 20 0
+100 80 60 40 20 Music topic 00 20
+
+Epoch 1 Epoch 100
+Time topic 40 60 Word Sequence
+
+Music topic 80
+
+100
+
+Figure 5: Particle paths of a document about a music album. Top row: at epoch 1. Bottom row: at epoch 100. After epoch 100 the document has converged to a sparse set of relevant topics.
+
+Ablation Study we want to explore the benefit of the newer inference as dataset size increases. We observe that in case of natural languages which are highly structured the gap between factored approximation and accurate SMC keeps reducing as dataset size increases. But as we will see in case of user modeling when the dataset is less structured, the factored assumption leads to poorer performance.
+
+5.3 USER MODELING
+
+We use an anonymized sample of user search click history to measure the accuracy
+
+of different models on predicting users future clicks. An accurate model would en-
+
+able better user experience by presenting the user with relevant content. The dataset is
+
+anonymized by removing all items appearing less than a given threshold, this results in
+
+a dataset with 100K vocabulary and we vary the number of users from 500K to 1M.
+
+We fix the number of topics at 500 for all user experi-
+
+ments. We used the same setup to the one used in the experiments over the Wikipedia dataset for parameters. The dataset is less structured than the language modeling task since users click patterns are less predictable than the sequence of words which follow definite syntactic rules. As
+
+Algorithm
+Factored SMC
+
+# Users 500k 1M 2430 2254 1464 1447
+
+shown in table 1, the benefit of new inference method is highlighted as it yields much lower perplexity than the fac-
+
+Table 1: Comparison on user data
+
+tored model.
+
+6 DISCUSSIONS & CONCLUSION
+In this paper we revisited the problem of posterior inference in Latent LSTM models as introduced in Zaheer et al. (2017). We generalized their model to accommodate a wide variety of state space models and most importantly we provided a more principled Sequential Monte-Carlo (SMC) algorithm for posterior inference. Although the newly proposed inference method can be slower, we showed over a variety of dataset that the new SMC based algorithm is far superior and more stable. While computation of the new SMC algorithm scales linearly with the number of particles, this can be na´ively parallelized. In the future we plan to extend our work to incorporate a wider class of dynamically changing structured objects such as time-evolving graphs.
+
+10
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Mart´in Abadi, Ashish Agarwal, Paul Barham, Eugene Brevdo, Zhifeng Chen, Craig Citro, Greg S. Corrado, Andy Davis, Jeffrey Dean, Matthieu Devin, and Others. TensorFlow: Large-Scale Machine Learning on Heterogeneous Systems. arXiv preprint arXiv:1603.04467, 2016.
+Christophe Andrieu, Arnaud Doucet, and Roman Holenstein. Particle Markov chain Monte Carlo methods. Journal of the Royal Statistical Society: Series B (Statistical Methodology), 72(3):269­ 342, 2010.
+Evan Archer, Il Memming Park, Lars Buesing, John Cunningham, and Liam Paninski. Black box variational inference for state space models. arXiv preprint arXiv:1511.07367, 2015.
+Justin Bayer and Christian Osendorfer. Learning Stochastic Recurrent Networks. arXiv preprint arXiv:1411.7610, 2014.
+Christopher M. Bishop. Mixture Density Networks. Technical report, 1994.
+David M. Blei, Andrew Y. Ng, and Michael I. Jordan. Latent Dirichlet Allocation. Journal of Machine Learning Research, 3:993­1022, 2003. ISSN 15324435.
+Nicolas Boulanger-Lewandowski, Yoshua Bengio, and Pascal Vincent. Modeling Temporal Dependencies in High-Dimensional Sequences: Application to Polyphonic Music Generation and Transcription. In ICML, 2012.
+Junyoung Chung, Kyle Kastner, Laurent Dinh, Kratarth Goel, Aaron Courville, and Yoshua Bengio. A Recurrent Latent Variable Model for Sequential Data. In NIPS, 2015.
+Arnaud Doucet, Nando de Freitas, and Neil Gordon. Sequential Monte Carlo Methods in Practice. Springer, 2001.
+Marco Fraccaro, Søren Kaae Sønderby, Ulrich Paquet, and Ole Winther. Sequential Neural Models with Stochastic Layers. In NIPS, 2016.
+Zoubin Ghahramani and Geoffrey E. Hinton. Parameter estimation for linear dynamical systems. Technical report, 1996.
+Zoubin Ghahramani and Sam T. Roweis. Learning Nonlinear Dynamical Systems using an EM Algorithm. In NIPS, 1999.
+Karol Gregor, Ivo Danihelka, Alex Graves, Danilo Jimenez Rezende, and Daan Wierstra. DRAW: A Recurrent Neural Network For Image Generation. In ICML, 2015.
+Sepp Hochreiter and Ju¨rgen Schmidhuber. Long Short-Term Memory. Neural Computation, 9(8): 1735­1780, 1997.
+Matthew J. Johnson, David Duvenaud, Alexander B. Wiltschko, Sandeep R. Datta, and Ryan P. Adams. Composing graphical models with neural networks for structured representations and fast inference. In NIPS, 2016.
+Simon J. Julier and Jeffrey K. Uhlmann. A new extension of the Kalman filter to nonlinear systems. In Int. symp. aerospace/defense sensing, simul. and controls1, 1997.
+Rudolph Emil Kalman. A New Approach to Linear Filtering and Prediction Problems. Journal of Basic Engineering, 82(1):35­45, 1960. ISSN 00219223.
+Maximilian Karl, Maximilian Soelch, Justin Bayer, and Patrick van der Smagt. Deep variational Bayes filters: Unsupervised learning of state space models from raw data. In ICLR, 2017.
+Andrej Karpathy, Justin Johnson, and Li Fei-Fei. Visualizing and understanding recurrent networks. arXiv preprint arXiv:1506.02078, 2015.
+Diederik P Kingma and Max Welling. Auto-Encoding Variational Bayes. In ICLR, 2014.
+Daphne Koller and Nir Friedman. Probabilistic graphical models: principles and techniques. MIT Press, 2009.
+11
+
+Under review as a conference paper at ICLR 2018
+Rahul G. Krishnan, Uri Shalit, and David Sontag. Deep Kalman Filters. arXiv preprint arXiv:1511.05121, 2015.
+Rahul G. Krishnan, Uri Shalit, and David Sontag. Structured Inference Networks for Nonlinear State Space Models. In AAAI, 2017.
+Tuan Anh Le, Maximilian Igl, Tom Jin, Tom Rainforth, and Frank Wood. Auto-Encoding Sequential Monte Carlo. arXiv preprint arXiv:1705.10306, 2017.
+Chris J. Maddison, Dieterich Lawson, George Tucker, Nicolas Heess, Mohammad Norouzi, Andriy Mnih, Arnaud Doucet, and Yee Whye Teh. Filtering Variational Objectives. In NIPS, 2017.
+Frederic Morin and Yoshua Bengio. Hierarchical probabilistic neural network language model. In AISTATS, 2005.
+Christian A. Naesseth, Scott W. Linderman, Rajesh Ranganath, and David M. Blei. Variational Sequential Monte Carlo. arXiv preprint arXiv:1705.11140, 2017.
+Marius Pachitariu and Maneesh Sahani. Learning visual motion in recurrent neural networks. In NIPS, 2012.
+Herbert E. Rauch, F. Tung, and Charlotte T. Striebel. Maximum likelihood estimates of linear dynamic systems. AIAA Journal, 3(8):1445­1450, 1965. ISSN 0001-1452.
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic Backpropagation and Approximate Inference in Deep Generative Models. In ICML, 2014.
+Ruslan L. Stratonovich. Conditional markov processes. Theory of Probability and Its Applications, 5(2):156­178, 1960.
+Manzil Zaheer, Amr Ahmed, and Alexander J. Smola. Latent LSTM Allocation: Joint Clustering and Non-Linear Dynamic Modeling of Sequence Data. In ICML, 2017.
+12
+
+

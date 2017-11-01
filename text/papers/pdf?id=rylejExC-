@@ -1,0 +1,1873 @@
+Under review as a conference paper at ICLR 2018
+STOCHASTIC TRAINING OF GRAPH CONVOLUTIONAL NETWORKS
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Graph convolutional networks (GCNs) are powerful deep neural networks for graph-structured data. However, GCN computes nodes' representation recursively from their neighbors, making the receptive field size grow exponentially with the number of layers. Previous attempts on reducing the receptive field size by subsampling neighbors do not have any convergence guarantee, and their receptive field size per node is still in the order of hundreds. In this paper, we develop a preprocessing strategy and two control variate based algorithms to further reduce the receptive field size. Our algorithms are guaranteed to converge to GCN's local optimum regardless of the neighbor sampling size. Empirical results show that our algorithms have a similar convergence speed per epoch with the exact algorithm even using only two neighbors per node. The time consumption of our algorithm on the Reddit dataset is only one fifth of previous neighbor sampling algorithms.
+1 INTRODUCTION
+Graph convolution networks (GCNs) (Kipf & Welling, 2017) generalize convolutional neural networks (CNNs) (LeCun et al., 1995) to graph structured data. The "graph convolution" operation applies same linear transformation to all the neighbors of a node, followed by mean pooling. By stacking multiple graph convolution layers, GCNs can learn nodes' representation by utilizing information from distant neighbors. GCNs have been applied to semi-supervised node classification (Kipf & Welling, 2017), inductive node embedding (Hamilton et al., 2017a), link prediction (Kipf & Welling, 2016; Berg et al., 2017) and knowledge graphs (Schlichtkrull et al., 2017), outperforming multi-layer perceptron (MLP) models that do not use the graph structure and graph embedding approaches (Perozzi et al., 2014; Tang et al., 2015; Grover & Leskovec, 2016) that do not use node features.
+However, the graph convolution operation makes it difficult to train GCN efficiently. A node's representation at layer L is computed recursively by all its neighbors' representations at layer L - 1. Therefore, the receptive field of a single node grows exponentially with respect to the number of layers, as illustrated in Fig. 1(a). Due to the large receptive field size, Kipf & Welling (2017) proposed training GCN by a batch algorithm, which computes the representation for all the nodes altogether. However, batch algorithms cannot handle large scale datasets because of their slow convergence and the requirement to fit the entire dataset in GPU memory.
+Hamilton et al. (2017a) made an initial attempt on developing stochastic algorithms to train GCNs, which is referred as neighbor sampling (NS) in this paper. Instead of considering all the neighbors, they randomly subsample D(l) neighbors at the l-th layer. Therefore, they reduce the receptive field size to l D(l), as shown in Fig. 1(b). They found that for two layer GCNs, keeping D(1) = 10 and D(2) = 25 neighbors can achieve comparable performance with the original model. However, there is no theoretical guarantee on the predictive performance of the model learnt by NS comparing with the original algorithm. Moreover, the time complexity of NS is still D(1)D(2) = 250 times larger than training an MLP, which is unsatisfactory.
+In this paper, we develop novel stochastic training algorithms for GCNs such that D(l) can be as low as two, so that the time complexity of training GCN is comparable with training MLPs. Our methods are built on two techniques. First, we propose a strategy which preprocesses the first graph convolution layer, so that we only need to consider all neighbors within L-1 hops instead of L hops. This is significant because most GCNs only have L = 2 layers (Kipf & Welling, 2017; Hamilton
+1
+
+Under review as a conference paper at ICLR 2018
+
+Layer 2 Layer 1 Input
+
+Layer 2 Layer 1 Input
+
+Layer 2 Layer 1 Input
+
+H (2) GraphConv
+
+(2) GraphConv
+
+Dropout H (1)
+GraphConv
+
+(1) GraphConv
+
+Dropout
+
+Input
+
+Latest activation Historical activation
+
+(a) Exact
+
+(b) Neighbour sampling
+
+(c) Control variate
+
+(d) CVD network
+
+Figure 1: Two-layer graph convolutional networks, and the receptive field of a single vertex.
+
+et al., 2017a). Second, we develop two control variate (CV) based stochastic training algorithms. We show that our CV-based algorithms have lower variance than NS, and for GCNs without dropout, our algorithm provably converges to a local optimum of the model regardless of D(l).
+We empirically test on six graph datasets, and show that our techniques significantly reduce the bias and variance of the gradient from NS with the same receptive field size. Our algorithm with D(l) = 2 achieves the same predictive performance with the exact algorithm in comparable number of epochs on all the datasets, while the training time is 5 times shorter on our largest dataset.
+
+2 BACKGROUNDS
+We now briefly review graph convolutional networks (GCNs) (Kipf & Welling, 2017) and the neighbor sampling (NS) algorithm (Hamilton et al., 2017a).
+
+2.1 GRAPH CONVOLUTIONAL NETWORKS
+
+The original GCN was presented in a semi-supervised node classification task (Kipf & Welling,
+
+2017). We follow this setting throughout this paper. Generalization of GCN to other tasks can be
+
+found in Kipf & Welling (2016); Berg et al. (2017); Schlichtkrull et al. (2017) and Hamilton et al.
+
+(2017b). In the node classification task, we have an undirected graph G = (V, E) with V = |V|
+
+vertices and E = |E| edges, where each vertex v consists of a feature vector xv and a label yv. The label is only observed for some vertices VL and we want to predict the label for the rest vertices VU := V\VL. The edges are represented as a symmetric V × V adjacency matrix A, where Av,v
+is the weight of the edge between v and v , and the propagation matrix P is a normalized version of
+
+A: A~ = A + I, D~vv =
+
+v
+
+A~vv
+
+, and P
+
+=
+
+D~ -
+
+1 2
+
+A~D~
+
+-
+
+1 2
+
+.
+
+A
+
+graph
+
+convolution
+
+layer
+
+is
+
+defined
+
+as
+
+H~ (l) = Dropoutp(H(l)), Z(l+1) = P H~ (l)W (l), H(l+1) = (Zl+1),
+
+(1)
+
+where H(l) is the activation matrix in the l-th layer, whose each row is the activation of a graph
+
+node. H(0) = X is the input feature matrix, W (l) is a trainable weight matrix, (·) is an activation
+
+function, and Dropoutp(·) is the dropout operation (Srivastava et al., 2014) with keep probability p.
+
+Finally, the loss is defined as L
+
+=
+
+1 |VL |
+
+vVL f (yv, Zv(L)), where f (·, ·) can be the square loss,
+
+cross entropy loss, etc., depending on the type of the label.
+
+When P = I, GCN reduces to a multi-layer perceptron (MLP) model which does not use the graph
+
+structure. Comparing with MLP, GCN is able to utilize neighbor information for node classification.
+
+We define n(v, L) as the set of all the L-neighbors of node v, i.e., the nodes that are reachable from
+
+v within L hops. It is easy to see from Fig. 1(a) that in an L-layer GCN, a node uses the information
+
+from all its L-neighbors. This makes GCN more powerful than MLP, but also complicates the
+
+stochastic training, which utilizes an approximated gradient L
+
+
+
+1 |VB |
+
+vVB f (yv, Zv(L)),
+
+where VB  VL is a minibatch of training data. The large receptive field size | vVB n(v, L)| per
+
+minibatch leads to high time complexity, space complexity and amount of IO. See Table 1 for the
+
+average number of 1- and 2-neighbors of our datasets.
+
+2.2 ALTERNATIVE NOTATION
+We introduce alternative notations to help compare different algorithms. Let U (l) = P H~ (l), or uv(l) = v n(v,1) Pv,v h~v(l), we focus on studying how uv is computed based on node v's neighbors. To keep notations simple, we omit all the subscripts and tildes, and exchange the ID of nodes such
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+Dataset Citeseer
+Cora PubMed NELL
+PPI Reddit
+
+V
+3,327 2,708 19,717 65,755 14,755 232,965
+
+E
+12,431 13,264 108,365 318,135 458,973 23,446,803
+
+Degree 4 5 6 5 31 101
+
+Degree 2 15 37 60
+1,597 970 10,858
+
+Type Document network Document network Document network Knowledge graph Protein-protein interaction Document network
+
+Table 1: Number of vertexes, edges, average number of 1- and 2-neighbors per node for each dataset. Undirected edges are counted twice and self-loops are counted once. Reddit is already subsampled to have a max degree of 128 following Hamilton et al. (2017a).
+
+that n(v, 1) = [D]+, 1 where D = |n(v, 1)| is the number of neighbors. We get the propagation
+
+rule u =
+
+D v=1
+
+pv hv ,
+
+which
+
+is
+
+used
+
+interchangeably
+
+with
+
+the
+
+matrix
+
+form
+
+U (l)
+
+=
+
+P
+
+H~ (l).
+
+2.3 NEIGHBOR SAMPLING
+
+To reduce the receptive field size, Hamilton et al. (2017a) propose a neighbor sampling (NS) al-
+
+gorithm. On the l-th layer, they randomly choose D(l) neighbors for each node, and develop an
+
+estimator
+
+uN S
+
+of
+
+u
+
+based
+
+on Monte-Carlo
+
+approximation
+
+u
+
+
+
+uN S
+
+=
+
+D D(l)
+
+vD(l) pvhv, where
+
+D(l)  [D]+ is a subset of D(l) neighbors. In this way, they reduce the receptive field size from
+
+| vVB n(v, L)| to O(|VB|
+
+L l=1
+
+D(l)).
+
+Neighbor
+
+sampling
+
+can
+
+also
+
+be
+
+written
+
+in
+
+a
+
+matrix
+
+form
+
+as
+
+H~N(l)S = Dropoutp(HN(l)S ), ZN(l+S1) = P^(l)H~N(l)S W (l), HN(l+S1) = (ZN(l+S1)),
+
+(2)
+
+where P^(l) is a sparser unbiased estimator of P , i.e., EP^(l) = P . The approximate prediction ZN(LS)
+
+used
+
+for
+
+testing
+
+and
+
+for
+
+computing
+
+stochastic
+
+gradient
+
+1 |VB |
+
+vVB f (yv, ZC(LV),v) during training.
+
+The NS estimator uNS is unbiased. However it has a large variance, which leads to biased prediction and gradients after the non-linearity in subsequent layers. Due to the biased gradients, training with NS does not converge to the local optimum of GCN. When D(l) is moderate, NS may has
+some regularization effect like dropout (Srivastava et al., 2014), where it drops neighbors instead of features. However, for the extreme ease D(l) = 2, the neighbor dropout rate is too high to reach high
+predictive performance, as we will see in Sec. 5.4. Intuitively, making prediction solely depends on
+one neighbor is inferior to using all the neighbors. To keep comparable prediction performance with the original GCN, Hamilton et al. (2017a) use relatively large D(1) = 10 and D(2) = 25. Their receptive field size D(1) × D(2) = 250 is still much larger than MLP, which is 1.
+
+3 PREPROCESSING FIRST LAYER
+
+We first present a technique to preprocess the first graph convolution layer, by approximating ADropoutp(X) with Dropoutp(AX). The model becomes
+
+Z(l+1) = Dropoutp(P H(l))W (l), H(l+1) = (Zl+1).
+
+(3)
+
+This approximation does not change the expectation because E ADropoutp(X) = E Dropoutp(AX) , and it does not affect the predictive performance, as we shall see in Sec. 5.1.
+The advantage of this modification is that we can preprocess U (0) = P H(0) = P X and takes U (0) as the new input. In this way, the actual number of graph convolution layers is reduced by one -- the first layer is merely a fully connected layer instead of a graph convolution one. Since most GCNs only have two graph convolution layers (Kipf & Welling, 2017; Hamilton et al., 2017a), this gives a significant reduction of the receptive field size from the number of L-neighbors | vVB n(v, L)| to the number of L - 1-neighbors | vVB n(v, L - 1)|. The numbers are reported in Table 1.
+
+4 CONTROL VARIATE BASED STOCHASTIC APPROXIMATION
+
+We now present two novel control variate based estimators that have smaller variance as well as stronger theoretical guarantees than NS.
+1For an integer N , we define [N ] = {0, . . . , N } and [N ]+ = {1, . . . , N }.
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+4.1 CONTROL VARIATE BASED ESTIMATOR
+
+We assume that the model does not have dropout for now and will address dropout in Sec. 4.2. The
+
+idea is that we can approximate u = h¯v of the neighbors, where we expect
+
+h¯vDva=n1dphvhv varbeesttiemr iilfarwief
+
+know the the model
+
+latest historical weights do not
+
+activations change too
+
+fast during the training. With the historical activations, we approximate
+
+DD
+
+D
+
+D
+
+u = pvhv = pv(hv - h¯v) + pvh¯v  Dpv hv + pvh¯v := uCV ,
+
+(4)
+
+v=1
+
+v=1
+
+v=1
+
+v=1
+
+where v is a random neighbor, and hv = hv - h¯v . For the ease of presentation, we assume that we only use the latest activation of one neighbor, while the implementation also include the
+
+node itself besides the random neighbor, so D(l) = 2. Using historical activations is cheap because
+
+they need not to be computed recursively using their neighbors' activations, as shown in Fig. 1(c).
+
+Unlike NS, we apply Monte-Carlo approximation on v pvhv instead of v pvhv. Since we expect hv and h¯v to be close, hv will be small and uCV should have a smaller variance than uNS. Particularly, if the model weight is kept fixed, h¯v should be eventually equal with hv, so that
+
+uCV = 0 +
+
+D v=1
+
+pv
+
+h¯ v
+
+=
+
+D v=1
+
+pv
+
+hv
+
+= u, i.e., the estimator has zero variance.
+
+The term CV
+
+=
+
+uCV -uNS = -Dpv h¯v +
+
+D v=1
+
+pv
+
+h¯ v
+
+is
+
+a
+
+control
+
+variate
+
+(Ripley,
+
+2009,
+
+Chapter
+
+5),
+
+which
+
+has
+
+zero
+
+mean and large correlation with uNS, to reduce its variance. We refer this stochastic approximation
+
+algorithm as CV, and we will formally analyze the variance and prove the convergence of the training
+
+algorithm using CV for stochastic gradient in subsequent sections.
+
+In matrix form, CV computes the approximate predictions as follows, where we explicitly write down the iteration number i and add the subscript CV to the approximate activations 2
+
+ZC(lV+,1i)  P^i(l)(HC(lV) ,i - H¯C(lV) ,i) + P H¯C(lV) ,i Wi(l),
+
+(5)
+
+HC(lV+,1i)  (ZC(lV+,1i)), H¯C(lV) ,i+1  s(il)HC(lV) ,i + (1 - s(il))H¯C(lV) ,i,
+
+(6)
+
+where h¯(Cl)V,i,v stores the latest activation of node v on layer l computed before time i. Formally, let
+
+s(il)  RV ×V be a diagonal iteration we update history
+
+matrix, H¯ with
+
+and (si(l))vv = 1 if (P^i(l))v v > the activations computed in that
+
+0 for any iteration
+
+v as
+
+. After finishing Eq. (6).
+
+one
+
+4.2 CONTROL VARIATE FOR DROPOUT
+
+With dropout, the activations H are no longer deterministic. They become random variables whose randomness come from different dropout configurations. Therefore, hv = hv -h¯v is not necessarily small even if hv and h¯v have the same distribution. We develop another stochastic approximation algorithm, control variate for dropout (CVD), that works well with dropout.
+
+Our method is based on the weight scaling procedure (Srivastava et al., 2014) to approximately
+compute the mean µv := E [hv]. That is, along with the dropout model, we can run a copy of the model with no dropout to obtain the mean µv, as illustrated in Fig. 1(d). With the mean, we can obtain a better stochastic approximation by separating the mean and variance
+
+D D u = pv [(hv - µv) + (µv - µ¯v) + µ¯v]  Dpv (hv -µv )+Dpv µv + pvµ¯v := uCV D,
+
+v=1
+
+v=1
+
+where µ¯v is the historical mean activation, obtained by storing µv instead of hv, and µ = µv - µ¯v.
+
+uCV D an unbiased estimator of u because the term Dpv (hv - µv ) has zero mean, and the
+
+Monte-Carlo approximation
+
+approximation
+
+D v=1
+
+pv
+
+(hv
+
+-
+
+D v=1
+
+pv (µv
+
+-
+
+µ¯v
+
+µv)  Dpv (hv
+
+) -µv
+
+Dpv µv does not change the ) is made by assuming hv's to be
+
+mean. The independent
+
+Gaussians, which we will soon clarify.
+
+4.3 VARIANCE ANALYSIS
+NS, CV and CVD are all unbiased estimators of u = v pvhv. We analyze their variance in a simple independent Gaussian case, where we assume that activations are Gaussian random variables
+2We will omit the subscripts CV and i in subsequent sections when there is no confusion.
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Alg. Exact NS CV
+CVD
+
+Estimator
+u = v pvhv uNS = Dpv hv uCV = Dpv hv + v pvh¯v uCV D = Dpv (hv - µv )
++Dpv µv + v pvµ¯v
+
+Var. from MC. approx.
+
+0
+
+1 2
+
+v,v (pvµv - pv µv )2
+
+1 2
+
+v,v (pvµv - pv µv )2
+
+1 2
+
+v,v (pvµv - pv µv )2
+
+Var. from dropout 2 D2
+D2 + (D - 1)¯2
+2
+
+Table 2: Variance of different algorithms in the independent Gaussian case.
+
+hv  N (µv, v2) following Wang & Manning (2013). Without loss of generality, we assume that all the activations hv are one dimensional. We also assume that all the activations h1, . . . , hD and historical activations h¯1, . . . , h¯D are independent, where the historical activations h¯v  N (µ¯v, ¯v2).
+We introduce a few more notations. µv and v2 are the mean and variance of hv = hv - h¯v, where µv = µv - µ¯v and v2 = v2 + ¯v2. µ and 2 are the mean and variance of v pvhv, where µ = v pvµv and 2 = v p2vv2. Similarly, µ, 2, µ¯ and ¯2 are the mean and variance of v pvhv and v pvh¯v, respectively.
+With these assumptions and notations, we list the estimators and variances in Table 2, where the derivations can be found in Appendix C. We decompose the variance as two terms: variance from Monte-Carlo approximation (VMCA) and variance from dropout (VD).
+
+If the model has no dropout, the activations have zero variance, i.e., v = ¯v = 0, and the only
+
+source of variance is VMCA. We want VMCA to be small. As in Table 2, the VMCA for the exact
+
+estimator
+
+is
+
+0.
+
+For
+
+the
+
+NS
+
+estimator,
+
+VMCA
+
+is
+
+1 2
+
+v,v (pvµv - pv µv )2, whose magnitude depends
+
+on the pairwise difference (pvµv - pv µv )2, and VMCA is zero if and only if pvµv = pv µv for all
+
+v, v
+
+.
+
+Similarly,
+
+VMCA
+
+for
+
+both
+
+CV
+
+and
+
+CVD
+
+estimators
+
+is
+
+1 2
+
+v,v (pvµv - pv µv )2, which
+
+should be smaller than NS estimator's VMCA if (pvµv - pv µv )2 < (pvµv - pv µv )2, which
+
+is likely because µv should be smaller than µv. Since CV and CVD estimators have the same
+
+VMCA, we adopt the CV estimator for models without dropout, due to its simplicity.
+
+The VD of the exact estimator is 2, which is overestimated by both NS and CV. NS overestimates VD by D times, and CV has even larger VD. Meanwhile, the VD of the CVD estimator is the same as the exact estimator, indicating CVD to be the best estimator for models with dropout.
+
+4.4 EXACT TESTING
+
+Besides smaller variance, CV also has stronger theoretical guarantees than NS. We can show that during testing, CV's prediction becomes exact after a few testing epochs. For models without dropout, we can further show that training using the stochastic gradients obtained by CV converges to GCN's local optimum. We present these results in this section and Sec. 4.5. Note that the analysis does not need the independent Gaussian assumption.
+
+Given a model W , we compare the exact predictions (Eq. 1) and CV's approximate predictions
+(Eq. 5,6) during testing, which uses the deterministic weight scaling procedure. To make predictions, we run forward propagation by epochs. In each epoch, we randomly partition the vertex set V as I minibatches V1, . . . , VI and in the i-th iteration, we run a forward pass to compute the prediction for nodes in Vi. Note that in each epoch we scan all the nodes instead of just testing nodes, to ensure that the activation of each node is computed at least once per epoch. The following theorem reveals
+the connection of the exact predictions and gradients, and their approximate versions by CV.
+
+Theorem 1. For a fixed W and any i > LI we have: (1) (Exact Prediction) The activations
+
+computed by CV are exact, i.e., ZC(lV) ,i = Z(l) for each l  [L] and HC(lV) ,i = H(l) for each l  [L-1].
+
+(2) (Unbiased Gradient) The stochastic gradient gCV,i(W )
+
+:=
+
+1 |VB |
+
+vVB W f (yv, zC(LV),i,v) is an
+
+unbiased
+
+estimator
+
+of
+
+GCN's
+
+gradient,
+
+i.e.,
+
+EP^,VB
+
+gCV,i(W
+
+)
+
+=
+
+W
+
+1 |V
+
+|
+
+vV f (yv, zv(L)).
+
+Theorem 1 shows that at testing time, we can run forward propagation with CV for L epoches and get the exact prediction. This outperforms NS, which cannot recover the exact prediction. Comparing with directly making exact predictions by a batch algorithm, CV is more scalable because it does not need to load the entire graph into memory. The proof can be found in Appendix A.
+
+5
+
+Under review as a conference paper at ICLR 2018
+
+4.5 CONVERGENCE GUARANTEE
+
+The following theorem shows that for a model without dropout, training using CV's approximated gradients converges to a local optimum of GCN where W L = 0, regardless of the neighbor subsampling size D(l). Therefore, we can choose arbitrarily small D(l) without worrying about the
+quality of the learnt model.
+
+Theorem 2. Assume that (1) all the activations are -Lipschitz, (2) the gradient of the cost func-
+
+tion zf (y, z) is -Lipschitz and bounded, (3) gCV (W )  and g(W )  = L(W )  are
+
+bounded by G > 0 for all P^, VB and W . (4) The loss L(W ) is -smooth, i.e., |L(W2) - L(W1) -
+
+L(W1), W2 - W1
+
+|
+
+
+
+ 2
+
+W2 - W1 2 W1, W2, where
+
+A, B
+
+= tr(A
+
+B) is the inner product
+
+of matrix A and matrix B. Then, for the following SGD updates Wi+1 = Wi - igCV (Wi), the
+
+sequence
+
+of
+
+step
+
+sizes
+
+i
+
+=
+
+1 N
+
+,
+
+and
+
+the
+
+number
+
+of
+
+steps
+
+PR(R
+
+=
+
+i)
+
+=
+
+2i -i2
+
+N i=1
+
+(2i
+
+-i2
+
+)
+
+,
+
+we
+
+have
+
+lim
+N 
+
+ERPR
+
+EP^,VB
+
+L(WR) 2 = 0.
+
+The proof can be found in Appendix B. We show that CV's gradient is asymptotically unbiased as the learning rate approaches zero, and SGD with such gradients converges to a local optimum.
+
+4.6 TIME COMPLEXITY AND IMPLEMENTATION DETAILS
+
+Finally we discuss the time complexity of different algorithms. We decompose the time complex-
+
+ity as sparse time complexity for sparse-dense matrix multiplication such as P H~ (l), and dense time
+
+complexity for dense-dense matrix multiplication such as U (l)W (l). Assume that the node fea-
+
+ture is K-dimensional and the first hidden layer is A-dimensional, the batch GCN has O(EK)
+
+sparse and O(V KA) dense time complexity per epoch. NS has O(V
+
+L l=1
+
+D(l)K
+
+)
+
+sparse
+
+and
+
+O(V
+
+L l=2
+
+D(l) K A)
+
+dense
+
+time
+
+complexity
+
+per
+
+epoch.
+
+The dense time complexity of CV is the
+
+same as NS. The sparse time complexity depends on the cost of computing the sum v pvµ¯v.
+
+There are V
+
+L l=2
+
+D(l)
+
+such
+
+sums
+
+to
+
+compute
+
+on
+
+the
+
+first
+
+graph
+
+convolution
+
+layer,
+
+and
+
+overall
+
+cost
+
+is not larger than O(V D
+
+L l=2
+
+D(l) K ),
+
+if
+
+we
+
+subsample
+
+the
+
+graph
+
+such
+
+that
+
+the
+
+max
+
+degree
+
+is
+
+D,
+
+following Hamilton et al. (2017a). The sparse time complexity is D/D(1) times higher than NS.
+
+Our implementation is similar as Kipf & Welling (2017). We store the node features in the main memory, without assuming that they fit in GPU memory as Hamilton et al. (2017a), which makes our implementation about 2 times slower than theirs. We keep the histories in GPU memory for efficiency since they are only LH < K dimensional.
+
+5 EXPERIMENTS
+We examine the variance and convergence of our algorithms empirically on six datasets, including Citeseer, Cora, PubMed and NELL from Kipf & Welling (2017) and Reddit, PPI from Hamilton et al. (2017a), as summarized in Table 1. To measure the predictive performance, we report Micro-F1 for the multi-label PPI dataset, and accuracy for all the other multi-class datasets. We use the same model architectures with previous papers but slightly different hyperparameters (see Appendix D for the details). We repeat the convergence experiments 10 times on Citeseer, Cora, PubMed and NELL, and 5 times on Reddit and PPI. The experiments are done on a Titan X (Maxwell) GPU.
+
+5.1 IMPACT OF PREPROCESSING
+We first examine the approximation in Sec. 3 that switches the order of dropout and aggregating the neighbors. Let M0 be the original model (Eq. 1) and M1 be our approximated model (Eq. 3), we compare three settings: (1) M0, D(l) =  is the exact algorithm without any neighbor sampling. (2) M1+PP, D(l) =  changes the model from M0 to M1. Preprocessing does not affect the training for D(l) = . (3) M1+PP, D(l) = 20 uses NS with a relatively large number of neighbors. In Table 3 we can see that all the three settings performs similarly, i.e., our approximation does not affect the predictive performance. Therefore, we use M1+PP, D(l) = 20 as the exact baseline in following convergence experiments because it is the fastest among these three settings.
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm Epochs
+M0, D(l) =  M1+PP, D(l) =  M1+PP, D(l) = 20
+
+Citeseer 200
+70.8 ± .1 70.9 ± .2 70.9 ± .2
+
+Cora 200 81.7 ± .5 82.0 ± .8 81.9 ± .7
+
+PubMed 200
+79.0 ± .4 78.7 ± .3 78.9 ± .5
+
+NELL 200
+64.9 ± 1.7 64.2 ± 4.6
+
+PPI 500 97.9 ± .04 97.8 ± .05 97.6 ± .09
+
+Reddit 10
+96.2 ± .04 96.3 ± .07 96.3 ± .04
+
+Table 3: Testing accuracy of different algorithms and models after fixed number of epochs. Our
+
+implementation does not support M0, D(l) =  on NELL so the result is not reported
+
+1.0 citeseer
+0.8 0.6
+
+1.0 0.8 0.6 0.4
+
+cora
+
+0.8 pubmed
+0.6 0.4
+
+Exact NS NS+PP CV+PP
+
+0.40 1.5
+
+50
+
+n10e0ll
+
+150
+
+2000.20 0.4
+
+50 re1d00dit 150 2000.20
+
+50 1p0p0i 150 200
+
+0.3 0.4
+
+1.0 0.2
+
+0.2
+
+0.5 0.1
+
+0 100 200 300 400 0.00 10 20 30 40 500.00 200 400 600 800
+
+Figure 2: Comparison of training loss with respect to number of epochs without dropout. The
+
+CV+PP curve overlaps with the Exact curve in the first four datasets.
+
+5.2 CONVERGENCE WITH NO DROPOUT
+We now study how fast our algorithms converge with a very small neighbor sampling size D(l) = 2. We compare the following algorithms: (1) Exact, which is M1+PP, D(l) = 20 in Sec. 5.1 as a surrogate of the exact algorithm. (2) NS, which is the NS algorithm with no preprocessing and D(l) = 2. (3) NS+PP, which is same with NS but uses preprocessing. (4) CV+PP, which replaces the NS estimator in NS+PP with the CV estimator. (5) CVD+PP, which uses the CVD estimator.
+We first validate Theorem 2, which states that CV+PP converges to a local optimum of Exact, for models without dropout, regardless of D(l). We disable dropout and plot the training loss with respect to number of epochs as Fig. 2. We can see that CV+PP can always reach the same training loss with Exact, which matches the conclusion of Theorem 2. Meanwhile, NS and NS+PP have a higher training loss because their gradients are biased.
+
+5.3 CONVERGENCE WITH DROPOUT
+
+Next, we compare the predictive accuracy obtained by the model trained by different algorithms, with dropout turned on. We use different algorithms for training and the same Exact algorithm for testing, and report the validation accuracy at each training epoch. The result is shown in Fig. 3. We find that CVD+PP is the only algorithm that is able to reach comparable validation accuracy with Exact on all datasets. Furthermore, its convergence speed with respect to the number of epochs is comparable with Exact despite its D(l) is 10 times smaller. Note that CVD+PP performs much better than Exact on the PubMed dataset; we suspect it finds a better local optimum.
+
+0.72 citeseer
+0.71 0.70
+
+0.80 0.79 0.78
+
+cora
+
+pubmed
+0.80
+0.78
+
+Exact NS NS+PP CV+PP CVD+PP
+
+0.690 0.675
+
+50 1n0e0ll 150 2000.770
+0.965
+
+50
+
+r1e0d0dit 150
+
+200 0 0.98
+
+50 1p0p0i 150 200
+
+0.650 0.960 0.96
+
+0.625 0.955 0.94
+
+0.6000
+
+100 200 300 4000.9500 10 20 30 40 500.920
+
+200 400 600 800
+
+Figure 3: Comparison of validation accuracy with respect to number of epochs. NS converges to
+
+0.94 on the Reddit dataset and 0.6 on the PPI dataset.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Gradient Bias
+
+Gradient Bias
+
+1.0
+
+Testing accuracy
+
+Alg.
+Exact NS NS+PP CV+PP CVD+PP
+
+Valid. acc. 96.0 94.4 96.0 96.0 96.0
+
+Epochs
+4.2 102.0 35.0
+7.8 5.8
+
+Time (s) 252 577 195 56 50
+
+Sparse GFLOP
+507 76.5 2.53 40.6 60.3
+
+Dense TFLOP
+7.17 21.4 7.36 1.64 2.44
+
+Algorithm
+
+0.5
+
+NS NS+PP
+
+CV
+
+0.0 cora pubmed neDllatacisteetseer ppi reddit
+
+Exact
+
+Figure 4: Comparison of the accuracy
+
+of different testing algorithms. The y-
+
+Table 4: Time complexity comparison of different algo- axis is Micro-F1 for PPI and accuracy
+
+rithms on the Reddit dataset.
+
+Bias (without dropout)
+
+7.5 Algorithm
+
+5.0 NS
+
+NS+PP
+
+2.5 CV+PP
+
+0.0 cora pubmed nell citeseer ppi reddit
+
+Exact
+
+Bias (wiDthatdasroetpout)
+
+Gradient Std. Dev.
+
+otherwise.
+40 Standard deviation (without dropout)
+20 0 cora pubmed nell citeseer ppi reddit
+Standard deviaDtiaotnas(ewt ith dropout)
+
+Algorithm NS NS+PP CV+PP Exact
+
+Gradient Std. Dev.
+
+3
+
+Algorithm NS
+
+2 NS+PP
+
+1
+
+CV+PP CVD+PP
+
+0 cora pubmed neDllatacsiteetseer ppi reddit
+
+Exact
+
+20 10 0 cora pubmed nell citeseer ppi reddit
+Dataset
+
+Algorithm NS NS+PP CV+PP CVD+PP Exact
+
+Figure 5: Bias and standard deviation of the gradient for different algorithms during training.
+
+Meanwhile, simper algorithms CV+PP and NS+PP work acceptably on most of the datasets. CV+PP reaches a comparable accuracy with Exact for all datasets except PPI. NS+PP works slightly worse but the final validation accuracy is still within 2%. These algorithms can be adopted if there is no strong need for predictive performance. We however emphasize that exact algorithms must be used for making predictions, as we will show in Sec. 5.4. Finally, the algorithm NS without preprocessing works much worse than others, indicating the significance of our preprocessing strategy.
+5.4 FURTHER ANALYSIS ON TIME COMPLEXITY, TESTING ACCURACY AND VARIANCE
+Table 4 reports the average number of epochs, time, and total number of floating point operations to reach a given 96% validation accuracy on the largest Reddit dataset. Sparse and dense computations are defined in Sec. 4.6. We found that CVD+PP is about 5 times faster than Exact due to the significantly reduced receptive field size. Meanwhile, simply setting D(l) = 2 for NS does not converge to the given accuracy.
+We compare the quality of the predictions made by different algorithms, using the same model trained by Exact in Fig. 4. As Thm. 1 states, CV reaches the same testing accuracy as Exact, while NS and NS+PP perform much worse. Testing using exact algorithms (CV or Exact) corresponds to the weight scaling algorithm for dropout (Srivastava et al., 2014).
+Finally, we compare the average bias and variance of the gradients per dimension for first layer weights relative to the weights' magnitude in Fig. 5. For models without dropout, the gradient of CV+PP is almost unbiased. For models with dropout, the bias and variance of CV+PP and CVD+PP are ususally smaller than NS and NS+PP, as we analyzed in Sec. 4.3.
+
+6 CONCLUSIONS
+The large receptive field size of GCN hinders its fast stochastic training. In this paper, we present a preprocessing strategy and two control variate based algorithms to reduce the receptive field size. Our algorithms can achieve comparable convergence speed with the exact algorithm even the neighbor sampling size D(l) = 2, so that the per-epoch cost of training GCN is comparable with training MLPs. We also present strong theoretical guarantees, including exact prediction and convergence to GCN's local optimum, for our control variate based algorithm.
+
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hinton. Layer normalization. arXiv preprint arXiv:1607.06450, 2016.
+Rianne van den Berg, Thomas N Kipf, and Max Welling. Graph convolutional matrix completion. arXiv preprint arXiv:1706.02263, 2017.
+Saeed Ghadimi and Guanghui Lan. Stochastic first-and zeroth-order methods for nonconvex stochastic programming. SIAM Journal on Optimization, 23(4):2341­2368, 2013.
+Aditya Grover and Jure Leskovec. node2vec: Scalable feature learning for networks. In Proceedings of the 22nd ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 855­864. ACM, 2016.
+William L Hamilton, Rex Ying, and Jure Leskovec. Inductive representation learning on large graphs. arXiv preprint arXiv:1706.02216, 2017a.
+William L Hamilton, Rex Ying, and Jure Leskovec. Representation learning on graphs: Methods and applications. arXiv preprint arXiv:1709.05584, 2017b.
+Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.
+Thomas N Kipf and Max Welling. Variational graph auto-encoders. arXiv preprint arXiv:1611.07308, 2016.
+Thomas N Kipf and Max Welling. Semi-supervised classification with graph convolutional networks. In ICLR, 2017.
+Yann LeCun, Yoshua Bengio, et al. Convolutional networks for images, speech, and time series. The handbook of brain theory and neural networks, 3361(10):1995, 1995.
+Bryan Perozzi, Rami Al-Rfou, and Steven Skiena. Deepwalk: Online learning of social representations. In Proceedings of the 20th ACM SIGKDD international conference on Knowledge discovery and data mining, pp. 701­710. ACM, 2014.
+Brian D Ripley. Stochastic simulation, volume 316. John Wiley & Sons, 2009. Michael Schlichtkrull, Thomas N Kipf, Peter Bloem, Rianne van den Berg, Ivan Titov, and
+Max Welling. Modeling relational data with graph convolutional networks. arXiv preprint arXiv:1703.06103, 2017. Nitish Srivastava, Geoffrey E Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov. Dropout: a simple way to prevent neural networks from overfitting. Journal of machine learning research, 15(1):1929­1958, 2014. Jian Tang, Meng Qu, Mingzhe Wang, Ming Zhang, Jun Yan, and Qiaozhu Mei. Line: Largescale information network embedding. In Proceedings of the 24th International Conference on World Wide Web, pp. 1067­1077. International World Wide Web Conferences Steering Committee, 2015. Sida Wang and Christopher Manning. Fast dropout training. In Proceedings of the 30th International Conference on Machine Learning (ICML-13), pp. 118­126, 2013.
+9
+
+Under review as a conference paper at ICLR 2018
+
+A PROOF OF THEOREM 1
+
+Proof. 1. We prove by induction. After the first epoch the activation h(i,0v) is at least computed once for each node v, so H¯C(0V),i = HC(0V),i = H(0) for all i > I. Assume that we have H¯C(lV) ,i = HC(lV) ,i = H(l) for all i > (l + 1)I. Then for all i > (l + 1)I
+
+ZC(lV+,1i) = P^i(l)(HC(lV) ,i - H¯C(lV) ,i) + P H¯C(lV) ,i W (l) = P H¯C(lV) ,iW (l) = P H (l)W (l) = Z(l+1). (7)
+HC(lV+,1i) = (ZC(lV+,1i)) = H (l+1)
+After one more epoch, all the activations hC(l+V,1i),v are computed at least once for each v, so H¯C(lV+,1i) = HC(lV+,1i) = H(l+1) for all i > (l + 2)I. By induction, we know that after LI steps, we have H¯C(LV-,i1) = HC(LV-,i1) = H(L-1). By Eq. 7 we have Z¯C(LV),i = Z(L).
+
+2. We omit the time subscript i and denote fCV,v := f (yv, zC(LV),v). By back propagation, the approximated gradients by CV can be computed as follows
+
+HC(lV) fCV,v = P^(l)ZC(lV+1) fCV,v W (l) ZC(lV) fCV,v =  (ZC(lV) )  HC(lV) fCV,v W (l) fCV,v = (P^(l)HC(lV) )  fZC(lV+1) CV,v
+1 gCV (W ) = |VB | vVB W fCV,v,
+
+l = 1, . . . , L - 1 l = 1, . . . , L - 1 l = 0, . . . , L - 1,
+
+(8)
+
+where  is the element wise product and  (ZC(lV) ) is the element-wise derivative. Similarly, denote fv := f (yv, Zv(l)), the exact gradients can be computed as follows
+
+H(l) fv = P Z(l+1) fv W (l)
+
+Z(l) fv =  (Z(l))  H(l) fv
+
+W (l) fv = (P H (l))  fZ(l+1) v
+
+1
+
+g(W ) = V
+
+W fv.
+
+vV
+
+l = 1, . . . , L - 1 l = 1, . . . , L - 1 l = 0, . . . , L - 1,
+
+(9)
+
+Applying EP^ = EP^(1),...,P^(L) to both sides of Eq. 8, and utilizing
+
+· 1's conclusion that after L epoches, ZC(lV) = Z(l), so  fZC(LV) CV,v is also determinstic. · EP^ [Z(l) fCV,v ] = EP^(l),...,P^(L) [Z(l) fCV,v ]. · EP^ [H(l) fCV,v ] = EP^(l),...,P^(L) [H(l) fCV,v ].
+
+we have
+
+E P^(l),...,P^(L) HC(lV) fCV,v = EP^(l) P^(l) EP^(l+1),...,P^(L) [ZC(lV+1) fCV,v ]W (l)
+
+E P^(l),...,P^(L) ZC(lV) fCV,v =  (Z (l))  EP^l,...,P^L HC(lV) fCV,v
+
+EP^ W (l) fCV,v = H (l) EP^(l) P^(l) E  fP^(l+1),...,P^(L) ZC(lV+1) CV,v
+
+1
+
+gCV (W )
+
+=
+
+|VB |
+
+EP^ W fCV,v.
+vVB
+
+Comparing Eq. 10 and Eq. 9 we get
+
+EP^ W (l) fCV,v = W (l) fv, l = 0, . . . , L - 1,
+
+l = 1, . . . , L - 1 l = 1, . . . , L - 1 l = 0, . . . , L - 1,
+(10)
+
+10
+
+Under review as a conference paper at ICLR 2018
+
+so
+
+EP^,VB
+
+gCV
+
+(W
+
+)
+
+=
+
+EVB
+
+1 |VB |
+
+vVB
+
+EP^ W
+
+fCV,v
+
+=
+
+1 V
+
+W fv.
+vV
+
+B PROOF OF THEOREM 2
+
+We proof Theorem 2 in 3 steps:
+1. Lemma 1: For a sequence of weights W (1), . . . , W (N) which are close to each other, CV's approximate activations are close to the exact activations.
+2. Lemma 2: For a sequence of weights W (1), . . . , W (N) which are close to each other, CV's gradients are close to be unbiased.
+3. Theorem 2: An SGD algorithm generates the weights that changes slow enough for thez gradient bias goes to zero, so the algorithm converges.
+The following proposition is needed in our proof Proposition 1. Let A  = maxij Aij, then
+· AB   A  B . · A  B   A  B .
+
+B.1 PROOF OF LEMMA 1
+
+Proposition 2. There are a series of T inputs X1, . . . , XT , XCV,1, . . . , XCV,T and weights W1, . . . , WT feed to an one-layer GCN with CV
+ZCV,i = P^i(Xi - X¯i) + P X¯i Wi, HCV,i = (ZCV,i), H¯CV,i+1 = siHCV,i+(1-si)H¯CV,i.
+
+and an one-layer exact GCN If
+
+Zi = P XiWi, Hi = (Zi).
+
+1. The activation (·) is -Lipschitz; 2. XCV,i - XCV,j  < and XCV,i - Xi  < for all i, j  T and > 0. Then there exists some K > 0, s.t., HCV,i - HCV,j  < K and HCV,i - Hi  < K for all I < i, j  T , where I is the number of iterations per epoch.
+
+Proof. Because for all i > I, the elements of X¯CV,i are all taken from previous epochs, i.e., XCV,1, . . . , XCV,i-1, we know that
+
+X¯CV,i - XCV,i
+
+
+
+
+
+max
+ji
+
+XCV,j - XCV,i
+
+
+
+(i > I).
+
+(11)
+
+By triangular inequality, we also know
+
+X¯CV,i - X¯CV,j  < 3 X¯CV,i - Xi  < 2
+
+(i, j > I). (i > I).
+
+(12) (13)
+
+11
+
+Under review as a conference paper at ICLR 2018
+
+Since XCV,1  , . . . , XCV,T  are bounded, X¯CV,i  is also bounded for i > I. Then,
+
+HCV,i - HCV,j    ZCV,i - ZCV,j 
+
+  P^i(XCV,i - X¯CV,i) + P X¯CV,i Wi - P^j (XCV,j - X¯CV,j ) + P X¯CV,j Wj
+
+
+
+
+P^i(XCV,i - X¯CV,i)Wi - P^j (XCV,j - X¯CV,j )Wj
+
++
+
+
+P X¯CV,iWi - P X¯CV,j Wj
+
+
+
+ [ P^i - P^j  XCV,i - X¯CV,i  Wi 
+
++ P^j  XCV,i - X¯CV,i - XCV,j + X¯CV,j  Wi 
+
++ P^j  XCV,j - X¯CV,j  Wi - Wj  + P  X¯CV,i - X¯CV,j  Wi  + P  X¯CV,j  Wi - Wj ]
+
+  [ P^i - P^j  Wi  + 2 P^j  Wi  + P^j  Wi - Wj  +
+
+3 P^j  Wi  + P^j  X¯CV,j ]
+
+= K1
+
+And
+
+HCV,i - Hi    ZCV,i - Zi    P^i(XCV,i - X¯CV,i) + P (X¯CV,i - Xi)
+
+ ( P^i
+
+
++2
+
+P)
+
+Wi 
+
+ K2 .
+
+Wi
+
+
+The following lemma bounds CV's approximation error of activations Lemma 1. Given a sequence of model weights W1, . . . , WT . If Wi - Wj  < , i, j, and all the activations are -Lipschitz, there exists K > 0, s.t.,
+
+· Hil - HCl V,i  < K , i > LI, l = 1, . . . , L - 1,
+
+·
+
+Zil - ZCl V,i
+
+<K
+
+
+, i > LI, l = 1, . . . , L.
+
+Proof. We prove by induction. Because H0 = X is constant, H¯C0 V,i = Hi0 after I iterations. So HC1 V,i = ( P^i(HC0 V,i - H¯C0 V,i) + P H¯C0 V,i Wi0 = (P XWi0) = Hi1, and
+HC1 V,i - HC1 V,j  = (P XWi0) - (P XWj0)    P  X  . Repeatedly apply Proposition B.1 for L - 1 times, we get the intended results.
+
+B.2 PROOF OF LEMMA 2
+
+The following lemma bounds the bias of CV's approximate gradient Lemma 2. Given a sequence of model weights W1, . . . , WT , if
+
+1. Wi - Wj  < , i, j, 2. all the activations are -Lipschitz,
+
+3. the gradient of the cost function zf (y, z) is -Lipschitz and bounded,
+
+then there exists K > 0, s.t.,
+
+EP^,VB gCV (Wi) - g(Wi)
+
+<K
+
+
+, i > LI.
+
+12
+
+Under review as a conference paper at ICLR 2018
+
+Proof. By Lipschitz continuity of zf (y, z) and Lemma 1, there exists K > 0, s.t.,
+
+ZC(lV) fCV,v - Z(l) fv
+
+
+
+
+ZC(lV) - Z(l)
+
+ K .
+
+
+Assume that
+
+EP^ ZC(lV+1) fCV,v -  fZ(l+1) v
+
+< K1 , we now prove that there exists K > 0, s.t.,
+
+
+E P^ ZC(lV) fCV,v - Z(l) fv
+
+<K
+
+
+. By Eq. 9, Eq. 10 and Lemma 1, we have
+
+E P^ HC(lV) fCV,v - H(l) fv 
+
+= P EP^ [ZC(lV+1) fCV,v ]W (l) - P Z(l+1) fv W (l)
+
+P
+
+ K1 W (l)
+
+,
+
+
+
+
+and
+
+E P^ ZC(lV) fCV,v - Z(l) fv 
+
+= EP^  (ZC(lV) )  HC(lV) fCV,v -  (Z(l))  H(l) fv 
+
+ EP^ ( (ZC(lV) ) -  (Z(l)))  HC(lV) fCV,v
+
++
+
+
+ (Z(l))(EP^ [HC(lV) fCV,v] - H(l) fv) 
+
+ EP^ K  HC(lV) fCV,v]
+
++  (Z(l)) P
+
+
+ K1 W (l)
+
+
+
+K
+
+E P^ HC(lV) fCV,v
+
++
+
+
+ (Z(l))
+
+
+P
+
+ K1 W (l)
+
+ K2
+
+
+By induction we know that for l = 1, . . . , L there exists K, s.t.,
+
+E P^ ZC(lV) fCV,v - Z(l) fv
+
+K
+
+
+.
+
+Again by Eq. 9, Eq. 10, and Lemma 1,
+
+EP^ W (l) fCV,v - W (l) fv 
+
+= EP^ HC(lV) P  fZC(lV) CV,v - H (l) P Z(l) fv 
+
+ EP^
+
+HC(lV) - H (l)
+
+P  fZC(lV) CV,v
+
++ H(l) P
+
+
+E P^ ZC(lV) fCV,v - Z(l) fv
+
+ EP^ K P  fZC(lV) CV,v
+
++ H(l)
+
+
+P
+
+
+K
+
+K
+
+P  EP^  fZC(lV) CV,v
+
++ H(l)
+
+
+P
+
+
+ K  K3
+
+Finally,
+
+
+
+EP^,VB gCV (Wi) - g(Wi) 
+
+= EVB
+
+11
+
+|VB | vVB EP^ [W (l) fCV,v] -
+
+V
+
+W (l) fv
+vV
+
+1
+
+= V
+
+EP^ [W (l) fCV,v] - W (l) fv
+
+vV
+
+ K3 .
+
+
+
+
+B.3 PROOF OF THEOREM 2 Proof. This proof is a modification of Ghadimi & Lan (2013), but using biased stochastic gradients instead. We assume the algorithm is already warmed-up for LI steps with the initial weights W0, so
+13
+
+Under review as a conference paper at ICLR 2018
+
+that Lemma 2 holds for step i > 0. Denote i = gCV (Wi) - L(Wi). By smoothness we have
+
+L(Wi+1)  L(Wi) +
+
+L(Wi), Wi+1 - Wi
+
++
+
+ 2
+
+i2
+
+gCV (Wi) 2
+
+= L(Wi) - i L(Wi), gCV (Wi)
+
++
+
+ 2
+
+i2
+
+gCV (Wi)
+
+2
+
+= L(Wi) - i L(Wi), i
+
+- i
+
+L(Wi)
+
+2+
+
+ 2
+
+i2
+
+i 2 + L(Wi) 2 + 2 i, L(Wi)
+
+= L(Wi) - (i - i2) L(Wi), i
+
+-
+
+(i
+
+-
+
+i2 2
+
+)
+
+L(Wi)
+
+2
+
++
+
+ 2
+
+i2
+
+i
+
+2.
+
+(14)
+
+Consider the sequence of LB + 1 weights Wi-LB, . . . , Wi.
+i-1
+
+max
+i-LBj,ki
+
+Wj - Wk
+
+
+
+Wj - Wj+1 
+
+j=i-LB
+
+i-1 i-1
+
+= j gCV (Wj )   j G  LBGi-LB.
+
+j=i-LB
+
+j=i-LB
+
+By Lemma 2, there exists K > 0, s.t.
+
+EP^,VB i  = EP^,VB gCV (Wi) - L(Wi)   KLBGi-LB, i > 0.
+
+Assume that W is D-dimensional,
+
+EP^,VB L(Wi), i  EP^,VB D L(Wi)  i   KLBDG2i-LB = K1i-LB,
+
+EP^,VB
+
+i 2  D
+
+EP^,VB
+
+i 
+
+2
+ DK2L2B2G2i-LB = K2i-LB ,
+
+where K1 = KLBDG2 and K2 = DK2L2B2G2. Taking EP^,VB to both sides of Eq. 14 we have
+
+L(Wi+1)
+
+
+
+L(Wi)
+
+-
+
+(i
+
+-
+
+i2)K1i-LB
+
+-
+
+(i
+
+-
+
+i2 2
+
+)EP^,VB
+
+L(Wi)
+
+2+
+
+ 2
+
+i2K2i-LB
+
+.
+
+Summing up the above inequalities and re-arranging the terms, we obtain,
+
+N
+
+(i -
+
+i2 2
+
+)EP^,VB
+
+L(Wi) 2
+
+i=1
+
+L(W1) - L(WN+1) - K1
+
+N
+
+(i - i2)i-LB
+
++
+
+K2 2
+
+N
+
+i2i-LB .
+
+i=1 i=1
+
+Dividing both sides by
+
+N i=1
+
+(i
+
+-
+
+i2 2
+
+),
+
+ERPR EP^,VB L(WR) 2
+
+
+
+L(W1) - L(WN+1
+
+iN=1(i
+
+-
+
+i2 2
+
+)
+
+)
+
+-
+
+K1
+
+Ni=1(i - i2)i-LB
+
+iN=1(i
+
+-
+
+i2 2
+
+)
+
++
+
+K2 2
+
+N i=1
+
+i2
+
+iN=1(i
+
+i-LB
+
+-
+
+i2 2
+
+)
+
+.
+
+Taking
+
+i
+
+=
+
+1 i
+
+,
+
+all
+
+the
+
+three
+
+terms
+
+on
+
+the
+
+right
+
+hand
+
+side
+
+have
+
+finite
+
+numerators
+
+and
+
+infinite
+
+denom-
+
+inators as N  , so the right hand side approaches to zero.
+
+C DERIVATION OF THE VARIANCE
+
+2
+
+Var[u] =E
+
+pv(hv - µv)
+
+v
+
+= p2vE [(hv - µv)]2
+
+v
+
+= p2vv2
+v
+=2.
+
+14
+
+Under review as a conference paper at ICLR 2018
+
+Var[uNS] =E [Dpv hv - µ]2
+
+=Ev {D2pv2 (µv2 + v2 ) + µ2 - Dµpv µvp}
+
+=D2 + (D pv2µv2 - µ2)
+v
+
+=D2 + 1 2
+
+(pvµv - pv µv )2.
+
+v,v
+
+2
+Var[uCV ] =E Dpv hv + pv(h¯v - µv)
+v 2
+=E Dpv hv + pv(h¯v - µ¯v) - µ
+v
+
+=Ev D2pv2 E (hv )2 + pv2E h¯v - µ¯v 2 + µ2 + 2Dpv
+
+pvE hv (h¯v - µ¯v)
+
+vv
+
+- Ev 2Dpv µEhv - 2µ pvE(h¯v - µ¯v)
+v
+
+=Ev D2pv2 (µv2 + v2 ) + p2v¯v2 + µ2 - 2Dpv2 ¯v2 - 2Dpv µµv
+v
+
+=D pv2µ2v + D2 + ¯2 + µ2 - 2¯2 - 2µ2
+v
+
+=(D2 - ¯2) + (D pv2µv2 - µ2)
+
+v
+
+=
+
+D2 + (D - 1)¯2
+
+1 +
+
+2
+
+(pvµv - pv µv )2.
+
+v,v
+
+ Var[uCV D] =E Dpv (hv - µv ) + Dpv µv +
+
+2
+pv(µ¯v - µv)
+
+v
+2 =E Dpv (hv - µv ) + Dpv µv - µ
+
+=Ev Dp2v E(hv - µv )2 + D2p2v µv2 + µ2 - 2Dpv µv µ
+
+= p2vv2 + D p2vµ2v + µ2 - 2µ2
+vv
+
+=2 + (D p2vµ2v - µ2)
+v
+
+=2 + 1 2
+
+(pvµv - pv µv )2.
+
+v,v
+
+D EXPERIMENT SETUP
+
+In this sections we describe the details of our model architectures. We use the Adam optimizer Kingma & Ba (2014) with learning rate 0.01.
+· Citeseer, Cora, PubMed and NELL: We use the same architecture as Kipf & Welling (2017): two graph convolution layers with one linear layer per graph convolution layer.
+
+15
+
+Under review as a conference paper at ICLR 2018 We use 32 hidden units, 50% dropout rate and 5 × 10-4 L2 weight decay for Citeseer, Cora and PubMed and 64 hidden units, 10% dropout rate and 10-5 L2 weight decay for NELL.
+· PPI and Reddit: We use the mean pooling architecture proposed by Hamilton et al. (2017a). We use two linear layers per graph convolution layer. We set weight decay to be zero, dropout rate to be 0.2%, and adopt layer normalization (Ba et al., 2016) after each linear layer. We use 512 hidden units for PPI and 128 hidden units for Reddit. We find that our architecture can reach 97.8% testing micro-F1 on the PPI dataset, which is significantly higher than 59.8% reported by Hamilton et al. (2017a). We find the improvement is from wider hidden layer, dropout and layer normalization.
+16
+
+

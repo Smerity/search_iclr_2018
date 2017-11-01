@@ -1,0 +1,821 @@
+Under review as a conference paper at ICLR 2018
+WHAI: WEIBULL HYBRID AUTOENCODING INFERENCE FOR DEEP TOPIC MODELING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+To train an inference network jointly with a deep generative topic model, making it both scalable to big corpus and fast in out-of-sample prediction, we develop Weibull hybrid autoencoding inference (WHAI) for deep latent Dirichlet allocation (DLDA), which infers posterior samples via a hybrid of stochasticgradient MCMC and autoencoding variational Bayes. The generative network of WHAI has a hierarchy of gamma distributions, while the inference network of WHAI is a Weibull upward-downward variational autocoder, which integrates a deterministic-upward deep neural network, and a stochastic-downward deep generative model based on a hierarchy of Weibull distributions. The Weibull distribution can be used to well approximate a gamma distribution with an analytic Kullback-Leibler divergence, and has a simple reparameterization via the uniform noise, which help efficiently compute the gradients of the evidence lower bound with respect to the parameters of the inference network. The effectiveness and efficiency of WHAI is illustrated with experiments on big corpora.
+1 INTRODUCTION
+There is a surge of research interest in multilayer representation learning for documents. To analyze the term-document count matrix of a text corpus, Srivastava et al. (2013) extend the deep Boltzmann machine (DBM) with the replicated softmax topic model of Salakhutdinov & Hinton (2009) to infer a multilayer representation with binary hidden units, but its inference network is not trained to match the true posterior (Mnih & Gregor, 2014) and the higher-layer neurons learned by DBM are difficult to visualize. The deep Poisson factor models of Gan et al. (2015) are introduced to generalize Poisson factor analysis, with a deep structure restricted to model binary topic usage patterns. Deep exponential families (DEF) of Ranganath et al. (2015) construct more general probabilistic deep networks with non-binary hidden units, in which a count matrix can be factorized under the Poisson likelihood, with the gamma distributed hidden units of adjacent layers linked via the gamma scale parameters. The Poisson gamma belief network (PGBN) (Zhou et al., 2015; 2016) also factorizes a count matrix under the Poisson likelihood, but factorizes the shape parameters of the gamma distributed hidden units of each layer into the product of a connection weight matrix and the gamma hidden units of the next layer, resulting in strong nonlinearity and readily interpretable multilayer latent representations.
+Those multilayer probabilistic models are often characterized by a top-down generative structure, with the distribution of a hidden layer typically acting as a prior for the layer below. Despite being able to infer a multilayer representation of a text corpus with scalable inference (Patterson & Teh, 2013; Ruiz et al., 2016; Cong et al., 2017a), they usually rely on an iterative procedure to infer the latent representation of a new document at the testing stage, regardless of whether variational inference or Markov chain Monte Carlo (MCMC) is used. The potential need of a large number of iterations per testing document make them unattractive when real-time processing is desired. A potential solution is to construct a variational autoencoder (VAE) that learns the parameters of an inference network (recognition model or encoder) jointly with those of the generative model (decoder) (Kingma & Welling, 2014; Rezende et al., 2014). However, most existing VAEs rely on Gaussian latent variables, with the neural networks (NNs) acting as nonlinear transforms between adjacent layers (Sonderby et al., 2016; Dai et al., 2016; Ishaan et al., 2017). A primary reason is that there is a simple reparameterization trick for Gaussian latent variables that allows efficiently computing the noisy gradients of the NN parameters under the evidence lower bound (ELBO). Unfortunately,
+1
+
+Under review as a conference paper at ICLR 2018
+Gaussian based distributions often fail to well approximate the posterior distributions of the sparse, nonnegative, and skewed document latent representations. For example, Srivastava & Sutton (2017) proposes autoencoding variational inference for topic models (AVITM), as shown in Fig. 2b, which utilizes the logistic normal distribution to approximate the posterior of the latent representation of a document; even though the generative model is latent Dirichlet allocation (LDA) (Blei et al., 2003), a basic single-hidden-layer topic model, due to the insufficient ability of the logistic normal distribution to model sparsity, AVITM has to rely on some heuristic to force the latent representation of a document to be sparse. Another common shortcoming of existing VAEs is that they often only provide a point estimate for the global parameters of the generative model, and hence their inference network is optimized to approximate the posteriors of the local parameters conditioning on the data and the point estimate, rather than a full posterior, of the global parameters. In addition, from the viewpoint of probabilistic modeling, the inference network of a VAE is often merely a shallow probabilistic model, whose parameters, though, are deterministically nonlinearly transformed from the observations via a non-probabilistic deep neural network.
+To address these shortcomings and move beyond Gaussian latent variable based deep models and inference procedures, we develop Weibull hybrid autoencoding inference (WHAI), a hybrid Bayesian inference for deep topic modeling that integrates both stochastic-gradient MCMC (Welling & Teh, 2011; Ma et al., 2015; Cong et al., 2017a) and a multilayer Weibull distribution based VAE. WHAI is related to a VAE in having both a decoder and encoder, but differs from a usual VAE in the following ways: 1) deep latent Dirichlet allocation (DLDA), a probabilistic deep topic model equipped with a gamma belief network, acts as the generative model; 2) inspired by the upward-downward Gibbs sampler of DLDA, as sketched in Fig. 2c, the inference network of WHAI uses a upwarddownward structure, as shown in Fig. 2a, to combine a non-probabilistic bottom-up deep NN and a probabilistic top-down deep generative model, with the th hidden layer of the generative model linked to both its ( + 1)th hidden layer and the th hidden layer of the deep NN; 3) a hybrid of stochastic-gradient MCMC and auto-encoding variational Bayes inference is employed to infer both the posterior distribution of the global parameters, represented as collected posterior MCMC samples, and a VAE that approximates the posterior distribution of the local parameters given the data and a posterior sample (rather than a point estimate) of the global parameters; 4) we use the Weibull distributions in the inference network to approximate gamma distributed conditional posteriors, exploiting the fact that the Weibull and gamma distributions have similar probability density functions (PDFs), the Kullback-Leibler (KL) divergence from the Weibull to gamma distributions is analytic, and a Weibull random variable can be efficiently reparameterized with a uniform noise. In the experiments, we show that the performance of WHAI is comparable to that of Gibbs sampling for deep topic modeling, but is scalable to big training data via mini-batch stochastic-gradient based inference and is considerably fast in out-of-sample prediction via the use of an inference network.
+2 WHAI FOR MULTILAYER DOCUMENT REPRESENTATION
+Below we first describe the decoder and encoder of WHAI, and then provide a hybrid stochasticgradient MCMC and auto-encoding variational inference that is fast in both training and testing.
+2.1 DOCUMENT DECODER: DEEP LATENT DIRICHLET ALLOCATION
+In order to capture the hierarchical document latent representation, WHAI uses the Poisson gamma belief network (PGBN) of Zhou et al. (2016), a deep probabilistic topic model, as the generative network (encoder). Choosing a deep generative model as its decoder distinguishes WHAI from AVITM, which uses a "shallow" LDA as its decoder, and a conventional VAE, which often uses as its decoder a "shallow" (transformed) Gaussian distribution, whose parameters are deterministically nonlinearly transformed from the observation via "black-box" deep neural networks. With all the gamma latent variables marginalized out, as shown in Cong et al. (2017a), the PGBN can also be represented as deep LDA (DLDA). For simplicity, below we use DLDA to refer to both the PGBN and DLDA representations of the same underlying deep generative model, as briefly described below. Note the single-hidden-layer version of DLDA reduces to Poisson factor analysis of Zhou et al. (2012), which is closely related to LDA. Let us denote (1)  R+P0×K and n(1)  R+K as the factor loading and latent representation of the first hidden layer of DLDA, respectively, where R+ = {x, x  0} and K is the number of topics (factors); to model high-dimensional multivariate
+2
+
+Under review as a conference paper at ICLR 2018
+
+sparse count vectors xn  ZP0 , where Z = {0, 1, . . .}, under the Poisson likelihood, the DLDA generative model with L hidden layers, from top to bottom, can be expressed as
+
+n(L)  Gam r, c(nL+1) , . . . , (nl)  Gam (l+1)(nl+1), cn(l+1) , . . . , n(1)  Gam (2)n(2), cn(2) , xn  Pois (1)(n1) .
+
+(1)
+
+where the hidden units n(l)  RK+l of layer l are factorized into the product of the factor loading
+
+(l)
+
+
+
+RKl-1 ×Kl
++
+
+and
+
+hidden
+
+units
+
+of
+
+the
+
+next
+
+layer.
+
+It
+
+infers
+
+a
+
+multilayer
+
+data
+
+representation,
+
+and
+
+can visualize its topic k(l) at hidden layer l as
+
+l-1 t=1
+
+(t)
+
+(kl), which tend to be very specific in
+
+the bottom layer and become increasingly more general when moving upwards. The unsupervisedly
+
+extracted multilayer latent representations n(l) are well suited for additional downstream analysis, such as document classification and retrieval.
+
+The upward-downward Gibbs sampling for DLDA, as described in detail in Zhou et al. (2016), is sketched in Fig. 2c, where Zl represent augmented latent counts that are sampled upward given the
+observations and model parameters. While having closed-form update equations, the Gibbs sampler
+requires processing all documents in each iteration and hence has limited scalability. Consequently,
+a topic-layer-adaptive stochastic gradient Riemannian (TLASGR) MCMC for DLDA, referred to as
+DLDA-TLASGR, is proposed to process big corpus (Cong et al., 2017a). Different from Srivas-
+tava & Sutton (2017) that models a probabilistic simplex with the expanded-natural representation
+(Patterson & Teh, 2013), DLDA-TLASGR uses a more elegant simplex constraint and increases the
+sampling efficiency via the use of the Fisher information matrix (FIM) (Cong et al., 2017a;b), with adaptive step-sizes for the topics of different layers. Specifically, suppose (kl) is the kth topic in layer with prior k(l)  Dirichlet(k(l)), the sampling of it can be efficiently realized as
+
+(k)t+1 =
+
+(k )t
+
++
+
+t Mk
+
+(z~:k· + k(l)) - (z~·k· + k(l)V )(k)t
+
++N
+
+0,
+
+2t Mk
+
+diag (k )t
+
+,
+
+
+(2)
+
+where Mk is calculated using the estimated FIM, both z~:k· and z~·k· come from the augmented latent counts Z, and [·] denotes a simplex constraint; more details about TLASGR-MCMC for DLDA
+can be found in Cong et al. (2017a) and are omitted here for brevity.
+
+Despite the attractive properties, neither the Gibbs sampler nor TLASGR-MCMC of DLDA can avoid taking a potentially large number of MCMC iterations to infer the latent representation of a testing document, which hinders real-time processing of the incoming documents and motivates us to construct an inference network with fast out-of-sample prediction, as described below.
+
+2.2 DOCUMENT ENCODER: WEIBULL UPWARD-DOWNWARD VARIATIONAL ENCODER
+
+A VAE uses an inference network to map the observations directly to their latent representations. However, their success so far is mostly restricted to Gaussian distributed latent variables, and does not generalize well to model sparse, nonnegative, and skewed latent document representations. To move beyond latent Gaussian models, below we propose Weibull upward-downward variational encoder (WUDVE) to efficiently produce a document's multilayer latent representation under DLDA.
+Assuming the global parameters (kl) of DLDA shown in (1) are given and the task is to infer the local parameters n(l+1), the usual strategy of mean-field variational Bayes (Jordan et al., 1999) is to maximize the ELBO that can be expressed as
+
+N
+L = E ln p xn | (1), n(1)
+n=1
+
+
+NL
+
+q n(l)
+
+
+
+- E ln
+
+,
+
+n=1 l=1
+
+p (nl) | (l+1), (nl+1)
+
+(3)
+
+where the expectations are taken with respect to (w.r.t.) a fully factorized distribution as
+
+NL
+
+q {n(l)}nN=,L1,l=1 =
+
+q (nl) .
+
+n=1 l=1
+
+(4)
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+PDF PDF PDF KL
+
+x 1012
+8
+6
+
+Gamma W eibull
+
+4
+
+2
+
+0 -12
+
+-8 -4 logX
+
+(a) KL = 0.96
+
+1
+
+6
+
+4
+
+Gamma W eibull
+
+2
+
+0-2 0 2 logX
+(b) KL = 0.01
+
+4
+
+0.08
+
+0.06
+
+Gamma W eibull
+
+0.04
+
+0.02
+
+00 1 logX
+(c) KL = 0.06
+
+2
+
+1.2 
+0.8
+0.4
+
+100-2 100 Gamma shape
+(d) KL change
+
+
+102
+
+Figure 1: The KL divergence from the inferred Weibull distribution to the target gamma one as (a) Gamma(0.05, 1), (b) Gamma(0.5, 1), and (c) Gamma(5, 1). Subplot (d) shows the KL divergence as a function of the gamma shape parameter, where the gamma scale parameter is fixed at 1.
+
+Instead of using a conventional latent Gaussian based VAE, in order to model sparse and nonnegative latent document representation, it might be more appropriate to use a gamma distribution based inference network defined as q(n | xn) = Gamma(fW(xn), gW(xn)), where f and g are two related deep neural networks parameterized by W. However, it is hard to efficiently compute the gradient w.r.t. W, due to the difficulty to reparameterize a gamma distributed random variable (Kingma & Welling, 2014; Ruiz et al., 2016; Knowles, 2015), which motivates us to identify a surrogate distribution that can not only well approximate the gamma distribution, but also be easily reparameterized. Below we show that the Weibull distribution is an ideal choice for this purpose.
+
+2.2.1 WEIBULL AND GAMMA DISTRIBUTIONS
+
+A main reason that we choose the Weibull distribution to construct the inference network is that the Weibull and gamma distributions have similar PDFs:
+
+Weibull
+
+PDF:
+
+P (x | k, )
+
+=
+
+k k
+
+xk-1
+
+e(x/)k
+
+,
+
+Gamma PDF: P (x | , ) =  x-1e-x, ()
+
+where x  R+. Another reason is due to a simple reparameterization for x  Weibull(k, ) as x = (- ln(1 - ))1/k,  Uniform(0, 1).
+
+Moreover, its KL-divergence from the gamma distribution has an analytic expression as
+
+KL(Weibull(k, )||Gamma(, )) =  ln -  -ln k -
+
+1 1+
+
++ +1+ ln  -ln ().
+
+kk
+
+Minimizing this KL divergence, one can identify the two parameters of a Weibull distribution to approximate a given gamma one. As shown in Fig. 1, the inferred Weibull distribution in general quite accurately approximates the target gamma one, as long as the gamma shape parameter is not too close to zero or too large.
+
+2.2.2 UPWARD-DOWNWARD INFORMATION PROPAGATION
+
+For the DLDA upward-downward Gibbs sampler sketched in Fig. 2c, the corresponding Gibbs sampling update equation for (nl) can be expressed as
+
+(n(l) | -)  Gamma mn(l)(l+1) + (l+1)n(l+1), f (p(nl), cn(l+1)) ,
+
+(5)
+
+where m(nl)(l+1) and p(nl) are latent random variables constituted by information upward propagated
+
+to layer l, as described in detail in Zhou et al. (2016) and hence omitted here for brevity. It is
+
+clear from (5) that the conditional posterior of (nl) is related to both the information at the higher (prior) layer, and that upward propagated to the current layer via a series of data augmentation
+
+and marginalization steps described in Zhou et al. (2016). Inspired by this instructive upward-
+
+downward information propagation in Gibbs sampling, as shown in Fig. 2a, we construct WUDVE,
+
+the inference network of our model, as q(n(L) | hn(L))
+
+L-1 l=1
+
+q(n(l)
+
+|
+
+(l+1),
+
+hn(l),
+
+n(l+1)),
+
+where
+
+q(n(l) | (l+1), hn(l), n(l+1)) = Weibull(kn(l) + (l+1)n(l+1), (nl)),
+
+(6)
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+            h3 h3
+
+(h3)3 (3) (3) (3()3)
+
+(3) (1)
+
+(1) (1) (1(1))
+
+(1)Z3
+
+Z3
+
+(3)(3)
+
+( 3Z) 3
+
+3 3 3 3 3 3 
+
+
+
+33 3
+
+    h2 h2
+
+(h2)2 (2) (2) (2()2)
+
+(2)h2
+
+h2
+
+h2
+
+  Z2 Z2
+
+(2)(2)
+
+(2Z) 2
+
+2 2 2 22
+
+2
+
+1 1
+
+h1
+
+ h1
+
+(h1)1  (1) (1) (1()1)
+
+ (1)h1
+
+h1
+
+h1
+
+1 22 2
+
+  Z1 Z1
+
+(1)(1)
+
+(1Z) 1
+
+1 1
+
+1
+
+1
+
+ (3)
+3
+ (2)
+2
+ (1)
+
+XX
+
+X
+
+X X X X X X XX
+
+XX X X
+
+X
+
+InferenInceferenceIGnfeenreernaGcteivneeratGiveenInerfeatrievneIncefereGnecneInerfeaGtreivneecreatGiveenerative DLGDeAneDrLaDtiAve Gibbs Sampling
+
+(a) WHAI
+
+(b) AVITM
+
+(c) DLDA
+
+Figure 2: (a-b): Inference (or encoder/recognition) and generative (or decoder) models for (a) WHAI and (b) AVITM; (c) the generative model and a sketch of the upward-downward Gibbs sampler of DLDA, where Zl are augmented latent counts that are upward sampled in each Gibbs sampling iteration. Circles are stochastic variables and squares are deterministic variables. The orange and blue arrows denote the upward and downward information propagation respectively, and the red ones denote the data generation.
+
+in which the Weibull distribution is used to approximate the gamma distributed conditional posterior, and hn(l) = M LP (h(nl-1)) with h(n0) = log(1 + xn), W represents the parameters of the multilayer perceptron (MLP), k(nl) = Sof tplus(Linear(h(nl))), and (nl) = Sof tplus(Linear(h(nl))). This upward-downward inference network is distinct from that of a usual VAE, where it is common that the inference network has a pure bottom-up structure and only interacts with the generative model via the ELBO (Kingma & Welling, 2014; Ishaan et al., 2017). Note that WUDVE no longer follows mean-field variational Bayes to make a fully factorized assumption as in (4).
+Comparing Figs. 2c and 2a show they both have an upward information propagation (orange arrows) and a downward one (blue arrows), but their underlying implementations are distinct from each other. DLDA in Fig. 2c does not have an inference network and needs the local variables (nl) to help perform stochastic upward information propagation, whereas WUDVE in Fig. 2a uses its non-probabilistic part to perform deterministic upward information propagation, without relying on the local variables n(l). It is also interesting to notice that the upward-downward structure of WUDVE, motivated by upward-downward Gibbs sampling of DLDA, is closely related to that used in the ladder VAE of Sonderby et al. (2016). However, to combine the bottom-up and top-down information, ladder VAE relies on some heuristic restricted to Gaussian latent variables.
+2.3 HYBRID MCMC/VAE INFERENCE
+In Section 2.1, we describe how to use TLASGR-MCMC of Cong et al. (2017a), a stochasticgradient MCMC algorithm for DLDA, to sample the global parameters {}Ll=1; whereas in Section 2.2.2, we describe how to use WUDVE, an autoencoding variational inference network, to approximate the conditional posterior of the local parameters {n(l)}lL=1 given {}lL=1 and observation xn. Rather than merely finding a point estimate of the global parameters {}Ll=1, we describe in Algorithm 1 how to combine TLASGR-MCMC and the proposed WUDVE into a hybrid MCMC/VAE inference algorithm, which infers posterior samples for both the global parameters {}Ll=1 of the generative network, and the neural network parameters W of the inference network. Being able to efficiently evaluating the gradient of the ELBO is important to the success of a variational inference algorithm (Hoffman et al., 2013; Paisley et al., 2012; Kingma & Welling, 2014; Mnih & Gregor, 2014; Ranganath et al., 2015; Ruiz et al., 2016; Rezende et al., 2014). An important step of Algorithm 1 is calculating the gradient of the ELBO in (3) w.r.t. the NN parameters W. Thanks to the choice of the Weibull distribution, the second term of the ELBO in (3) is analytic, and due to simple reparameterization of the Weibull distribution, the gradient of the first term of the ELBO w.r.t. W can be accurately evaluated, achieving satisfactory performance using even a single Monte Carlo sample, as shown in our experimental results. Thanks to the architecture of WUDVE, using the inference network, for a new mini-batch, we can directly find the conditional posteriors of {n(l)}Ll=1
+5
+
+Under review as a conference paper at ICLR 2018
+
+Algorithm 1 Hybrid stochastic-gradient MCMC and autoencoding variational inference for WHAI
+
+Set mini-batch size m and the number of layer L
+
+Initialize encoder parameter W and model parameter {(l)}Ll=1.
+
+for iter = 1, 2, · · · do
+
+Randomly select a mini-batch of m documents to form a subset X = {xi}im=1;
+
+Draw random noise
+
+li
+
+m,L i=1,l=1
+
+from
+
+uniform
+
+distribution;
+
+Calculate WL W, {l}; X, li according to (3), and update W;
+
+Sample i{l} from (6) via W to update topics {(l)}Ll=1 according to (2); end for
+
+given {(l)}Ll=1 and the stochastically updated W, with which we can sample the local parameters and then use TLASGR-MCMC to stochastically update the global parameters {(l)}lL=1.
+To demonstrate the advantages of the proposed hybrid inference for WHAI, which infers posterior samples of the global parameters, including {}lL=1 and W, we also consider Weibull autoencoding inference (WAI) that has the same inference network as WHAI but learns point estimates of {}lL=1 and W using stochastic gradient decent (SGD) (Kingma & Ba, 2015). We will show in experiments that inferring the posteriors of the global parameters provides improved performance in comparison to only finding pointe estimates of them.
+
+3 EXPERIMENTAL RESULTS
+
+We compare the performance of different algorithms on 20Newsgroups (20News), Reuters Corpus Volume I (RCV1), and Wikipedia (Wiki). 20News consists of 18,845 documents with a vocabulary size of 2,000. RCV1 consists of 804,414 documents with a vocabulary size of 10,000. Wiki, with a vocabulary size of 7,702, consists of 10 million documents randomly downloaded from Wikipedia using the script provided for Hoffman et al. (2010). Similar to Cong et al. (2017a), we randomly select 100,000 documents for testing. To be consistent with previous settings (Gan et al., 2015; Henao et al., 2015; Cong et al., 2017a), no precautions are taken in the Wikipedia downloading script to prevent a testing document from being downloaded into a mini-batch for training. Our code is written based on Theano (Theano Development Team, 2016).
+For comparison, we consider the deep Poisson factor analysis (DPFA) of Gan et al. (2015), DLDAGibbs of Zhou et al. (2016), DLDA-TLASGR of Cong et al. (2017a), and AVITM of Srivastava & Sutton (2017), using the code provided by the authors. Note that as shown in Cong et al. (2017a), DLDA-Gibbs and DLDA-TLASGR are state-of-the-art topic modeling algorithms that clearly outperform a large number of previously proposed ones, such as the replicated softmax of Salakhutdinov & Hinton (2009) and the nested Hierarchical Dirichlet process of Paisley et al. (2015).
+
+3.1 PER-HELDOUT-WORD PERPLEXITY
+
+Per-heldout-word perplexity is a widely-used performance measure. Similar to Wallach et al. (2009), Paisley et al. (2011), and Zhou et al. (2012), for each corpus, we randomly select 70% of the word tokens from each document to form a training matrix T, holding out the remaining 30% to form a testing matrix Y. We use T to train the model and calculate the per-heldout-word perplexity as
+
+exp
+
+-1 y··
+
+VN
+yvn
+v=1 n=1
+
+ln
+
+S s=1
+
+K1 k=1
+
+(v1k)sk(1n)s
+
+S s=1
+
+V v=1
+
+K1 k=1
+
+(v1k)sk(1n)s
+
+,
+
+(7)
+
+where S is the total number of collected samples and y·· =
+
+V v=1
+
+N n=1
+
+yvn
+
+.
+
+For the proposed
+
+model, we set the mini-batch size as 200, and use as burn-in 2000 mini-batches for both 20News
+
+and RCV1 and 3500 for wiki. We collect 3000 samples after burn-in to calculate perplexity. The
+
+hyperparameters of WHAI are set as: (l) = 1/Kl, r = 1, and c(nl) = 1.
+
+Table 1 lists for various algorithms both the perplexity and the average run time per testing document given a single sample (estimate) of the global parameters. Clearly, given the same generative net-
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Table 1: Per-heldout-word perplexities and testing time(ms per document) on three datasets. Note the testing time of DLDA-TLASGR and WHAI-Hybrid are the same with DLDA-Gibbs and WHAISGD respectively, since both of pairs are distinguished each other only by learning  at training stage.
+
+Model
+DLDA-Gibbs DLDA-Gibbs DLDA-Gibbs DLDA-TLASGR DLDA-TLASGR DLDA-TLASGR
+DPFA AVITM DLDA-WAI DLDA-WAI DLDA-WAI DLDA-WHAI DLDA-WHAI DLDA-WHAI
+
+Size
+128-64-32 128-64 128
+128-64-32 128-64 128
+128-64-32 128
+128-64-32 128-64 128
+128-64-32 128-64 128
+
+Perplexity 20News RCV1
+571 938 573 942 584 951 579 950 581 955 590 963 637 1041 654 1062 581 954 583 958 593 967 581 953 582 957 591 965
+
+Wiki
+966 968 981 978 979 993 1056 1088 984 986 999 980 982 996
+
+Test Time 20News RCV1
+
+10.46 8.73 4.69 10.46 8.73 4.69 20.12 0.23 0.63 0.42 0.20 0.63 0.42 0.20
+
+23.38 18.50 12.57 23.38 18.50 12.57 34.21 0.68 1.20 0.91 0.66 1.20 0.91 0.66
+
+Wiki
+23.69 19.79 13.31 23.69 19.79 13.31 35.41 0.80 1.43 1.02 0.78 1.43 1.02 0.78
+
+work structure, DLDA-Gibbs performs the best in terms of predicting heldout word tokens, which is not surprising as this batch algorithm can sample from the true posteriors given enough Gibbs sampling iterations. DLDA-TLASGR is a mini-batch algorithm that is much more scalable in training than DLDA-Gibbs, at the expense of slighted degraded performance in out-of-sample prediction. Both DLDA-WAI, using SGD to infer the global parameters, and DLDA-WHAI, using a stochasticgradient MCMC to infer the global parameters, slightly underperform DLDA-TLASGR; all three mini-batch based algorithms are scalable to big training corpus, but due to the use of the WUDVE inference network, both DLDA-WAI and DLDA-WHAI are considerably fast in processing a testing document. In terms of perplexity, all algorithms with DLDA as the generative model clearly outperform both DPFA of Gan et al. (2015) and AVITM of Srivastava & Sutton (2017), while in terms of the computational cost for testing, all algorithms with an inference network, including AVITM, DLDA-WAI, and DLDA-WHAI, clearly outperform these relying on an interactive procedure for out-of-sample prediction, including DPFA, DLDA-Gibbs, and DLDA-TLASGR. It is also clear that all algorithms with DLDA as the generative model have a clear trend of improvement as the generative network becomes deeper, and DLDA-WHAI with a single hidden layer already clearly outperforms AVITM, indicating that using the Weibull distribution is more appropriate than using the logistic normal distribution to model the document latent representation. Furthermore, thanks to the use of the stochastic gradient based TLASGR-MCMC rather than a simple SGD procedure, DLDA-WHAI consistently outperforms DLDA-WAI.
+
+Perplexity Perplexity Perplexity
+
+1100 1000
+900 800 700 600
+
+DLDA-W HAI DLDA-W AI DLDA-TLASGR DLDA-Gibbs AVITM DPFA
+
+2200 1800
+
+1400
+
+500 1000 Time(Seconds)
+(a)
+
+1500
+
+1000 2500
+
+DLDA-W HAI DLDA-W AI DLDA-TLASGR DLDA-Gibbs AVITM DPFA
+
+1800 1600
+
+1400
+
+1200
+
+3500 Time(Seconds)
+(b)
+
+4500
+
+3000
+
+DLDA-W HAI DLDA-W AI DLDA-TLASGR DLDA-Gibbs AVITM DPFA
+
+5000 Time(Seconds)
+(c)
+
+7000
+
+Figure 3: Plot of per-heldout-word perplexity as a function of time. (a), (b) and (c) are different models on 20News, RCV1 and Wiki, respectively. DLDA, WHAI and DPFA have the same size of 128-64-32, the AVITM is a single layer with 128 topics.
+
+7
+
+Under review as a conference paper at ICLR 2018
+
+Below we examine how various inference algorithms progress over time during training, evaluated with per-holdout-word perplexity that is calculated using only the most recent sample/point estimate of the global parameters. As clearly shown in Fig. 3, DLDA-WHAI outperforms DPFA and AVITM in providing lower perplexity as time progresses, which is not surprising as the DLDA multilayer generative model is good at document representation, while AVITM is only "deep" in the deterministic part of its inference network and DPFA is restricted to model binary topic usage patterns via its deep network. When DLDA is used as the generative model, in comparison to Gibbs sampling and TLASGR-MCMC on two large corpora, RCV1 and Wiki, the mini-batch based WHAI converges slightly slower than TLASGR-MCMC but much faster than Gibbs sampling; WHAI consistently outperforms WAI, which demonstrates the advantage of the hybrid MCMC/VAE inference. Note that for all three datasets, the perplexity of TLASGR decreases at a fast rate, followed by closely by WHAI, while that of Gibbs sampling decreases slowly, especially for RCV1 and Wiki, as shown in Figs. 3(b-c). This is expected as both RCV1 and Wiki are much larger corpora, for which a mini-batch based inference algorithm can already make significant progress in inferring the global model parameters, before a batch-learning Gibbs sampler finishes a single iteration that needs to go through all documents. We also notice that although AVITM is fast for testing via the use of a VAE, its representation power is limited due to not only the use of a shallow topic model, but also the use of a latent Gaussian based inference network that is not naturally suited to model document latent representation.
+
+3.2 TOPIC HIERARCHY AND MANIFOLD
+
+In addition to quantitative evaluations, we have also visually inspected the inferred topics at different
+
+layers and the inferred connection weights between the topics of adjacent layers. Distinct from many
+
+existing deep learning models that that build nonlinearity via "black-box" neural networks, we can
+
+easily visualize the whole network, whose hidden units of layer l - 1 and those of layer l are
+
+connected by (kl)k that are sparse, understand the meaning of each hidden unit by projecting it back
+
+to the original data space via
+
+l-1 t=1
+
+(t)
+
+(kl). We show in Fig. 4 a subnetwork, originating from
+
+units 16, 19 and 24 of the top hidden layer, taken from the generative network of size 128-64-32
+
+inferred on Wiki. The semantic meaning of each topic and the connections between different topics
+
+are highly interpretable. We provide several additional topic hierarchies for Wiki in the Appendix.
+
+To further illustrate the effectiveness of our multilayer representation in our model, we apply a three-hidden-layer WHAI to MNIST digits and present the learned dictionary atoms. We use the Poisson likelihood directly to model the MNIST digit pixel values that are nonnegative integers ranging from 0 to 255. As shown in Figs. 5a-and 5c, it is clear that the factors at layers one to three represent localized points, strokes, and digit components that cover large spatial regions, respectively. This type of hierarchical visual representation is difficult to achieve with other types of deep neural networks (Srivastava et al., 2013; Kingma & Welling, 2014; Rezende et al., 2014; Sonderby et al., 2016).
+
+WUDVE, the inference network of WHAI, has a deterministic-upward-stochastic-downward structure, in contrast to a conventional VAE which often has a pure deterministic bottom-up structure. Here, we demonstrate the importance of the stochastic-downward part of WUDVE through a simple experiment. We remove the stochastic-downward part of WUDVE shown in (6) and define the inference network as q((nl) | hn(l)) = Weibull(kn(l), (nl)), in other words, we ignore the top-down prior information. As shown in Figs. 5d-5f, although some latent structures are learned, the hierarchical relationships between adjacent layers almost all disappear, indicating the importance of having a stochastic-downward structure together with a deterministic-upward one in the inference network.
+
+As a sanity check for latent representation and overfitting, we shown in Fig. 6 the latent space
+interpolations between the test set examples on MNIST dataset, and provide related results in the
+Appendix for the Wiki corpus. With the 3-layer model learned before, following Dumoulin et al.
+(2016), we sample pairs of test set examples x1 and x2 and project them into z(13) and z(23). We then linearly interpolate between z1(3) and z2(3), and pass the intermediary points through the generative model to plot the input-space interpolations. In Fig. 6, the left and right column are the digits
+generated from z(13) and z(23), while the middle ones are generated from the interpolation latent space. We observe a smooth transitions between pairs of example, and intermediary images remain
+
+8
+
+Under review as a conference paper at ICLR 2018
+
+19 international group company state national development public government university members
+
+16 company international group development business public new million services national state
+
+24
+state government national law president party new political group public general
+
+64 international group new members national development word social united community organization
+
+in5t9ernational group company development public business new services members million national
+
+17 company business million market bank service system services sold companies based
+
+10 state government public national law act department group count political services
+
+21
+government law state court political national rights act said police president
+
+85 international
+word founded community development national foundation organization social
+
+27
+health women social medical children
+care people society
+
+2
+group new members project union association local international
+
+82
+company business service
+bank industry corporation million
+
+77
+development research
+management information economic resources
+
+56
+company market
+sold production
+based commercial
+products price
+
+5
+people public person support making important services
+
+80 million business financial
+bank money estate
+cost real credit
+
+106
+government political rights foreign law policy peace order
+
+32
+law court act justice legal judge supreme federal
+
+12
+police killed prison death murder crime case
+
+Figure 4: Example of hierarchical topic learned from Wiki by a three layer WHAI of size 128-64-32.
+
+(a) (b) (c)
+(d) (e) (f) Figure 5: Learned topics on MNIST digits with a three-hidden-layer WVAE of size 128-6432. Shown in (a)-(c) are example topics for layers 1, 2 and 3, respectively, learned with a deterministic-upward-stochastic-downward encoder, and shown in (d)-(f) are the ones learned with a deterministic-upward encoder.
+believable. In other words, the latent space the model learned is on a manifold, which indicates that WHAI has learned a generalized latent feature rather than concentrating its probability mass exclusively around training examples.
+4 CONCLUSION
+To infer a hierarchical latent representations of a big corpus, we develop Weibull hybrid autoencoding inference (WHAI) for deep latent Dirichlet allocation (DLDA), a deep probabilistic topic model that factorizes the observed count vectors under the Poisson likelihood and models the latent representation under the gamma likelihood at multiple different layers. WHAI integrates TLASGRMCMC, a stochastic-gradient MCMC algorithm, to update the global parameters given the posterior sample of a mini-batch's local parameters, and a Weibull distribution based upward-downward variational autoencoder to infer the conditional posterior of the local parameters given the stochastically updated global parameters. The use of the Weibull distribution, which resembles the gamma distribution and has a simple reparameterization, makes one part of the evidence lower bound (ELBO) analytic, and makes it efficient to compute the gradient of the non-analytic part of the ELBO with
+9
+
+Under review as a conference paper at ICLR 2018
+(a) (b) (c) Figure 6: Latent space interpolations on the MNIST test set. Left and right columns correspond to the images generated from z(13) and z(23), and the others is generated from the latent representations interpolated linearly from z1(3) to z(23).
+respect to the parameters of the inference network. Moving beyond Gaussian latent variables based deep models and inference procedures, WHAI provides posterior samples for both the global parameters of the generative model and these of the inference network, yields highly interpretable multilayer latent document representation, is scalable to big training corpus due to the use of a stochastic-gradient MCMC, and is fast in out-of-sample prediction due to the use of an inference network. Compelling experimental results on big text corpora demonstrate the advantages of WHAI in both quantitative and qualitative analysis.
+REFERENCES
+David M Blei, Andrew Y Ng, and Michael I Jordan. Latent Dirichlet allocation. Journal of Machine Learning Research, 3(Jan):993­1022, 2003.
+Yulai Cong, Bo Chen, Hongwei Liu, and Mingyuan Zhou. Deep latent Dirichlet allocation with topic-layer-adaptive stochastic gradient riemannian mcmc. In ICML, 2017a.
+Yulai Cong, Bo Chen, and Mingyuan Zhou. Fast simulation of hyperplane-truncated multivariate normal distributions. Bayesian Analysis, 2017b.
+Zhenwen Dai, Andreas C Damianou, Javier Gonzalez, and Neil D Lawrence. Variational autoencoded deep Gaussian processes. In ICLR, 2016.
+Vincent Dumoulin, Ishmael Belghazi, Ben Poole, Alex Lamb, Martin Arjovsky, Olivier Mastropietro, and Aaron Courville. Adversarially learned inference. arXiv:1606.00704, 2016.
+Zhe Gan, Changyou Chen, Ricardo Henao, David Carlson, and Lawrence Carin. Scalable deep poisson factor analysis for topic modeling. In ICML, pp. 1823­1832, 2015.
+Ricardo Henao, Zhe Gan, James Lu, and Lawrence Carin. Deep poisson factor modeling. In NIPS, pp. 2800­2808, 2015.
+M. Hoffman, D. Blei, and F. Bach. Online learning for latent Dirichlet allocation. In NIPS, 2010. Matthew D Hoffman, David M Blei, Chong Wang, and John William Paisley. Stochastic variational
+inference. Journal of Machine Learning Research, 14(1):1303­1347, 2013. Gulrajani Ishaan, Kumar Kundan, Ahmed Faruk, Taiga Adrien, Ali, Visin Francesco, Vazquez
+David, and Courville Aaron. Pixelvae: A latent variable model for natural images. In ICLR, 2017. Michael I Jordan, Zoubin Ghahramani, Tommi S Jaakkola, and Lawrence K Saul. An introduction to variational methods for graphical models. Machine learning, 37(2):183­233, 1999. Diederik P Kingma and Jimmy Lei Ba. Adam: A method for stochastic optimization. In ICLR, 2015.
+10
+
+Under review as a conference paper at ICLR 2018
+Diederik P Kingma and Max Welling. Stochastic gradient vb and the variational auto-encoder. In ICLR, 2014.
+David A Knowles. Stochastic gradient variational bayes for gamma approximating distributions. arXiv preprint arXiv:1509.01631, 2015.
+Y. Ma, T. Chen, and E. Fox. A complete recipe for stochastic gradient MCMC. In NIPS, pp. 2899­2907, 2015.
+Andriy Mnih and Karol Gregor. Neural variational inference and learning in belief networks. In ICML, pp. 1791­1799, 2014.
+J. Paisley, C. Wang, and D. Blei. The discrete infinite logistic normal distribution for mixedmembership modeling. In AISTATS, 2011.
+J. Paisley, C. Wang, D. M. Blei, and M. I. Jordan. Nested hierarchical dirichlet processes. IEEE Trans. Pattern Anal. Mach. Intell., 2015.
+John Paisley, David M Blei, and Michael I Jordan. Variational Bayesian inference with stochastic search. In Proceedings of the 29th International Coference on International Conference on Machine Learning, pp. 1363­1370. Omnipress, 2012.
+Sam Patterson and Yee Whye Teh. Stochastic gradient riemannian langevin dynamics on the probability simplex. In NIPS, pp. 3102­3110, 2013.
+Rajesh Ranganath, Linpeng Tang, Laurent Charlin, and David Blei. Deep exponential families. In AISTATS, pp. 762­771, 2015.
+Danilo J Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic backpropagation and approximate inference in deep generative models. In Proceedings of the 31st International Conference on Machine Learning (ICML-14), pp. 1278­1286, 2014.
+Francisco JR Ruiz, Michalis K Titsias, and David M Blei. The generalized reparameterization gradient. In NIPS, pp. 460­468, 2016.
+Ruslan Salakhutdinov and Geoffrey E Hinton. Replicated softmax: an undirected topic model. In NIPS, pp. 1607­1614, 2009.
+Casper Kaae Sonderby, Tapani Raiko, Lars Maaloe, Soren Kaae Sonderby, and Ole Winther. Ladder variational autoencoders. In NIPS, pp. 3738­3746, 2016.
+Akash Srivastava and Charles Sutton. Autoencoding variational inference for topic models. In ICLR, 2017.
+Nitish Srivastava, Ruslan Salakhutdinov, and Geoffrey E Hinton. Modeling documents with deep Boltzmann machines. In Uncertainty in Artificial Intelligence, 2013.
+Theano Development Team. Theano: A Python framework for fast computation of mathematical expressions. arXiv e-prints, abs/1605.02688, May 2016.
+H. M. Wallach, I. Murray, R. Salakhutdinov, and D. Mimno. Evaluation methods for topic models. In ICML, 2009.
+M. Welling and Y. W. Teh. Bayesian learning via stochastic gradient Langevin dynamics. In ICML, pp. 681­688, 2011.
+Mingyuan Zhou, Lauren Hannah, David B Dunson, and Lawrence Carin. Beta-negative binomial process and Poisson factor analysis. In AISTATS, pp. 1462­1471, 2012.
+Mingyuan Zhou, Yulai Cong, and Bo Chen. The Poisson Gamma belief network. In NIPS, pp. 3043­3051, 2015.
+Mingyuan Zhou, Yulai Cong, and Bo Chen. Augmentable gamma belief networks. J. Mach. Learn. Res., 17(163):1­44, 2016.
+11
+
+Under review as a conference paper at ICLR 2018
+
+32
+university school college published book work press international education society
+
+25 book people century published known first two called work time name
+
+43 university college school research society international science professor press work education
+
+53 book published books press university work magazine author society novel
+
+62 people century language name life book english religious god word like
+
+5
+man series character life get story make like characters new love
+
+85
+international world founded community development national program foundation based organization social
+
+79
+university college research professor science history medical degree sciences studies medicine
+
+92
+university press society journal work studies research professor published science study
+
+117 art work artist prize artists arts academy painter style design painting
+
+127
+book published works books written novel author press work history writing
+
+5
+people public person term result support process making non important individual
+
+78 78
+theory case see value right model term concept function left self
+
+86
+new like fact second idea possible states influence described word approach
+
+Figure 7: Hierarchical topics learned from wiki
+
+125
+man king death vol god dead great sun lord magic power
+
+6 war government state first time new national two law general united
+
+62
+character characters back like world takes see appears secret girl named
+
+5
+government state national law public members act people union department united
+
+28 war army government military time battle general law forces two union
+
+19 business federal project act bank financial tax office private market report
+
+53 law court act rights legal state justice police judge case commission
+
+125 government union war president law party political minister office general rights
+
+77
+left days sent two battle came union continued forced attack lost
+
+52 killed days police men death found left attack dead sent said
+
+50 war army battle military forces attack troops force civil commander
+
+144 Federal bank credit financial Exchange Tax billion costs paid Income workers
+
+116 report agreement security stated reported plan reports new due plans signed
+
+101
+court legal Decision legal bill Practice murder arrested Criminal Court lawyer
+
+142 Rights law state government human public constitution right political Civil laws
+
+153
+political movement religious people freedom politics peace press war led nation
+
+102 government economic trade capital minister economy political governments ministry nations relations
+
+176
+territory treaty power independence land led colonial rule region government provinces
+
+191
+days found decided Occurred believed months turned saw incident taken leave
+
+65
+killed death men dead shot killing people escape murder Man kill
+
+179
+battle army fort soldiers killed fought troops command wounded captain siege
+
+133 war military army civil general soldiers forces major wars camp front
+
+Figure 8: Hierarchical topics learned from wiki
+
+A HIERARCHICAL TOPICS LEARNED FROM WIKI
+B MANIFOLD ON DOCUMENTS
+From a sci.medicine document to an eci.space one 1. com, writes, article, edu, medical, pitt, pain, blood, disease, doctor, medicine, treatment, patients, health, ibm 2. com, writes, article, edu, space, medical, pitt, pain, blood, disease, doctor, data, treatment, patients, health 3. space, com, writes, article, edu, data, medical, launch, earth, states, blood, moon, disease, satellite, medicine, 4. space, data, com, writes, article, edu, launch, earth, states, moon, satellite, shuttle, nasa, price, lunar
+12
+
+Under review as a conference paper at ICLR 2018
+5. space, data, launch, earth, states, moon, satellite, case, com, shuttle, price, nasa, price, lunar, writes, 6. space, data, launch, earth, states, moon, orbit, satellite, case, shuttle, price, nasa, system, lunar, spacecraft From a alt.atheism document to a soc.religion.christian one 1. god, just, want, moral, believe, religion, atheists, atheism, christian, make, atheist, good, say, bible, faith 2. god, just, want, believe, jesus, christian, atheists, bible, atheism faith, say, make, religious, christians, atheist 3. god, jesus, just, faith, believe, christian, bible, want, church, say, religion, moral, lord, world, writes 4. god, jesus, faith, just, bible, church, christ, believe, say, writes, lord, religion, world, want, sin 5. god, jesus, faith, church, christ, bible, christian, say, write, lord, believe, truth, world, human, holy 6. god, jesus, faith, church, christ, bible, writes, say, christian, lord, sin, human, father, spirit, truth From a com.graphics document to a comp.sys.ibm.pc.hardware one 1. image, color, windows, files, image, thanks, jpeg, gif, card, bit, window, win, help, colors, format 2. image, windows, color, files, card, images, jpeg, thanks, gif, bit, window, win, colors, monitor, program 3. windows, image, color, card, files, gov, writes, nasa, article, images, program, jpeg, vidio, display, monitor 4. windows, gov, writes, nasa, article, card, going, program, image, color, memory, files, software, know, screen 5. gov, windows, writes, nasa, article, going, dos, card, memory, know, display, says, screen, work, ram 6. gov, writes, nasa, windows, article, going, dos, program, card, memory, software, says, ram, work, running
+13
+
+

@@ -1,0 +1,475 @@
+Under review as a conference paper at ICLR 2018
+SEQ2SQL: GENERATING STRUCTURED QUERIES FROM NATURAL LANGUAGE USING REINFORCEMENT LEARNING
+Anonymous authors Paper under double-blind review
+ABSTRACT
+Relational databases store a significant amount of the worlds data. However, accessing this data currently requires users to understand a query language such as SQL. We propose Seq2SQL, a deep neural network for translating natural language questions to corresponding SQL queries. Our model uses rewards from inthe-loop query execution over the database to learn a policy to generate the query, which contains unordered parts that are less suitable for optimization via cross entropy loss. Moreover, Seq2SQL leverages the structure of SQL to prune the space of generated queries and significantly simplify the generation problem. In addition to the model, we release WikiSQL, a dataset of 80654 hand-annotated examples of questions and SQL queries distributed across 24241 tables from Wikipedia that is an order of magnitude larger than comparable datasets. By applying policybased reinforcement learning with a query execution environment to WikiSQL, Seq2SQL outperforms a state-of-the-art semantic parser, improving execution accuracy from 35.9% to 59.4% and logical form accuracy from 23.4% to 48.3%.
+1 INTRODUCTION
+Relational databases store a vast amount of today's information and provide the foundation of applications such as medical records (Hillestad et al., 2005), financial markets (Beck et al., 2000), and customer relations management (Ngai et al., 2009). However, accessing relational databases requires an understanding of query languages such as SQL, which, while powerful, is difficult to master. Natural language interfaces (NLI), a research area at the intersection of natural language processing and human-computer interactions, seeks to provide means for humans to interact with computers through the use of natural language (Androutsopoulos et al., 1995). We investigate one particular aspect of NLI applied to relational databases: translating natural language questions to SQL queries.
+Our main contributions in this work are two-fold. First, we introduce Seq2SQL, a deep neural network for translating natural language questions to corresponding SQL queries. Seq2SQL, shown in Figure 1, consists of three components that leverage the structure of SQL to prune the output space of generated queries. Moreover, it uses policy-based reinforcement learning (RL) to generate the conditions of the query, which are unsuitable for optimization using cross entropy loss due to their unordered nature. We train Seq2SQL using a mixed objective, combining cross entropy losses and RL rewards from in-the-loop query execution on a database. These characteristics allow Seq2SQL to achieve state-of-the-art results on query generation.
+Next, we release WikiSQL, a corpus of 80654 hand-annotated instances of natural language questions, SQL queries, and SQL tables extracted from 24241 HTML tables from Wikipedia. WikiSQL is an order of magnitude larger than previous semantic parsing datasets that provide logical forms along with natural language utterances. We release the tables used in WikiSQL both in raw JSON format as well as in the form of a SQL database. Along with WikiSQL, we release a query execution engine for the database used for in-the-loop query execution to learn the policy. On WikiSQL, Seq2SQL outperforms a previously state-of-the-art semantic parsing model by Dong & Lapata (2016), which obtains 35.9% execution accuracy, as well as an augmented pointer network baseline, which obtains 53.3% execution accuracy. By leveraging the inherent structure of
+1
+
+Under review as a conference paper at ICLR 2018
+
+Generated SQL Seq2SQL
+Reward Question, schema Ground truth results
+
+Database Predicted results
+
+Figure 1: Seq2SQL takes as input a question and the columns of a table. It generates the corresponding SQL query, which, during training, is executed against a database. The result of the execution is utilized as the reward to train the reinforcement learning algorithm.
+
+Table: CFLDraft Pick # CFL Team
+
+Player
+
+Position College
+
+27 Hamilton Tiger-Cats Connor Healy DB
+
+Wilfrid Laurier
+
+28 Calgary Stampeders Anthony Forgone OL
+
+York
+
+29 Ottawa Renegades L.P. Ladouceur DT
+
+California
+
+30 Toronto Argonauts Frank Hoffman DL
+
+York
+
+......
+
+... ......
+
+Question: How many CFL teams are from York College?
+SQL: SELECT COUNT CFL Team FROM CFLDraft WHERE College = "York"
+Result: 2
+
+Figure 2: An example in WikiSQL. The inputs consist of a table and a question. The outputs consist of a ground truth SQL query and the corresponding result from execution.
+SQL queries and applying policy gradient methods using reward signals from live query execution, Seq2SQL achieves state-of-the-art performance on WikiSQL, obtaining 59.4% execution accuracy.
+
+2 MODEL
+
+The WikiSQL task is to generate a SQL query from a natural language question and table schema. Our baseline model is the attentional sequence to sequence neural semantic parser proposed by Dong & Lapata (2016) that achieves state-of-the-art performance on a host of semantic parsing datasets without using hand-engineered grammar. However, the output space of the softmax in their Seq2Seq model is unnecessarily large for this task. In particular, we can limit the output space of the generated sequence to the union of the table schema, question utterance, and SQL key words. The resulting model is similar to a pointer network (Vinyals et al., 2015) with augmented inputs. We first describe the augmented pointer network model, then address its limitations in our definition of Seq2SQL, particularly with respect to generating unordered query conditions.
+
+2.1 AUGMENTED POINTER NETWORK
+
+The augmented pointer network generates the SQL query token-by-token by selecting from an input sequence. In our case, the input sequence is the concatenation of the column names, required for the selection column and the condition columns of the query, the question, required for the conditions of the query, and the limited vocabulary of the SQL language such as SELECT, COUNT etc. In the example shown in Figure 2, the column name tokens consist of "Pick", "#", "CFL", "Team" etc.; the question tokens consist of "How", "many", "CFL", "teams" etc.; the SQL tokens consist of SELECT, WHERE, COUNT, MIN, MAX etc. With this augmented input sequence, the pointer network can produce the SQL query by selecting exclusively from the input.
+
+Suppose we have a list of N table columns and a question such as in Figure 2, and want to produce the corresponding SQL query. Let xjc = [xcj,1, xjc,2, ...xjc,Tj ] denote the sequence of words in the name of the jth column, where xcj,i represents the ith word in the jth column and Tj represents the total number of words in the jth column. Similarly, let xq and xs respectively denote the sequence
+of words in the question and the set of unique words in the SQL vocabulary.
+
+We define the input sequence x as the concatenation of all the column names, the question, and the SQL vocabulary:
+
+x = [<col>; xc1; xc2; ...; xcN ; <sql>; xs; <question>; xq]
+
+(1)
+
+2
+
+Under review as a conference paper at ICLR 2018
+
+where [a; b] denotes the concatenation between the sequences a and b and we add sentinel tokens between neighbouring sequences to demarcate the boundaries.
+
+The network first encodes x using a two-layer, bidirectional Long Short-Term Memory net-
+work (Hochreiter & Schmidhuber, 1997). The input to the encoder are the embeddings corresponding to words in the input sequence. We denote the output of the encoder by henc, where htenc is the state of the encoder corresponding to the tth word in the input sequence. For brevity, we do not write
+out the LSTM equations, which are described by Hochreiter & Schmidhuber (1997). We then apply a pointer network similar to that proposed by Vinyals et al. (2015) to the input encodings henc.
+
+The decoder network uses a two layer, unidirectional LSTM. During each decoder step s, the decoder
+LSTM takes as input ys-1, the query token generated during the previous decoding step, and outputs the state gs. Next, the decoder produces a scalar attention score sp,ttr for each position t of the input sequence:
+
+sp,ttr = W ptrtanh U ptrgs + V ptrht
+
+(2)
+
+We choose the input token with the highest score as the next token of the generated SQL query, ys = argmax(sptr).
+
+2.2 SEQ2SQL
+
+While the augmented pointer network can
+
+solve the SQL generation problem, it does not leverage the structure inherent in SQL. Typically, a SQL query such as that shown in Figure 3 consists of three components. The first component is the aggregation operator, in this case COUNT, which produces a summary of the rows selected by the query. Alternatively the query may re-
+
+How many engine types did Val Musetti use?
+Entrant Constructor Chassis Engine No Driver
+
+Seq2SQL
+Aggregation classifier SELECT column pointer WHERE clause pointer decoder
+
+SELECT
+COUNT
+Engine WHERE Driver = Val Musetti
+
+quest no summary statistics, in which case
+
+an aggregation operator is not provided. The second component is the SELECT column(s), in this case Engine, which identifies the column(s) that are to be included in the returned results. The third
+
+Figure 3: The Seq2SQL model has three components, corresponding to the three parts of a SQL query (right). The input to the model are the question (top left) and the table column names (bottom left).
+
+component is the WHERE clause of the query, in this case WHERE Driver = Val Musetti,
+
+which contains conditions by which to filter the rows. Here, we keep rows in which the driver is
+
+"Val Musetti".
+
+Seq2SQL, as shown in Figure 3, has three parts that correspond to the aggregation operator, the SELECT column, and the WHERE clause. First, the network classifies an aggregation operation for the query, with the addition of a null operation that corresponds to no aggregation. Next, the network points to a column in the input table corresponding to the SELECT column. Finally, the network generates the conditions for the query using a pointer network. The first two components are supervised using cross entropy loss, whereas the third generation component is trained using policy gradient to address the unordered nature of query conditions (we explain this in the subsequent WHERE Clause section). Utilizing the structure of SQL allows Seq2SQL to further prune the output space of queries, which leads to higher performance than Seq2Seq and the augmented pointer network.
+
+Aggregation Operation. The aggregation operation depends on the question. For the example
+shown in Figure 3, the correct operator is COUNT because the question asks for "How many". To compute the aggregation operation, we first compute the scalar attention score, tinp = W inphtenc, for each tth token in the input sequence. We normalize the vector of scores inp = [1inp, 2inp, ...] to produce a distribution over the input encodings, inp = softmax inp . The input representation
+agg is the sum over the input encodings henc weighted by the normalized scores inp:
+
+agg =
+
+tinphtenc
+
+t
+
+(3)
+
+3
+
+Under review as a conference paper at ICLR 2018
+
+Let agg denote the scores over the aggregation operations such as COUNT, MIN, MAX, and the no-
+
+aggregation operation NULL. We compute agg by applying a multi-layer perceptron to the input
+
+representation agg:
+
+agg = W agg tanh (V aggagg + bagg) + cagg
+
+(4)
+
+We apply the softmax function to obtain the distribution over the set of possible aggregation operations agg = softmax (agg). We use cross entropy loss Lagg for the aggregation operation.
+SELECT Column. The selection column depends on the table columns as well as the question. Namely, for the example in Figure 3, "How many engine types" indicates that we need to retrieve the "Engine" column. SELECT column prediction is then a matching problem, solvable using a pointer: given the list of column representations and a question representation, we select the column that best matches the question.
+In order to produce the representations for the columns, we first encode each column name with a LSTM. The representation of a particular column j, ecj, is given by:
+
+hjc,t = LSTM emb xjc,t , hcj,t-1
+
+ejc = hjc,Tj
+
+(5)
+
+Here, hjc,t denotes the tth encoder state of the jth column. We take the last encoder state to be ejc, column j's representation.
+
+To construct a representation for the question, we compute another input representation sel using the same architecture as for agg (Equation 3) but with untied weights. Finally, we apply a
+multi-layer perceptron over the column representations, conditioned on the input representation, to
+compute the a score for each column j:
+
+jsel = W sel tanh V selsel + V cecj
+
+(6)
+
+We normalize the scores with a softmax function to produce a distribution over the possible SELECT columns sel = softmax sel . For the example shown in Figure 3, the distribution is over the
+columns "Entrant", "Constructor", "Chassis", "Engine", "No", and the ground truth SELECT column "Driver". We train the SELECT network using cross entropy loss Lsel.
+
+WHERE Clause. We can train the WHERE clause using a pointer decoder similar to that described in Section 2.1. However, there is a limitation in using the cross entropy loss to optimize the network: the WHERE conditions of a query can be swapped and the query yield the same result. Suppose we have the question "which men are older than 18" and the queries SELECT name FROM insurance WHERE age > 18 AND gender = "male" and SELECT name FROM insurance WHERE gender = "male" AND age > 18. Both queries obtain the correct execution result despite not having exact string match. If the former is provided as the ground truth, using cross entropy loss to supervise the generation would then wrongly penalize the latter. To address this problem, we apply reinforcement learning to learn a policy to directly optimize the expected correctness of the execution result (Equation 7).
+Instead of teacher forcing at each step of query generation, we sample from the output distribution to obtain the next token. At the end of the generation procedure, we execute the generated SQL query against the database to obtain a reward. Let y = [y1, y2, ..., yT ] denote the sequence of generated tokens in the WHERE clause. Let q (y) denote the query generated by the model and qg denote the ground truth query corresponding to the question. We define the reward R (q (y) , qg) as
+
+-2, if q (y) is not a valid SQL query  R (q (y) , qg) = -1, if q (y) is a valid SQL query and executes to an incorrect result
++1, if q (y) is a valid SQL query and executes to the correct result
+
+(7)
+
+The loss, Lwhe = -Ey[R (q (y) , qg)], is the negative expected reward over possible WHERE clauses. We derive the policy gradient for Lwhe as shown by Sutton et al. (2000) and Schulman et al. (2015).
+
+4
+
+Under review as a conference paper at ICLR 2018
+
+Lwhe = - Eypy [R (q (y) , qg)]
+
+(8)
+
+= -Eypy R (q (y) , qg)  (log py (yt; ))
+t
+
+(9)
+
+ -R (q (y) , qg)  (log py (yt; ))
+t
+
+(10)
+
+Here, py(yt) denotes the probability of choosing token yt during time step t. In equation 10, we approximate the expected gradient using a single Monte-Carlo sample y
+
+Mixed Objective Function. We train the model using gradient descent to minimize the objective function L = Lagg + Lsel + Lwhe. Consequently, the total gradient is the equally weighted sum of
+the gradients from the cross entropy loss in predicting the SELECT column, from the cross entropy
+loss in predicting the aggregation operation, and from policy learning.
+
+3 WIKISQL
+WikiSQL is a collection of questions, corresponding SQL queries, and SQL tables. A single example in WikiSQL, shown in Figure 2, contains a table, a SQL query, and the natural language question corresponding to the SQL query. Table 1 shows how WikiSQL compares to related datasets. Namely, WikiSQL is the largest hand-annotated semantic parsing dataset to date - it is an order of magnitude larger than other datasets that have logical forms, either in terms of the number of examples or the number of tables. The queries in WikiSQL span over Figure 4: Distribution of questions in WikiSQL. a large number of tables and hence presents an unique challenge: the model must be able to not only generalize to new queries, but to new table schema. Finally, WikiSQL contains realistic data extracted from the web. This is evident in the distributions of the number of columns, the lengths of questions, and the length of queries, respectively shown in Figure 5. Another indicator of the variety of questions in the dataset is the distribution of question types, shown in Figure 4.
+
+Figure 5: Distribution of table, question, query sizes in WikiSQL.
+We collect WikiSQL by crowd-sourcing on Amazon Mechanical Turk in two phases. First, a worker paraphrases a generated question for a table. We form the generated question using a template, filled using a randomly generated SQL query. We ensure the validity and complexity of the tables by keeping only those that are legitimate database tables and sufficiently large in the number of rows and columns. Next, two other workers verify that the paraphrase has the same meaning as the generated question. We discard paraphrases that do not show enough variation, as measured by the character edit distance from the generated question, as well as those both workers deemed incorrect during verification. Section A of the Appendix contains more details on the collection
+5
+
+Under review as a conference paper at ICLR 2018
+
+of WikiSQL. We make available examples of the interface used during the paraphrase phase and during the verification phase in the supplementary materials. The dataset is available for download at [MASK].
+
+The tables, their paraphrases, and SQL queries are randomly slotted into train, dev, and test splits, such that each table is present in exactly one split. In addition to the raw tables, queries, results, and natural utterances, we also release a corresponding SQL database and query execution engine.
+3.1 EVALUATION
+
+Dataset
+
+Size LF Schema
+
+WikiSQL Geoquery ATIS Freebase917 Overnight WebQuestions WikiTableQuestions
+
+80654 880 5871 917
+26098 5810 22033
+
+yes yes yes*
+yes yes no no
+
+24241 8
+141 81*
+8 2420 2108
+
+Let N denote the total number of ex-
+
+amples in the dataset, Nex the number
+
+of queries that, when executed, result in
+
+the correct result, and Nlf the number of
+
+queries has exact string match with the
+
+ground truth query used to collect the para-
+
+phrase. We evaluate using the execution
+
+accuracy metric Accex
+
+=
+
+Nex N
+
+.
+
+One
+
+downside of Accex is that it is possible
+
+to construct a SQL query that does not
+
+correspond to the question but neverthe-
+
+less obtains the same result. For exam-
+
+ple, the two queries SELECT COUNT(name)
+
+Table 1: Comparison between WikiSQL and existing datasets. The datasets are GeoQuery880 (Tang & Mooney, 2001), ATIS (Price, 1990), Free917 (Cai & Yates, 2013), Overnight (Wang et al., 2015), WebQuestions (Berant et al., 2013), and WikiTableQuestions (Pasupat & Liang, 2015). "Size" denotes the number of examples in the dataset. "LF" indicates whether it has annotated logical forms. "Schema" denotes the number of tables. ATIS is presented as a slot filling task. Each Freebase API page is counted as a separate domain.
+
+WHERE SSN = 123 and SELECT COUNT(SSN) WHERE SSN = 123 produce the same re-
+
+sult if no two people with different names share the SSN 123. Hence, we also use the logical form
+
+accuracy Acclf
+
+=
+
+Nlf N
+
+.
+
+However,
+
+as we showed in
+
+Section 2.2,
+
+Acclf
+
+incorrectly penalizes
+
+queries
+
+that achieve the correct result but do not have exact string match with the ground truth query. Due
+
+to these observations, we use both metrics to evaluate the models.
+
+4 EXPERIMENTS
+We tokenize the dataset using Stanford CoreNLP (Manning et al., 2014). We use the normalized tokens for training and revert into original gloss before outputting the query so that generated queries are executable on the database. We use fixed GloVe word embeddings (Pennington et al., 2014) and character n-gram embeddings (Hashimoto et al., 2016). Let wxg denote the GloVe embedding and wxc the character embedding for word x. Here, wxc is the mean of the embeddings of all the character ngrams in x. For words that have neither word nor character embeddings, we assign the zero vector. All networks are run for a maximum of 300 epochs with early stopping on dev split execution accuracy. We train using ADAM (Kingma & Ba, 2014) and regularize using dropout (Srivastava et al., 2014). All recurrent layers have a hidden size of 200 units and are followed by a dropout of 0.3. We implement all models using PyTorch 1. To train Seq2SQL, we first train a version in which the WHERE clause is supervised via teacher forcing (i.e. the policy is not learned from scratch) and then continue training using reinforcement learning. In order to obtain the rewards described in Section 2.2, we use the query execution engine described in Section 3.
+4.1 RESULT
+We compare results against the attentional sequence to sequence neural semantic parser proposed by Dong & Lapata (2016). This model achieves state of the art results on a variety of semantic parsing datasets, outperforming a host of non-neural semantic parsers despite not using hand-engineered grammars. To make this baseline even more competitive on our new dataset, we augment their input with the table schema such that the model can generalize to new tables. We describe this baseline in detail in Section 2 of the Appendix. Table 2 compares the performance of the three models.
+1https://pytorch.org
+
+6
+
+Under review as a conference paper at ICLR 2018
+
+Model
+Baseline (Dong & Lapata, 2016) Aug Ptr Network
+Seq2SQL (no RL) Seq2SQL
+
+Dev Acclf
+23.3% 44.1%
+48.2% 49.5%
+
+Dev Accex
+37.0% 53.8%
+58.1% 60.8%
+
+Test Acclf
+23.4% 43.3%
+47.4% 48.3%
+
+Test Accex
+35.9% 53.3%
+57.1% 59.4%
+
+Table 2: Performance on WikiSQL. Both metrics are defined in Section 3.1. For Seq2SQL (no RL), the WHERE clause is supervised via teacher forcing as opposed to reinforcement learning.
+Reducing the output space by utilizing the augmented pointer network improves upon the baseline by 17.4%. Leveraging the structure of SQL queries leads to another improvement of 3.8%, as is shown by the performance of Seq2SQL without RL compared to the augmented pointer network. Finally, training using reinforcement learning based on rewards from in-the-loop query executions on a database leads to another performance increase of 2.3%, as is shown by the performance of the full Seq2SQL model.
+
+4.2 ANALYSIS
+Limiting the output space via pointer network leads to more accurate conditions. Compared to the baseline, the augmented pointer network generates higher quality WHERE clause. For example, for "in how many districts was a successor seated on march 4, 1850?", the baseline generates the condition successor seated = seated march 4 whereas Seq2SQL generates successor seated = seated march 4 1850. Similarly, for "what's doug battaglia's pick number?", the baseline generates Player = doug whereas Seq2SQL generates Player = doug battaglia. The conditions tend to contain rare words (e.g. "1850"), but the baseline is inclined to produce common words in the training corpus, such as "march" and "4" for date, or "doug" for name. The pointer is less affected since it selects exclusively from the input.
+
+Incorporating structure reduces invalid queries. Seq2SQL without RL directly predicts selection and aggregation and reduces invalid SQL queries generated from 7.9% to
+
+Model
+
+Precision Recall F1
+
+Aug Ptr Network 66.3%
+
+Seq2SQL
+
+72.6%
+
+64.4% 65.4% 66.2% 69.2%
+
+4.8%. A large quantity of invalid queries
+
+result from column names ­ the generated Table 3: Performance on the COUNT operator.
+
+query refers to selection columns that are not present in the table. This is particularly helpful when
+
+the column name contain many tokens, such as "Miles (km)", which has 4 tokens. Introducing a
+
+classifier for the aggregation also reduces the error rate. Table 3 shows that adding the aggregation
+
+classifier improves the precision, recall, and F1 for predicting the COUNT operator. For more queries
+
+produced by the different models, please see Section 3 of the Appendix.
+
+RL generates higher quality WHERE clause that are ordered differently than ground truth. Training with policy-based RL obtains correct results in which the order of conditions is differs from the ground truth query. For example, for "in what district was the democratic candidate first elected in 1992?", the ground truth conditions are First elected = 1992 AND Party = Democratic whereas Seq2SQL generates Party = Democratic AND First elected = 1992. When Seq2SQL is correct and Seq2SQL without RL is not, the latter tends to produce an incorrect WHERE clause. For example, for the rather complex question "what is the race name of the 12th round trenton, new jersey race where a.j. foyt had the pole position?", Seq2SQL trained without RL generates WHERE rnd = 12 and track = a.j. foyt AND pole position = a.j. foyt whereas Seq2SQL trained with RL correctly generates WHERE rnd = 12 AND pole position = a.j. foyt.
+
+5 RELATED WORK
+Semantic Parsing. In semantic parsing for question answering (QA), natural language questions are parsed into logical forms that are then executed on a knowledge graph (Zelle & Mooney, 1996; Wong & Mooney, 2007; Zettlemoyer & Collins, 2005; 2007). Other works in semantic parsing focus on learning parsers without relying on annotated logical forms by leveraging conversational
+
+7
+
+Under review as a conference paper at ICLR 2018
+logs (Artzi & Zettlemoyer, 2011), demonstrations (Artzi & Zettlemoyer, 2013), distant supervision (Cai & Yates, 2013; Reddy et al., 2014), and question-answer pairs (Liang et al., 2011). Semantic parsing systems are typically constrained to a single schema and require hand-curated grammars to perform well2. Pasupat & Liang (2015) addresses the single-schema limitation by proposing the floating parser, which generalizes to unseen web tables on the WikiTableQuestions task. Our approach is similar in that it generalizes to new table schema. However, we do not require access to table content, conversion of table to an additional graph, hand-engineered features, nor handengineered grammar.
+Semantic parsing datasets. Previous semantic parsing systems were designed to answer complex and compositional questions over closed-domain, fixed-schema datasets such as GeoQuery (Tang & Mooney, 2001) and ATIS (Price, 1990). Researchers also investigated QA over subsets of largescale knowledge graphs such as DBPedia (Starc & Mladenic, 2017) and Freebase (Cai & Yates, 2013; Berant et al., 2013). The dataset "Overnight" (Wang et al., 2015) uses a similar crowdsourcing process to build a dataset of natural language question, logical form pairs, but has only 8 domains. WikiTableQuestions (Pasupat & Liang, 2015) is a collection of question and answers, also over a large quantity of tables extracted from Wikipedia. However, it does not provide logical forms whereas WikiSQL does. WikiTableQuestions focuses on the task of QA over noisy web tables, whereas WikiSQL focuses on generating SQL queries for questions over relational database tables. We intend to build a natural language interface for databases, and do not use table content apart from evaluation.
+Representation learning for sequence generation. Dong & Lapata (2016)'s attentional sequence to sequence neural semantic parser, which we use as the baseline, achieves state-of-the-art results on a variety of semantic parsing datasets despite not utilizing hand-engineered grammar. Unlike their model, Seq2SQL uses pointer based generation akin to Vinyals et al. (2015) to achieve higher performance, especially in generating queries with rare words and column names. Pointer models have also been successfully applied to tasks such as language modeling (Merity et al., 2017), summarization (Gu et al., 2016), combinatorial optimization (Bello et al., 2017), and question answering (Seo et al., 2017; Xiong et al., 2017). Another interesting neural semantic parsing model is the Neural Programmar by Neelakantan et al. (2017). Our approach is different than their work in that we do not require access to the table content during inference, which may be unavailable due to privacy concerns. We also do not hand-engineer model architecture for query execution and instead leverage existing database engines to perform efficient query execution. In contrast to both Dong & Lapata (2016) and Neelakantan et al. (2017), we train our model using policy-based RL, which helps Seq2SQL achieve state-of-the-art performance.
+Natural language interface for databases. One of the prominent works in natural language interfaces is PRECISE (Popescu et al., 2003), which translates questions to SQL queries and identifies questions that it is not confident about. Giordani & Moschitti (2012) translate questions to SQL by first generating candidate queries from a grammar then ranking them using tree kernels. Both of these approaches rely on high quality grammar and are not suitable for tasks that require generalization to new schema. Iyer et al. (2017) also translate to SQL, but with a Seq2Seq model that is further improved with human feedback. Seq2SQL outperforms Seq2Seq and uses reinforcement learning instead of human feedback during training.
+6 CONCLUSION
+We proposed Seq2SQL, a deep neural network for translating questions to SQL queries. Our model leverages the structure of SQL queries to reduce the output space of the model. To train Seq2SQL, we applied in-the-loop query execution to learn a policy for generating the conditions of the SQL query, which is unordered and unsuitable for optimization via cross entropy loss. We also introduced WikiSQL, a dataset of questions and SQL queries that is an order of magnitude larger than comparable datasets. Finally, we showed that Seq2SQL outperforms a state-of-the-art semantic parser on WikiSQL, improving execution accuracy from 35.9% to 59.4% and logical form accuracy from 23.4% to 48.3%.
+2For simplicity, we define table schema as the names of the columns in the table.
+8
+
+Under review as a conference paper at ICLR 2018
+REFERENCES
+I. Androutsopoulos, G.D. Ritchie, and P. Thanisch. Natural language interfaces to databases - an introduction. 1995.
+Yoav Artzi and Luke S. Zettlemoyer. Bootstrapping semantic parsers from conversations. In EMNLP, 2011.
+Yoav Artzi and Luke S. Zettlemoyer. Weakly supervised learning of semantic parsers for mapping instructions to actions. TACL, 1:49­62, 2013.
+Thorsten Beck, Asli Demirgu¨c¸-Kunt, and Ross Levine. A new database on the structure and development of the financial sector. The World Bank Economic Review, 14(3):597­605, 2000.
+Irwan Bello, Hieu Pham, Quoc V. Le, Mohammad Norouzi, and Samy Bengio. Neural combinatorial optimization with reinforcement learning. ICLR, 2017.
+Jonathan Berant, Andrew Chou, Roy Frostig, and Percy Liang. Semantic parsing on freebase from question-answer pairs. In EMNLP, 2013.
+Chandra Bhagavatula, Thanapon Noraset, and Doug Downey. Methods for exploring and mining tables on wikipedia. In IDEA@KDD, 2013.
+Qingqing Cai and Alexander Yates. Large-scale semantic parsing via schema matching and lexicon extension. In ACL, 2013.
+Li Dong and Mirella Lapata. Language to logical form with neural attention. ACL, 2016.
+Alessandra Giordani and Alessandro Moschitti. Translating questions to SQL queries with generative parsers discriminatively reranked. In COLING, 2012.
+Jiatao Gu, Zhengdong Lu, Hang Li, and Victor O. K. Li. Incorporating copying mechanism in sequence-to-sequence learning. ACL, 2016.
+Kazuma Hashimoto, Caiming Xiong, Yoshimasa Tsuruoka, and Richard Socher. A Joint Many-Task Model: Growing a Neural Network for Multiple NLP Tasks. arXiv, cs.CL 1611.01587, 2016.
+Richard Hillestad, James Bigelow, Anthony Bower, Federico Girosi, Robin Meili, Richard Scoville, and Roger Taylor. Can electronic medical record systems transform health care? potential health benefits, savings, and costs. Health affairs, 24(5):1103­1117, 2005.
+Sepp Hochreiter and Jurgen Schmidhuber. Long short-term memory. Neural computation, 1997.
+Srinivasan Iyer, Ioannis Konstas, Alvin Cheung, Jayant Krishnamurthy, and Luke Zettlemoyer. Learning a neural semantic parser from user feedback. In ACL, 2017.
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv, abs/1412.6980, 2014.
+Percy Liang, Michael I. Jordan, and Dan Klein. Learning dependency-based compositional semantics. Computational Linguistics, 39:389­446, 2011.
+Christopher D. Manning, Mihai Surdeanu, John Bauer, Jenny Finkel, Steven J. Bethard, and David McClosky. The Stanford CoreNLP natural language processing toolkit. In Association for Computational Linguistics (ACL) System Demonstrations, pp. 55­60, 2014.
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. ICLR, 2017.
+Arvind Neelakantan, Quoc V. Le, Mart´in Abadi, Andrew McCallum, and Dario Amodei. Learning a natural language interface with neural programmer. In ICLR, 2017.
+Eric WT Ngai, Li Xiu, and Dorothy CK Chau. Application of data mining techniques in customer relationship management: A literature review and classification. Expert systems with applications, 36(2):2592­2602, 2009.
+9
+
+Under review as a conference paper at ICLR 2018
+Panupong Pasupat and Percy Liang. Compositional semantic parsing on semi-structured tables. In ACL, 2015.
+Jeffrey Pennington, Richard Socher, and Christopher D. Manning. Glove: Global vectors for word representation. In EMNLP, 2014.
+Ana-Maria Popescu, Oren Etzioni, and Henry Kautz. Towards a theory of natural language interfaces to databases. In Proceedings of the 8th International Conference on Intelligent User Interfaces, pp. 149­157. ACM, 2003.
+Patti J. Price. Evaluation of spoken language systems: The ATIS domain. 1990. Siva Reddy, Mirella Lapata, and Mark Steedman. Large-scale semantic parsing without question-
+answer pairs. TACL, 2:377­392, 2014. John Schulman, Nicolas Heess, Theophane Weber, and Pieter Abbeel. Gradient estimation using
+stochastic computation graphs. In NIPS, 2015. Min Joon Seo, Aniruddha Kembhavi, Ali Farhadi, and Hannaneh Hajishirzi. Bidirectional attention
+flow for machine comprehension. ICLR, 2017. Nitish Srivastava, Geoffrey E. Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov.
+Dropout: a simple way to prevent neural networks from overfitting. Journal of Machine Learning Research, 15:1929­1958, 2014. Janez Starc and Dunja Mladenic. Joint learning of ontology and semantic parser from text. Intelligent Data Analysis, 21:19­38, 2017. Richard S Sutton, David A McAllester, Satinder P Singh, and Yishay Mansour. Policy gradient methods for reinforcement learning with function approximation. In Advances in neural information processing systems, pp. 1057­1063, 2000. Lappoon R. Tang and Raymond J. Mooney. Using multiple clause constructors in inductive logic programming for semantic parsing. In ECML, 2001. Oriol Vinyals, Meire Fortunato, and Navdeep Jaitly. Pointer networks. In NIPS, 2015. Yushi Wang, Jonathan Berant, and Percy Liang. Building a semantic parser overnight. In ACL, 2015. Yuk Wah Wong and Raymond J. Mooney. Learning synchronous grammars for semantic parsing with lambda calculus. In ACL, 2007. Caiming Xiong, Victor Zhong, and Richard Socher. Dynamic coattention networks for question answering. ICLR, 2017. John M. Zelle and Raymond J. Mooney. Learning to parse database queries using inductive logic programming. In AAAI/IAAI, Vol. 2, 1996. Luke S. Zettlemoyer and Michael Collins. Learning to map sentences to logical form: Structured classification with probabilistic categorial grammars. In Uncertainty in Artificial Intelligence, 2005. Luke S. Zettlemoyer and Michael Collins. Online learning of relaxed ccg grammars for parsing to logical form. In EMNLP-CoNLL, 2007.
+10
+
+Under review as a conference paper at ICLR 2018
+A COLLECTION OF WIKISQL
+WikiSQL is collected in a paraphrase phases as well as a verification phase. In the paraphrase phase, we use tables extracted from Wikipedia by Bhagavatula et al. (2013) and remove small tables according to the following criteria:
+· the number of cells in each row is not the same · the content in a cell exceed 50 characters · a header cell is empty · the table has less than 5 rows or 5 columns · over 40% of the cells of a row contain identical content
+We also remove the last row of a table because a large quantity of HTML tables tend to have summary statistics in the last row, and hence the last row does not adhere to the table schema defined by the header row. For each of the table that passes the above criteria, we randomly generate 6 SQL queries according to the following rules:
+· the query follows the format SELECT agg op agg col from table where cond1 col cond1 op cond1 AND cond2 col cond2 op cond2 ...
+· the aggregation operator agg op can be empty or COUNT. In the event that the aggregation column agg col is numeric, agg op can additionally be one of MAX and MIN
+· the condition operator cond op is =. In the event that the corresponding condition column cond col is numeric, cond op can additionally be one of > and <
+· the condition cond can be any possible value present in the table under the corresponding cond col. In the event that cond col is numerical, cond can be any numerical value sampled from the range from the minimum value in the column to the maximum value in the column.
+We only generate queries that produce a non-empty result set. To enforce succinct queries, we remove conditions from the generated queries if doing so does not change the execution result. For each query, we generate a crude question using a template and obtain a human paraphrase via crowdsourcing on Amazon Mechanical Turk. In each Amazon Mechanical Turk HIT, a worker is shown the first 4 rows of the table as well as its generated questions and asked to paraphrase each question. After obtaining natural language utterances from the paraphrase phase, we give each questionparaphrase pair to two other workers in the verification phase to verify that the paraphrase and the original question contain the same meaning. We then filter the initial collection of paraphrases using the following criteria:
+· the paraphrase must be deemed correct by at least one worker during the verification phrase · the paraphrase must be sufficiently different from the generated question, with a character-
+level edit distance greater than 10
+B ATTENTIONAL SEQ2SEQ NEURAL SEMANTIC PARSER BASELINE
+We employ the attentional sequence to sequence model for the baseline. This model by Dong & Lapata (2016) achieves state of the art results on a variety of semantic parsing datasets despite not using hand-engineered grammar. We implement a variant using OpenNMT and a global attention encoder-decoder architecture (with input feeding) described by Luong et al.
+11
+
+Under review as a conference paper at ICLR 2018
+
+We use the same two-layer, bidirectional, stacked LSTM encoder as described previously. The decoder is almost identical to that described by Equation 2 of the paper, with the sole difference coming from input feeding.
+
+gs = LSTM emb (ys-1) ; sd-ec1 , gs-1
+
+(11)
+
+where sdec is the attentional context over the input sequence during the sth decoding step, computed as
+
+sd,etc = hdsec W dechtenc
+
+sdec = softmax sdec
+
+(12)
+
+s =
+
+s,thetnc
+
+t
+
+(13)
+
+To produce the output token during the sth decoder step, the concatenation of the decoder state and the attention context is given to a final linear layer to produce a distribution dec over words in the
+target vocabulary
+
+dec = softmax U dec[hsdec; dsec]
+
+(14)
+
+During training, teacher forcing is used. During inference, a beam size of 5 is used and generated unknown words are replaced by the input words with the highest attention weight.
+
+C PREDICTIONS BY SEQ2SQL
+
+Q when connecticut & villanova are the regular season winner how many tournament venues (city) are there? P SELECT COUNT tournament player (city) WHERE regular season winner city ) = connecticut & villanova S' SELECT COUNT tournament venue (city) WHERE tournament winner = connecticut & villanova S SELECT COUNT tournament venue (city) WHERE regular season winner = connecticut & villanova G SELECT COUNT tournament venue (city) WHERE regular season winner = connecticut & villanova
+Q what are the aggregate scores of those races where the first leg results are 0-1? P SELECT aggregate WHERE 1st . = 0-1 S' SELECT COUNT agg. score WHERE 1st leg = 0-1 S SELECT agg. score WHERE 1st leg = 0-1 G SELECT agg. score WHERE 1st leg = 0-1
+Q what is the race name of the 12th round trenton, new jersey race where a.j. foyt had the pole position? P SELECT race name WHERE location = 12th AND round position = a.j. foyt, new jersey AND S' SELECT race name WHERE rnd = 12 AND track = a.j. foyt AND pole position = a.j. foyt S SELECT race name WHERE rnd = 12 AND pole position = a.j. foyt G SELECT race name WHERE rnd = 12 AND pole position = a.j. foyt
+Q what city is on 89.9? P SELECT city WHERE frequency = 89.9 S' SELECT city of license WHERE frequency = 89.9 S SELECT city of license WHERE frequency = 89.9 G SELECT city of license WHERE frequency = 89.9
+Q how many voters from the bronx voted for the socialist party? P SELECT MIN % party = socialist S' SELECT COUNT the bronx where the bronx = socialist S SELECT COUNT the bronx WHERE the bronx = socialist G SELECT the bronx WHERE party = socialist
+Q in what year did a plymouth vehicle win on february 9 ? P SELECT MIN year (km) WHERE date = february 9 AND race time = plymouth 9 S' SELECT year (km) WHERE date = plymouth 9 AND race time = february 9 S SELECT year (km) WHERE date = plymouth 9 AND race time= february 9 G SELECT year (km) WHERE manufacturer = plymouth AND date = february 9
+Table 4: Examples predictions by the models on the dev split. Q denotes the natural language question and G denotes the corresponding ground truth query. P, S', and S denote, respectively, the queries produced by the Augmented Pointer Network, Seq2SQL without reinforcement learning, Seq2SQL. We omit the FROM table part of the query for succinctness.
+
+12
+
+
