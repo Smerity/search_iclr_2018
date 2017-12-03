@@ -18,12 +18,8 @@ print('Loaded {} papers'.format(len(papers)))
 from reviewer import ratings, sorted_papers
 
 @app.route("/")
-def hello():
-    return flask.render_template('base.html')
-
-@app.route("/top/")
-def top():
-    query = '1337 papers'
+def index():
+    query = 'Top 100 papers'
     found = []
     for paperid, paper in papers:
         if paperid in sorted_papers[-100:]:
