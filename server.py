@@ -2,8 +2,8 @@ import flask
 app = flask.Flask(__name__)
 
 import glob
-
 import json
+
 data = json.load(open('notes.json'))
 keys = {}
 for entry in data['notes']:
@@ -15,9 +15,24 @@ for paper in glob.glob('text/papers/*'):
 papers = sorted(papers)
 print('Loaded {} papers'.format(len(papers)))
 
+from reviewer import ratings, sorted_papers
+
 @app.route("/")
 def hello():
     return flask.render_template('base.html')
+
+@app.route("/top/")
+def top():
+    query = '1337 papers'
+    found = []
+    for paperid, paper in papers:
+        if paperid in sorted_papers[-100:]:
+            if paperid in keys:
+                rank = sorted_papers.index(paperid)
+                d = dict(id=paperid, title=keys[paperid]['content']['title'], data=keys[paperid], rating=ratings[paperid], rank=rank, pct=int(100 * rank / len(sorted_papers)))
+                found.append(d)
+    found = sorted(found, key=lambda x: x['rank'], reverse=True)
+    return flask.render_template('base.html', query=query, results=found, total_papers=len(sorted_papers))
 
 @app.route("/search/")
 def search(query=None):
@@ -26,6 +41,8 @@ def search(query=None):
     for paperid, paper in papers:
         if query.lower() in paper.lower():
             if paperid in keys:
-                d = dict(id=paperid, title=keys[paperid]['content']['title'], data=keys[paperid])
+                rank = sorted_papers.index(paperid)
+                d = dict(id=paperid, title=keys[paperid]['content']['title'], data=keys[paperid], rating=ratings[paperid], rank=rank, pct=int(100 * rank / len(sorted_papers)))
                 found.append(d)
-    return flask.render_template('base.html', query=query, results=found)
+    found = sorted(found, key=lambda x: x['rank'], reverse=True)
+    return flask.render_template('base.html', query=query, results=found, total_papers=len(sorted_papers))
